@@ -53,10 +53,29 @@ inline int Expand5(int v) { return (v << 3) | (v >> 2); }
 // Returns the squared error; fills codes[i] for the subblock's pixels and *table_out.
 int SolveSubblock(const Texel t[16], int flip, int s, const int base[3], bool punch_individual, int codes[16],
                   int* table_out) {
+    // Only the tables whose largest modifier matches the subblock's colour range are worth trying.
+    int lo[3] = {255, 255, 255}, hi[3] = {0, 0, 0};
+    for (int i = 0; i < 16; i++) {
+        if (!InSubblock(i, flip, s) || t[i].transparent) continue;
+        for (int c = 0; c < 3; c++) {
+            if (t[i].rgb[c] < lo[c]) lo[c] = t[i].rgb[c];
+            if (t[i].rgb[c] > hi[c]) hi[c] = t[i].rgb[c];
+        }
+    }
+    int range = 0;
+    for (int c = 0; c < 3; c++) range = hi[c] - lo[c] > range ? hi[c] - lo[c] : range;
+    int first = 7;
+    for (int k = 0; k < 8; k++)
+        if (kModifiers[k][3] * 2 >= range) {
+            first = k;
+            break;
+        }
+    const int from = first > 0 ? first - 1 : 0, to = first < 7 ? first + 1 : 7;
+
     int best_err = std::numeric_limits<int>::max();
     int best_table = 0;
     int best_codes[16] = {};
-    for (int table = 0; table < 8; table++) {
+    for (int table = from; table <= to; table++) {
         int err = 0;
         int trial[16] = {};
         for (int i = 0; i < 16; i++) {
@@ -113,8 +132,10 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
     uint64_t best_word = 0;
     int best_err = std::numeric_limits<int>::max();
 
-    for (int flip = 0; flip < 2; flip++)
-        for (int diff = 0; diff < 2; diff++) {
+    for (int flip = 0; flip < 2; flip++) {
+        bool diff_done = false;
+        for (int diff = 1; diff >= 0; diff--) {
+            if (diff_done) break;  // differential is good enough when it fits: skip individual mode
             if (diff && any_transparent) continue;  // differential blocks cannot signal transparency
 
             int base_code[2][3];     // stored base values (4-bit for individual, 5-bit for differential)
@@ -148,6 +169,7 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
             for (int s = 0; s < 2; s++) {
                 err += SolveSubblock(t, flip, s, base_rgb[s], punch && !diff, codes, &tables[s]);
             }
+            if (diff) diff_done = true;
             if (err >= best_err) continue;
             best_err = err;
 
@@ -178,6 +200,7 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
             }
             best_word = v;
         }
+    }
     return best_word;
 }
 

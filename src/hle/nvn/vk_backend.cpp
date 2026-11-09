@@ -1697,6 +1697,10 @@ private:
     }
     bool bc_native_ = false;
     bool etc_native_ = false;
+    // Converted ETC levels, keyed by the source blocks: the game uploads the same textures many times.
+    std::unordered_map<uint64_t, std::vector<uint8_t>> etc_cache_;
+    size_t etc_cache_bytes_ = 0;
+    static constexpr size_t kEtcCacheLimit = size_t(96) << 20;
 
     VkFormat PickFormat(int nvn_format, VkFormatFeatureFlags* features) {
         auto cached = format_cache_.find(nvn_format);
@@ -1952,12 +1956,27 @@ private:
                         r.bufferOffset = off;  // tightly packed texels: row length and image height left at 0
                     } else {
                         // BC -> RGBA8 -> ETC2 blocks; rows of blocks are declared through the buffer row length.
-                        std::vector<uint8_t> rgba(size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4);
-                        DecodeBcBlocks(rgba.data(), blocks.data(), l.width, l.height, l.depth, size_t(l.row_bytes),
-                                       l.rows, t.tex.format);
-                        VkDeviceSize off = StreamAlloc(ConvertedBytes(l, tgt), 16);
-                        EncodeEtc1(stream_ptr_ + off, rgba.data(), l.width, l.height, l.depth,
-                                   tgt == BcTarget::EtcRgb8A1);
+                        const size_t out_n = ConvertedBytes(l, tgt);
+                        const uint64_t key = Fnv(blocks.data(), blocks.size(), Fnv(&tgt, sizeof(tgt))) ^
+                                             (uint64_t(l.width) << 40) ^ (uint64_t(l.height) << 20) ^
+                                             uint64_t(l.depth);
+                        VkDeviceSize off = StreamAlloc(out_n, 16);
+                        const auto hit = etc_cache_.find(key);
+                        if (hit != etc_cache_.end() && hit->second.size() == out_n) {
+                            memcpy(stream_ptr_ + off, hit->second.data(), out_n);
+                        } else {
+                            std::vector<uint8_t> rgba(size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4);
+                            DecodeBcBlocks(rgba.data(), blocks.data(), l.width, l.height, l.depth,
+                                           size_t(l.row_bytes), l.rows, t.tex.format);
+                            EncodeEtc1(stream_ptr_ + off, rgba.data(), l.width, l.height, l.depth,
+                                       tgt == BcTarget::EtcRgb8A1);
+                            if (etc_cache_bytes_ + out_n > kEtcCacheLimit) {
+                                etc_cache_.clear();
+                                etc_cache_bytes_ = 0;
+                            }
+                            etc_cache_[key].assign(stream_ptr_ + off, stream_ptr_ + off + out_n);
+                            etc_cache_bytes_ += out_n;
+                        }
                         r.bufferOffset = off;
                         r.bufferRowLength = uint32_t(((l.width + 3) / 4) * 4);
                         r.bufferImageHeight = uint32_t(((l.height + 3) / 4) * 4);
