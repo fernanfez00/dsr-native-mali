@@ -1668,9 +1668,12 @@ private:
     //  - BC1 (65, 69) -> ETC2 RGB8, BC1 with alpha (66, 70) -> ETC2 RGB8A1, when the GPU has ETC2;
     //  - any other BC format we can decode (BC1-BC5) -> RGBA8.
     enum class BcTarget { None, Rgba8, EtcRgb, EtcRgb8A1 };
+    // Diagnostic switch: with false, BC1 goes to RGBA8 even when ETC2 exists (used to tell apart
+    // encoder/bit-layout problems from problems in the rest of the texture path).
+    static constexpr bool kEtcConversion = false;
     BcTarget TargetFor(int nvn) const {
         if (bc_native_) return BcTarget::None;
-        if (etc_native_ && IsEtcEncodable(nvn))
+        if (kEtcConversion && etc_native_ && IsEtcEncodable(nvn))
             return EtcHasPunchThrough(nvn) ? BcTarget::EtcRgb8A1 : BcTarget::EtcRgb;
         if (IsBcDecodable(nvn)) return BcTarget::Rgba8;
         return BcTarget::None;
