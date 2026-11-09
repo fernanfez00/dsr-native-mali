@@ -357,7 +357,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             LOGW(kTag, "settings: cannot create %s (%s): using defaults", path.c_str(), strerror(errno));
         }
     } else {
-        bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false;
+        bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false,
+               have_render_scale = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[64];
@@ -387,6 +388,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 if (known) cfg->language = value;
                 else LOGW(kTag, "settings: unknown language '%s' (try es or en-US): using %s", value, cfg->language.c_str());
                 have_language = true;
+            } else if (!strcmp(key, "render_scale")) {
+                const float rs = float(atof(value));
+                cfg->render_scale = rs >= 0.5f && rs <= 1.0f ? rs : 1.0f;
+                have_render_scale = true;
             } else if (!strcmp(key, "docked")) {
                 cfg->docked = v != 0;
                 have_docked = true;
@@ -420,6 +425,14 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fclose(w);
                 cfg->language = "es";
                 LOGI(kTag, "settings: added language to %s", path.c_str());
+            }
+        if (!have_render_scale)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n# render_scale: 0.5 - 1.0. Draws the game's 1280x720 pictures smaller and enlarges them at the\n"
+                      "# end (less GPU work; experimental). 1.0 = as the game draws them (default)\n"
+                      "render_scale = 1.0\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added render_scale to %s", path.c_str());
             }
         if (!have_docked)
             if (FILE* w = fopen(path.c_str(), "a")) {
