@@ -1670,7 +1670,7 @@ private:
     enum class BcTarget { None, Rgba8, EtcRgb, EtcRgb8A1 };
     // Diagnostic switch: with false, BC1 goes to RGBA8 even when ETC2 exists (used to tell apart
     // encoder/bit-layout problems from problems in the rest of the texture path).
-    static constexpr bool kEtcConversion = false;
+    static constexpr bool kEtcConversion = true;
     BcTarget TargetFor(int nvn) const {
         if (bc_native_) return BcTarget::None;
         if (kEtcConversion && etc_native_ && IsEtcEncodable(nvn))

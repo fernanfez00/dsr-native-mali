@@ -181,7 +181,7 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
                 v |= uint64_t((base_code[1][1] - base_code[0][1]) & 7) << 48;
                 v |= uint64_t(base_code[0][2]) << 43;
                 v |= uint64_t((base_code[1][2] - base_code[0][2]) & 7) << 40;
-                v |= uint64_t(1) << 39;
+                v |= uint64_t(1) << 33;
             } else {
                 v |= uint64_t(base_code[0][0]) << 60;
                 v |= uint64_t(base_code[1][0]) << 56;
@@ -190,9 +190,9 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
                 v |= uint64_t(base_code[0][2]) << 44;
                 v |= uint64_t(base_code[1][2]) << 40;
             }
-            if (flip) v |= uint64_t(1) << 38;
-            v |= uint64_t(tables[0]) << 35;
-            v |= uint64_t(tables[1]) << 32;
+            if (flip) v |= uint64_t(1) << 32;
+            v |= uint64_t(tables[0]) << 37;
+            v |= uint64_t(tables[1]) << 34;
             for (int i = 0; i < 16; i++) {
                 const uint64_t lsb = uint64_t(codes[i] & 1), msb = uint64_t(codes[i] >> 1);
                 v |= lsb << i;
@@ -236,8 +236,8 @@ void EncodeEtc1(uint8_t* out, const uint8_t* rgba, int width, int height, int de
 void DecodeEtc1Block(const uint8_t* block, bool punch_through, uint8_t out[16][4]) {
     uint64_t v = 0;
     for (int k = 0; k < 8; k++) v = (v << 8) | block[k];
-    const bool diff = (v >> 39) & 1, flip = (v >> 38) & 1;
-    const int tables[2] = {int((v >> 35) & 7), int((v >> 32) & 7)};
+    const bool diff = (v >> 33) & 1, flip = (v >> 32) & 1;
+    const int tables[2] = {int((v >> 37) & 7), int((v >> 34) & 7)};
     int base[2][3];
     if (diff) {
         const int b0[3] = {int((v >> 59) & 31), int((v >> 51) & 31), int((v >> 43) & 31)};
