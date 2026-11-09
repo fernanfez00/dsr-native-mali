@@ -45,6 +45,7 @@
 #include "runtime/runtime.h"
 #include "hle/nvn/layout.h"
 #include "hle/nvn/bc_decode.h"
+#include "hle/nvn/etc_encode.h"
 #include "hle/os/os.h"
 #include "hle/nvn/shader/translator.h"
 #include "hle/nvn/state.h"
@@ -1243,7 +1244,11 @@ private:
         VkPhysicalDeviceFeatures en{};
         en.textureCompressionBC = have.features.textureCompressionBC;
         bc_native_ = have.features.textureCompressionBC;
+        etc_native_ = have.features.textureCompressionETC2;
+        en.textureCompressionETC2 = have.features.textureCompressionETC2;
         LOGI(kTag, "BC textures: %s", bc_native_ ? "used by the GPU" : "decoded on the CPU to RGBA8");
+        LOGI(kTag, "compression support: ETC2 %d, ASTC LDR %d", int(have.features.textureCompressionETC2),
+             int(have.features.textureCompressionASTC_LDR));
         en.samplerAnisotropy = have.features.samplerAnisotropy;
         en.shaderImageGatherExtended = have.features.shaderImageGatherExtended;
         en.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -1659,15 +1664,39 @@ private:
         return &img;
     }
 
-    // BC textures are decoded on the CPU into RGBA8 when the GPU has no BC support (see bc_decode.h).
-    bool DecodesBc(int nvn) const { return !bc_native_ && IsBcDecodable(nvn); }
+    // BC textures on a GPU without BC support are converted on the CPU when uploaded:
+    //  - BC1 (65, 69) -> ETC2 RGB8, BC1 with alpha (66, 70) -> ETC2 RGB8A1, when the GPU has ETC2;
+    //  - any other BC format we can decode (BC1-BC5) -> RGBA8.
+    enum class BcTarget { None, Rgba8, EtcRgb, EtcRgb8A1 };
+    BcTarget TargetFor(int nvn) const {
+        if (bc_native_) return BcTarget::None;
+        if (etc_native_ && IsEtcEncodable(nvn))
+            return EtcHasPunchThrough(nvn) ? BcTarget::EtcRgb8A1 : BcTarget::EtcRgb;
+        if (IsBcDecodable(nvn)) return BcTarget::Rgba8;
+        return BcTarget::None;
+    }
+    bool DecodesBc(int nvn) const { return TargetFor(nvn) != BcTarget::None; }
+    // Bytes the converted level occupies in the upload stream.
+    static size_t ConvertedBytes(const LevelLayout& l, BcTarget tgt) {
+        if (tgt == BcTarget::Rgba8)
+            return size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4;
+        return EtcLevelBytes(l.width, l.height, l.depth);
+    }
     std::vector<VkFormat> Candidates(int nvn) const {
-        if (DecodesBc(nvn))
-            return {nvn == 69 || nvn == 70 || nvn == 71 || nvn == 72 ? VK_FORMAT_R8G8B8A8_SRGB
-                                                                     : VK_FORMAT_R8G8B8A8_UNORM};
-        return ImageCandidates(nvn);
+        const bool srgb = nvn == 69 || nvn == 70 || nvn == 71 || nvn == 72;
+        switch (TargetFor(nvn)) {
+            case BcTarget::Rgba8:
+                return {srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM};
+            case BcTarget::EtcRgb:
+                return {srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK};
+            case BcTarget::EtcRgb8A1:
+                return {srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK};
+            default:
+                return ImageCandidates(nvn);
+        }
     }
     bool bc_native_ = false;
+    bool etc_native_ = false;
 
     VkFormat PickFormat(int nvn_format, VkFormatFeatureFlags* features) {
         auto cached = format_cache_.find(nvn_format);
@@ -1886,13 +1915,13 @@ private:
             return;
         }
         const FormatInfo fi = GetFormatInfo(t.tex.format);
-        const bool decode = DecodesBc(t.tex.format);
+        const BcTarget tgt = TargetFor(t.tex.format);
+        const bool decode = tgt != BcTarget::None;
         size_t needed = 0;
         for (int layer = 0; layer < img.layers; layer++)
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv)];
-                needed += (decode ? size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4
-                                  : size_t(l.row_bytes) * l.rows * l.depth) + 16;
+                needed += (decode ? ConvertedBytes(l, tgt) : size_t(l.row_bytes) * l.rows * l.depth) + 16;
             }
         if (needed > kStreamSize - kMaxUniformRange) {
             LogOnce("upload-size", "texture too large to upload in one go (%zu bytes)", needed);
@@ -1916,11 +1945,23 @@ private:
                         memcpy(blocks.data(), src, n);
                     else
                         DeswizzleLevel(blocks.data(), src, l);
-                    const size_t out_n = size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4;
-                    VkDeviceSize off = StreamAlloc(out_n, 16);
-                    DecodeBcBlocks(stream_ptr_ + off, blocks.data(), l.width, l.height, l.depth, size_t(l.row_bytes),
-                                   l.rows, t.tex.format);
-                    r.bufferOffset = off;  // tightly packed texels: row length and image height left at 0
+                    if (tgt == BcTarget::Rgba8) {
+                        VkDeviceSize off = StreamAlloc(ConvertedBytes(l, tgt), 16);
+                        DecodeBcBlocks(stream_ptr_ + off, blocks.data(), l.width, l.height, l.depth,
+                                       size_t(l.row_bytes), l.rows, t.tex.format);
+                        r.bufferOffset = off;  // tightly packed texels: row length and image height left at 0
+                    } else {
+                        // BC -> RGBA8 -> ETC2 blocks; rows of blocks are declared through the buffer row length.
+                        std::vector<uint8_t> rgba(size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4);
+                        DecodeBcBlocks(rgba.data(), blocks.data(), l.width, l.height, l.depth, size_t(l.row_bytes),
+                                       l.rows, t.tex.format);
+                        VkDeviceSize off = StreamAlloc(ConvertedBytes(l, tgt), 16);
+                        EncodeEtc1(stream_ptr_ + off, rgba.data(), l.width, l.height, l.depth,
+                                   tgt == BcTarget::EtcRgb8A1);
+                        r.bufferOffset = off;
+                        r.bufferRowLength = uint32_t(((l.width + 3) / 4) * 4);
+                        r.bufferImageHeight = uint32_t(((l.height + 3) / 4) * 4);
+                    }
                 } else {
                     VkDeviceSize off = StreamAlloc(n, 16);
                     if (layout.linear)
@@ -2889,8 +2930,11 @@ private:
         }
         Begin();
         EndRendering();
-        const bool decode = DecodesBc(img->nvn_format);
-        const size_t out_size = decode ? size_t(w) * size_t(h) * size_t(d) * 4 : row * rows * size_t(d);
+        const BcTarget tgt = TargetFor(img->nvn_format);
+        const bool decode = tgt != BcTarget::None;
+        const size_t out_size = !decode                    ? row * rows * size_t(d)
+                                : tgt == BcTarget::Rgba8  ? size_t(w) * size_t(h) * size_t(d) * 4
+                                                           : EtcLevelBytes(w, h, d);
         if (StreamRemaining() < out_size + 1024) Flush();
         VkDeviceSize off = StreamAlloc(out_size, 16);
         const uint8_t* src = reinterpret_cast<const uint8_t*>(c.src_addr);
@@ -2900,7 +2944,13 @@ private:
                 for (size_t y = 0; y < rows; y++)
                     memcpy(blocks.data() + (size_t(z) * rows + y) * row, src + size_t(z) * image_stride + y * stride,
                            row);
-            DecodeBcBlocks(stream_ptr_ + off, blocks.data(), w, h, d, row, int(rows), img->nvn_format);
+            if (tgt == BcTarget::Rgba8) {
+                DecodeBcBlocks(stream_ptr_ + off, blocks.data(), w, h, d, row, int(rows), img->nvn_format);
+            } else {
+                std::vector<uint8_t> rgba(size_t(w) * size_t(h) * size_t(d) * 4);
+                DecodeBcBlocks(rgba.data(), blocks.data(), w, h, d, row, int(rows), img->nvn_format);
+                EncodeEtc1(stream_ptr_ + off, rgba.data(), w, h, d, tgt == BcTarget::EtcRgb8A1);
+            }
         } else {
             for (int z = 0; z < d; z++)
                 for (size_t y = 0; y < rows; y++)
@@ -2923,6 +2973,10 @@ private:
         region.imageOffset = {r.x, r.y, img->type == VK_IMAGE_TYPE_3D ? r.z : 0};
         region.imageExtent = {uint32_t(w), uint32_t(h), uint32_t(img->type == VK_IMAGE_TYPE_3D ? d : 1)};
         if (img->type != VK_IMAGE_TYPE_3D) region.imageSubresource.baseArrayLayer = uint32_t(std::max(0, r.z));
+        if (decode && tgt != BcTarget::Rgba8) {  // converted ETC blocks: rows are whole blocks
+            region.bufferRowLength = uint32_t(((w + 3) / 4) * 4);
+            region.bufferImageHeight = uint32_t(((h + 3) / 4) * 4);
+        }
         Transition(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         Rec([region, buf = stream_, image = img->image](VkCommandBuffer cb) {
             vkCmdCopyBufferToImage(cb, buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
