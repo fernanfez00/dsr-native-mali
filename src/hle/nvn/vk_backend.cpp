@@ -328,6 +328,9 @@ struct Image {
     VkFormatFeatureFlags features = 0;
     bool written = false;  // has the GPU (or an upload) put anything in it
     bool uploaded = false;
+    // render_scale: a game target (1280x720) held at a smaller size; the present blit enlarges it.
+    bool render_scaled = false;
+    int game_width = 0, game_height = 0;
     // Contents came from game memory (not rendered by the GPU): re-uploaded when the game rewrites the
     // memory. Checked via a sparse hash: after an unchanged check the next one comes twice as many command
     // lists later (up to kMaxCheckInterval); a change, or an explicit MarkTextureDirty, resets that.
@@ -457,6 +460,10 @@ public:
                     Image* src = GetImage(c.copy->src, true);  // a CPU-written source (video frames) is refreshed
                     Image* dst = GetImage(c.copy->dst, false);
                     if (!src || !dst || src == dst) break;
+                    if (src->render_scaled || dst->render_scaled) {
+                        LogOnce("copy-scaled", "copy to or from a scaled render target skipped (render_scale)");
+                        break;
+                    }
                     Begin();
                     EndRendering();
                     CopyImage(*src, c.copy->src_region, *dst, c.copy->dst_region, c.flags);
@@ -1246,6 +1253,9 @@ private:
         bc_native_ = have.features.textureCompressionBC;
         etc_native_ = have.features.textureCompressionETC2;
         en.textureCompressionETC2 = have.features.textureCompressionETC2;
+        render_scale_ = std::clamp(dsr::GetRuntime().config.render_scale, 0.5f, 1.0f);
+        if (render_scale_ < 1.0f) LOGI(kTag, "render_scale %.2f: 1280x720 targets are rendered at %dx%d", render_scale_,
+                                       int(std::lround(1280 * render_scale_)), int(std::lround(720 * render_scale_)));
         LOGI(kTag, "BC textures: %s", bc_native_ ? "used by the GPU" : "decoded on the CPU to RGBA8");
         LOGI(kTag, "compression support: ETC2 %d, ASTC LDR %d", int(have.features.textureCompressionETC2),
              int(have.features.textureCompressionASTC_LDR));
@@ -1653,6 +1663,9 @@ private:
         auto it = images_.find(t.addr);
         if (it == images_.end()) return nullptr;
         Image& img = it->second;
+        if (img.render_scaled && img.nvn_format == t.tex.format && t.tex.width == img.game_width &&
+            t.tex.height == img.game_height)
+            return &img;
         if (img.nvn_format != t.tex.format || img.width != t.tex.width || img.height != t.tex.height) {
             const uint64_t key = t.addr ^ (uint64_t(t.tex.format) << 48) ^ (uint64_t(img.nvn_format) << 56);
             if (mismatch_logged_.size() < 24 && mismatch_logged_.insert(key).second)
@@ -1700,6 +1713,7 @@ private:
     }
     bool bc_native_ = false;
     bool etc_native_ = false;
+    float render_scale_ = 1.0f;  // settings render_scale: 1.0 = the game's own size (default)
     // Converted ETC levels, keyed by the source blocks: the game uploads the same textures many times.
     std::unordered_map<uint64_t, std::vector<uint8_t>> etc_cache_;
     size_t etc_cache_bytes_ = 0;
@@ -1733,11 +1747,33 @@ private:
 
     // Image for a texture, created on first use. For sampling (`upload`), a texture the GPU never wrote is
     // filled from game memory (deswizzled) the first time.
+    // render_scale: a 1280x720 render target that the GPU writes (never uploaded from game memory) is created
+    // at the scaled size, once. Other images are left alone.
+    Image* ScaledTarget(const TexRef& t, Image* img) {
+        if (render_scale_ >= 1.0f || !img || img->render_scaled) return img;
+        if (img->width != 1280 || img->height != 720 || img->uploaded || img->cpu_source || img->levels != 1 ||
+            img->layers != 1 || img->depth != 1 || img->type != VK_IMAGE_TYPE_2D)
+            return img;
+        TexRef s = t;
+        s.tex.width = std::max(1, int(std::lround(1280 * render_scale_)));
+        s.tex.height = std::max(1, int(std::lround(720 * render_scale_)));
+        Image* n = CreateImage(s);
+        if (!n) return img;
+        n->render_scaled = true;
+        n->game_width = 1280;
+        n->game_height = 720;
+        static int logged = 0;
+        if (logged++ < 8) LOGI(kTag, "render target %llx held at %dx%d (game 1280x720)", (unsigned long long)t.addr,
+                               n->width, n->height);
+        return n;
+    }
+
     Image* GetImage(const TexRef& t, bool upload) {
         if (!t.valid || t.tex.width <= 0 || t.tex.height <= 0) return nullptr;
         Image* img = FindImage(t);
         if (!img) img = CreateImage(t);
         if (!img) return nullptr;
+        if (img->render_scaled) return img;  // rendered by the GPU at the scaled size: nothing to upload
         if (upload && TakeFrame(*img, t)) return img;
         if (upload && !img->written && !img->uploaded) {
             Upload(*img, t);
@@ -2869,6 +2905,10 @@ private:
         if (!c.copy) return;
         const CopyInfo& ci = *c.copy;
         Image* img = GetImage(ci.src, false);
+        if (img && img->render_scaled) {
+            LogOnce("t2b-scaled", "texture-to-buffer read of a scaled render target skipped (render_scale)");
+            return;
+        }
         if (!img) {
             LogOnce("t2b-noimg", "texture-to-buffer copy from a texture never rendered or uploaded: skipped");
             return;
@@ -2925,6 +2965,10 @@ private:
         const CopyInfo& ci = *c.copy;
         Image* img = GetImage(ci.dst, false);
         if (!img || IsDepthFormat(img->nvn_format)) return;
+        if (img->render_scaled) {
+            LogOnce("b2t-scaled", "buffer-to-texture write into a scaled render target skipped (render_scale)");
+            return;
+        }
         const FormatInfo fi = GetFormatInfo(img->nvn_format);
         const CopyRegion& r = ci.dst_region;
         const int w = r.width > 0 ? r.width : img->width, h = r.height > 0 ? r.height : img->height;
@@ -3482,11 +3526,13 @@ private:
         std::vector<Image*>& colors = scratch_colors_;
         colors.assign(size_t(std::max(0, st_.num_rt)), nullptr);
         for (int i = 0; i < st_.num_rt; i++) {
-            Image* img = GetImage(st_.rts[size_t(i)], false);
+            Image* img = ScaledTarget(st_.rts[size_t(i)], GetImage(st_.rts[size_t(i)], false));
             if (img && (img->features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) && !IsDepthFormat(img->nvn_format))
                 colors[size_t(i)] = img;
         }
-        Image* depth = st_.rts.size() > size_t(st_.num_rt) ? GetImage(st_.rts[size_t(st_.num_rt)], false) : nullptr;
+        Image* depth = st_.rts.size() > size_t(st_.num_rt)
+                           ? ScaledTarget(st_.rts[size_t(st_.num_rt)], GetImage(st_.rts[size_t(st_.num_rt)], false))
+                           : nullptr;
         if (depth && !IsDepthFormat(depth->nvn_format)) depth = nullptr;
 
         Begin();
@@ -4273,6 +4319,16 @@ private:
             vw = st_.viewport[2];
             vh = st_.viewport[3];
         }
+        // render_scale: the game's viewport (in its 1280x720 pixels) scales with a scaled target.
+        const float rs = render_scale_;
+        const bool scaled_pass = rs < 1.0f && extent.width == uint32_t(std::lround(1280 * rs)) &&
+                                 extent.height == uint32_t(std::lround(720 * rs));
+        if (scaled_pass && st_.viewport_set && st_.viewport[2] > 0 && st_.viewport[3] != 0) {
+            vx *= rs;
+            vy *= rs;
+            vw *= rs;
+            vh *= rs;
+        }
         // Logged while few have been seen (the game uses ~10, so a cap alone kept this running on every draw:
         // ~6% of the render thread formatting floats).
         if (st_.viewport_set && viewports_logged_ < 12 && list_counter_ < 2000) {
@@ -4302,6 +4358,12 @@ private:
         VkRect2D sc{{0, 0}, extent};
         if (st_.scissor_set && st_.scissor[2] > 0 && st_.scissor[3] > 0) {
             int x = int(st_.scissor[0]), y = int(st_.scissor[1]), w = int(st_.scissor[2]), h = int(st_.scissor[3]);
+            if (scaled_pass) {
+                x = int(std::lround(x * rs));
+                y = int(std::lround(y * rs));
+                w = int(std::lround(w * rs));
+                h = int(std::lround(h * rs));
+            }
             x = std::max(0, x);
             y = std::max(0, y);
             w = std::max(0, std::min(w, int(extent.width) - x));
