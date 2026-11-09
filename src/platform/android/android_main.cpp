@@ -343,7 +343,12 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     PRESENT_MODE_HELP
                     "present_mode = mailbox\n"
                     FACE_BUTTONS_HELP
-                    "face_buttons = label\n",
+                    "face_buttons = label\n"
+                    "# language: game language: es (Spanish), en-US (English), fr, de, it, ja, ko, nl, pt, ru, zh-CN\n"
+                    "language = es\n"
+                    "# docked: 1 = report console mode to the game (experimental: the game may then ask for a larger\n"
+                    "# resolution, which the renderer does not support yet); 0 = handheld, 720p (default)\n"
+                    "docked = 0\n",
                     cfg->target_fps, cfg->async_pipelines ? 1 : 0, cfg->auto_capture ? 1 : 0, cfg->profile ? 1 : 0,
                     cfg->gamma, cfg->exposure);
             fclose(w);
@@ -352,7 +357,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             LOGW(kTag, "settings: cannot create %s (%s): using defaults", path.c_str(), strerror(errno));
         }
     } else {
-        bool have_present_mode = false, have_face_buttons = false;
+        bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[64];
@@ -372,6 +377,19 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "present_mode")) {
                 cfg->present_mode = value;
                 have_present_mode = true;
+            }
+            else if (!strcmp(key, "language")) {
+                static const char* const kLanguages[] = {"ja",   "en-US", "fr",    "de",    "it",    "es",
+                                                         "zh-CN", "ko",   "nl",    "pt",    "ru",    "zh-TW",
+                                                         "en-GB", "fr-CA", "es-419"};
+                bool known = false;
+                for (const char* code : kLanguages) known = known || !strcmp(code, value);
+                if (known) cfg->language = value;
+                else LOGW(kTag, "settings: unknown language '%s' (try es or en-US): using %s", value, cfg->language.c_str());
+                have_language = true;
+            } else if (!strcmp(key, "docked")) {
+                cfg->docked = v != 0;
+                have_docked = true;
             }
             else if (!strcmp(key, "gamma")) {
                 const float g = float(atof(value));
@@ -394,6 +412,21 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fputs("\n" FACE_BUTTONS_HELP "face_buttons = label\n", w);
                 fclose(w);
                 LOGI(kTag, "settings: added face_buttons to %s", path.c_str());
+            }
+        if (!have_language)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n# language: game language: es (Spanish), en-US (English), fr, de, it, ja, ko, nl, pt, ru\n"
+                      "language = es\n", w);
+                fclose(w);
+                cfg->language = "es";
+                LOGI(kTag, "settings: added language to %s", path.c_str());
+            }
+        if (!have_docked)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n# docked: 1 = report console mode to the game (experimental); 0 = handheld, 720p\n"
+                      "docked = 0\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added docked to %s", path.c_str());
             }
     }
     LOGI(kTag, "settings (%s): fps %d, async pipelines %s, auto capture %s, profile %s, gamma %.2f, exposure %.2f, "
