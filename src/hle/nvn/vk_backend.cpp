@@ -44,6 +44,7 @@
 #include "hle/nvn/backend.h"
 #include "runtime/runtime.h"
 #include "hle/nvn/layout.h"
+#include "hle/nvn/bc_decode.h"
 #include "hle/os/os.h"
 #include "hle/nvn/shader/translator.h"
 #include "hle/nvn/state.h"
@@ -1241,6 +1242,8 @@ private:
         vkGetPhysicalDeviceFeatures2(phys_, &have);
         VkPhysicalDeviceFeatures en{};
         en.textureCompressionBC = have.features.textureCompressionBC;
+        bc_native_ = have.features.textureCompressionBC;
+        LOGI(kTag, "BC textures: %s", bc_native_ ? "used by the GPU" : "decoded on the CPU to RGBA8");
         en.samplerAnisotropy = have.features.samplerAnisotropy;
         en.shaderImageGatherExtended = have.features.shaderImageGatherExtended;
         en.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -1656,6 +1659,16 @@ private:
         return &img;
     }
 
+    // BC textures are decoded on the CPU into RGBA8 when the GPU has no BC support (see bc_decode.h).
+    bool DecodesBc(int nvn) const { return !bc_native_ && IsBcDecodable(nvn); }
+    std::vector<VkFormat> Candidates(int nvn) const {
+        if (DecodesBc(nvn))
+            return {nvn == 69 || nvn == 70 || nvn == 71 || nvn == 72 ? VK_FORMAT_R8G8B8A8_SRGB
+                                                                     : VK_FORMAT_R8G8B8A8_UNORM};
+        return ImageCandidates(nvn);
+    }
+    bool bc_native_ = false;
+
     VkFormat PickFormat(int nvn_format, VkFormatFeatureFlags* features) {
         auto cached = format_cache_.find(nvn_format);
         if (cached != format_cache_.end()) {
@@ -1667,7 +1680,7 @@ private:
                                                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
         VkFormat chosen = VK_FORMAT_UNDEFINED;
         VkFormatFeatureFlags feats = 0;
-        for (VkFormat f : ImageCandidates(nvn_format)) {
+        for (VkFormat f : Candidates(nvn_format)) {
             VkFormatProperties p;
             vkGetPhysicalDeviceFormatProperties(phys_, f, &p);
             if ((p.optimalTilingFeatures & need) == need) {
@@ -1873,11 +1886,13 @@ private:
             return;
         }
         const FormatInfo fi = GetFormatInfo(t.tex.format);
+        const bool decode = DecodesBc(t.tex.format);
         size_t needed = 0;
         for (int layer = 0; layer < img.layers; layer++)
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv)];
-                needed += size_t(l.row_bytes) * l.rows * l.depth + 16;
+                needed += (decode ? size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4
+                                  : size_t(l.row_bytes) * l.rows * l.depth) + 16;
             }
         if (needed > kStreamSize - kMaxUniformRange) {
             LogOnce("upload-size", "texture too large to upload in one go (%zu bytes)", needed);
@@ -1892,16 +1907,30 @@ private:
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv)];
                 const size_t n = size_t(l.row_bytes) * l.rows * l.depth;
-                VkDeviceSize off = StreamAlloc(n, 16);
                 const uint8_t* src = base + size_t(layer) * layout.layer_stride + l.offset;
-                if (layout.linear)
-                    memcpy(stream_ptr_ + off, src, n);
-                else
-                    DeswizzleLevel(stream_ptr_ + off, src, l);
                 VkBufferImageCopy r{};
-                r.bufferOffset = off;
-                r.bufferRowLength = uint32_t(l.row_bytes / fi.bytes_per_block * fi.block_w);
-                r.bufferImageHeight = uint32_t(l.rows * fi.block_h);
+                if (decode) {
+                    // Compressed blocks -> tightly packed (deswizzled) -> RGBA8 in the stream.
+                    std::vector<uint8_t> blocks(n);
+                    if (layout.linear)
+                        memcpy(blocks.data(), src, n);
+                    else
+                        DeswizzleLevel(blocks.data(), src, l);
+                    const size_t out_n = size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4;
+                    VkDeviceSize off = StreamAlloc(out_n, 16);
+                    DecodeBcBlocks(stream_ptr_ + off, blocks.data(), l.width, l.height, l.depth, size_t(l.row_bytes),
+                                   l.rows, t.tex.format);
+                    r.bufferOffset = off;  // tightly packed texels: row length and image height left at 0
+                } else {
+                    VkDeviceSize off = StreamAlloc(n, 16);
+                    if (layout.linear)
+                        memcpy(stream_ptr_ + off, src, n);
+                    else
+                        DeswizzleLevel(stream_ptr_ + off, src, l);
+                    r.bufferOffset = off;
+                    r.bufferRowLength = uint32_t(l.row_bytes / fi.bytes_per_block * fi.block_w);
+                    r.bufferImageHeight = uint32_t(l.rows * fi.block_h);
+                }
                 r.imageSubresource = {img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT ? img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT
                                                                                  : img.aspect,
                                       uint32_t(lv), uint32_t(layer), 1};
@@ -1934,7 +1963,7 @@ private:
     // The Vulkan format a view with NVN format `view_nvn` uses on `img` (UNDEFINED: the image's own).
     VkFormat ViewFormat(const Image& img, int view_nvn) {
         if (!view_nvn || view_nvn == img.nvn_format) return VK_FORMAT_UNDEFINED;
-        for (VkFormat f : ImageCandidates(view_nvn)) {
+        for (VkFormat f : Candidates(view_nvn)) {
             if (f == img.vk_format) return VK_FORMAT_UNDEFINED;
             if (f == img.twin && f != VK_FORMAT_UNDEFINED) {
                 if (view_formats_logged_.insert(uint64_t(img.nvn_format) << 32 | uint32_t(view_nvn)).second)
@@ -2860,12 +2889,24 @@ private:
         }
         Begin();
         EndRendering();
-        if (StreamRemaining() < row * rows * size_t(d) + 1024) Flush();
-        VkDeviceSize off = StreamAlloc(row * rows * size_t(d), 16);
+        const bool decode = DecodesBc(img->nvn_format);
+        const size_t out_size = decode ? size_t(w) * size_t(h) * size_t(d) * 4 : row * rows * size_t(d);
+        if (StreamRemaining() < out_size + 1024) Flush();
+        VkDeviceSize off = StreamAlloc(out_size, 16);
         const uint8_t* src = reinterpret_cast<const uint8_t*>(c.src_addr);
-        for (int z = 0; z < d; z++)
-            for (size_t y = 0; y < rows; y++)
-                memcpy(stream_ptr_ + off + (size_t(z) * rows + y) * row, src + size_t(z) * image_stride + y * stride, row);
+        if (decode) {
+            std::vector<uint8_t> blocks(row * rows * size_t(d));
+            for (int z = 0; z < d; z++)
+                for (size_t y = 0; y < rows; y++)
+                    memcpy(blocks.data() + (size_t(z) * rows + y) * row, src + size_t(z) * image_stride + y * stride,
+                           row);
+            DecodeBcBlocks(stream_ptr_ + off, blocks.data(), w, h, d, row, int(rows), img->nvn_format);
+        } else {
+            for (int z = 0; z < d; z++)
+                for (size_t y = 0; y < rows; y++)
+                    memcpy(stream_ptr_ + off + (size_t(z) * rows + y) * row,
+                           src + size_t(z) * image_stride + y * stride, row);
+        }
         // The brightness ramp (256x1, 8-bit RGBA) the final pass reads: the `gamma` setting is applied on top.
         const float gamma = dsr::GetRuntime().config.gamma;
         if (gamma != 1.0f && w == 256 && h == 1 && d == 1 && row == 1024) {
