@@ -3064,11 +3064,39 @@ private:
     // rendering
     // ======================================================================================================
     // `line`: the caller (diagnostics: which code path breaks render passes, counted per 10 s).
+    // A colour target the pass wrote becomes readable as soon as the pass ends (a barrier outside the pass), so
+    // a later draw that samples it needs no break: before, every such draw ended the open pass to make the
+    // target readable (the largest source of pass breaks: ~4500 per 10 s in the game's bloom and blur chain).
+    void PassEndBarrier(Image& img) {
+        barriers_++;
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = {img.aspect, 0, uint32_t(img.levels), 0, uint32_t(img.layers)};
+        Rec([b](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &b);
+        });
+        img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        img.attach_unsynced = false;
+    }
+
     void EndRendering(int line = __builtin_LINE()) {
         if (rendering_) {
             Rec([this](VkCommandBuffer cb) { end_rendering_(cb); });
             rendering_ = false;
             pass_breaks_[line]++;
+            for (size_t i = 0; i < pass_color_count_; i++) {
+                Image* c = pass_colors_[i];
+                if (c && !c->clear_pending && c->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) PassEndBarrier(*c);
+            }
         }
     }
 
