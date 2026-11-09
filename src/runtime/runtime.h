@@ -17,7 +17,7 @@ struct RuntimeConfig {
     bool dry_run = false;     // map + relocate + bind only, never execute guest code
     bool abort_on_unimplemented = false;
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
-    std::string language = "en-US";
+    std::string language = "es";  // game language (settings.txt: language = es, en-US, ...)
     // User settings (settings.txt next to the game folder on Android).
     int target_fps = 60;          // presentation pace: 30 (the Switch rate) or 60
     bool async_pipelines = true;  // compile new GPU pipelines off the render thread (no hitch; the draw waits a frame)
