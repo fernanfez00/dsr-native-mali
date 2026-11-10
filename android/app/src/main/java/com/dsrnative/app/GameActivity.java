@@ -14,6 +14,11 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.graphics.Color;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 
 /**
  * The native activity, full screen: the status and navigation bars are hidden while the game runs (immersive
@@ -24,6 +29,29 @@ public class GameActivity extends NativeActivity {
     // 1 = granted, 2 = refused (the game then falls back to the app's private folder). Read by native code.
     private static volatile int sStorage = 0;
     private boolean mAsked = false, mPausedSinceAsk = false;
+    private TextView mFps;
+
+    // Called from native code once a second with the frames presented in that second.
+    public void setFps(final float fps) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mFps != null) mFps.setText(String.format(java.util.Locale.US, "%.0f FPS", fps));
+            }
+        });
+    }
+
+    private void addFpsOverlay() {
+        TextView t = new TextView(this);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setBackgroundColor(0x88000000);
+        t.setPadding(16, 8, 16, 8);
+        t.setText("-- FPS");
+        addContentView(t, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+        mFps = t;
+    }
 
     public static int storageAccess() {
         return sStorage;
@@ -81,6 +109,7 @@ public class GameActivity extends NativeActivity {
             w.setAttributes(lp);
         }
         hideSystemBars();
+        addFpsOverlay();
     }
 
     @Override
