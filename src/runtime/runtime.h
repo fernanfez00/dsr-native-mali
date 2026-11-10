@@ -1,6 +1,7 @@
 #pragma once
 // Process-wide state for the native runtime: loaded modules, configured paths, guest allocator hooks.
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -9,6 +10,9 @@
 #include "loader/nso.h"
 
 namespace dsr {
+
+// Frames presented to the screen since start (the FPS overlay reads it once a second).
+extern std::atomic<uint64_t> g_presented_frames;
 
 struct RuntimeConfig {
     std::string game_dir;     // directory holding exefs/ and the romfs contents (dvdbnd*.bdt, ...)
