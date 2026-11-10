@@ -13,6 +13,8 @@ namespace dsr {
 
 // Frames presented to the screen since start (the FPS overlay reads it once a second).
 extern std::atomic<uint64_t> g_presented_frames;
+// FPS drawn by the presenter (the number of frames shown in the last second; -1 = hidden).
+extern std::atomic<int> g_fps_shown;
 
 struct RuntimeConfig {
     std::string game_dir;     // directory holding exefs/ and the romfs contents (dvdbnd*.bdt, ...)
