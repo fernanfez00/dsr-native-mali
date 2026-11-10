@@ -1122,7 +1122,8 @@ public:
         Publish();
         NextSlot();
         if (++presented_ == 1) LOGI(kTag, "first frame on screen");
-        if (presented_ % 600 == 0) SweepUnusedImages();
+        // SweepUnusedImages() is disabled: it released images that cached state still referenced (crash in the
+        // recorder thread right after a "cleanup:" line). Re-enable only after every cache holding an Image* is audited.
     }
 
     // ---- cleanup: images the game has not used for ~40 s are released (their GPU memory with them) -----------
@@ -1377,6 +1378,8 @@ private:
         bc3_etc2_ = dsr::GetRuntime().config.bc3_etc2;
         LOGI(kTag, "settings: mali_barriers %d, bc3_etc2 %d", int(mali_barriers_), int(bc3_etc2_));
         render_scale_ = std::clamp(dsr::GetRuntime().config.render_scale, 0.5f, 1.0f);
+        no_depth_snapshot_ = dsr::GetRuntime().config.no_depth_snapshot;
+        skip_postfx_ = dsr::GetRuntime().config.skip_postfx;
         if (render_scale_ < 1.0f) LOGI(kTag, "render_scale %.2f: 1280x720 targets are rendered at %dx%d", render_scale_,
                                        int(std::lround(1280 * render_scale_)), int(std::lround(720 * render_scale_)));
         LOGI(kTag, "BC textures: %s", bc_native_ ? "used by the GPU" : "decoded on the CPU to RGBA8");
@@ -1848,6 +1851,7 @@ private:
     bool bc3_etc2_ = false;       // settings bc3_etc2
     bool mali_barriers_ = true;   // settings mali_barriers
     float render_scale_ = 1.0f;  // settings render_scale: 1.0 = the game's own size (default)
+    bool no_depth_snapshot_ = false, skip_postfx_ = false;  // see runtime.h
     // Converted ETC levels, keyed by the source blocks: the game uploads the same textures many times.
     std::unordered_map<uint64_t, std::vector<uint8_t>> etc_cache_;
     size_t etc_cache_bytes_ = 0;
@@ -3912,6 +3916,10 @@ private:
         if (p.count <= 0 || p.instances <= 0) return;
         if (!begin_rendering_) return Skip("no dynamic rendering");
         if (!st_.program[0]) return Skip("no vertex program bound");
+        if (skip_postfx_ && st_.num_rt > 0) {
+            const int tw = st_.rts[0].tex.width, th = st_.rts[0].tex.height;
+            if ((tw == 320 && th == 180) || (tw == 160 && th == 90)) return Skip("post-process target (skip_postfx)");
+        }
         const DeviceModes modes = GetDeviceModes();
 
         // ---- vertex layout and shader options --------------------------------------------------------------
@@ -4008,7 +4016,9 @@ private:
                 for (Image* c : colors)
                     if (c == img) return Skip("texture is also a render target");
                 if (depth == img) {
-                    // Sampling the bound depth buffer (soft particles, fog): read a snapshot copy instead.
+                    // Sampling the bound depth buffer (soft particles, fog): a snapshot copy would end the pass
+                    // on every change of depth. With no_depth_snapshot the draw is skipped instead.
+                    if (no_depth_snapshot_) return Skip("depth sampling skipped (no_depth_snapshot)");
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
                 }
