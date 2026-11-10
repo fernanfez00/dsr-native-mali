@@ -32,6 +32,11 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <type_traits>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <unordered_set>
 #include <vector>
 
 #include <sys/resource.h>
@@ -1339,6 +1344,8 @@ private:
         vkCreateSemaphore(device_, &sci, nullptr, &acquire_sem_);
         vkCreateSemaphore(device_, &sci, nullptr, &render_sem_);
         LoadPipelineCache();
+        LoadShaderCache();
+        ParseSkipShaders();
         init_failed_ = false;
         LOGI(kTag, "device ready (queue family %u)", family_);
         return true;
@@ -3419,6 +3426,110 @@ private:
     // ======================================================================================================
     // shaders, layouts, pipelines
     // ======================================================================================================
+    // ---- persistent shader cache ------------------------------------------------------------------------------
+    // Guest shaders are translated once; the SPIR-V and the shader info are kept in cache/shader_cache.bin and
+    // reused by later runs. The key is the guest code's hash plus the translation options, so it is the same on
+    // every run and on every device. Bump kShaderCacheVersion whenever the translator's output changes.
+    static constexpr uint32_t kShaderCacheVersion = 1;
+    struct CachedShader {
+        std::vector<uint32_t> spirv;
+        shader::ShaderInfo info;
+    };
+    std::unordered_map<std::vector<uint32_t>, CachedShader, VecHash> shader_disk_;
+    bool shader_cache_writable_ = false;
+    uint64_t shader_cache_hits_ = 0, shader_cache_misses_ = 0;
+
+    std::string ShaderCachePath() const {
+        const std::string& dir = dsr::GetRuntime().config.cache_dir;
+        return dir.empty() ? std::string() : dir + "/shader_cache.bin";
+    }
+    static void WriteShaderRecord(FILE* f, const std::vector<uint32_t>& key, const std::vector<uint32_t>& spirv,
+                                  const shader::ShaderInfo& info) {
+        const uint32_t nwords = uint32_t(spirv.size()), info_size = uint32_t(sizeof(info));
+        fwrite(key.data(), 4, key.size(), f);
+        fwrite(&nwords, 4, 1, f);
+        fwrite(&info_size, 4, 1, f);
+        fwrite(&info, sizeof(info), 1, f);
+        fwrite(spirv.data(), 4, spirv.size(), f);
+    }
+    // Writes the header and every known shader (used when the file is missing, old or damaged).
+    void RewriteShaderCache(const std::string& path) {
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) {
+            shader_cache_writable_ = false;
+            return;
+        }
+        const char magic[8] = {'D', 'S', 'R', 'S', 'C', '0', '1', 0};
+        fwrite(magic, 1, 8, f);
+        fwrite(&kShaderCacheVersion, 4, 1, f);
+        for (const auto& e : shader_disk_) WriteShaderRecord(f, e.first, e.second.spirv, e.second.info);
+        fclose(f);
+        shader_cache_writable_ = true;
+    }
+    void LoadShaderCache() {
+        static_assert(std::is_trivially_copyable<shader::ShaderInfo>::value, "ShaderInfo must be plain data");
+        const std::string path = ShaderCachePath();
+        if (path.empty()) return;
+        const char magic[8] = {'D', 'S', 'R', 'S', 'C', '0', '1', 0};
+        bool damaged = true;
+        if (FILE* f = fopen(path.c_str(), "rb")) {
+            char m[8];
+            uint32_t ver = 0;
+            bool header = fread(m, 1, 8, f) == 8 && memcmp(m, magic, 8) == 0 && fread(&ver, 4, 1, f) == 1 &&
+                          ver == kShaderCacheVersion;
+            if (header) {
+                damaged = false;
+                for (;;) {
+                    uint32_t key[6], nwords = 0, info_size = 0;
+                    if (fread(key, 4, 6, f) != 6) break;  // clean end of file
+                    if (fread(&nwords, 4, 1, f) != 1 || fread(&info_size, 4, 1, f) != 1) {
+                        damaged = true;
+                        break;
+                    }
+                    CachedShader c;
+                    if (info_size != sizeof(c.info) || nwords == 0 || nwords > (1u << 22)) {
+                        damaged = true;
+                        break;
+                    }
+                    c.spirv.resize(nwords);
+                    if (fread(&c.info, sizeof(c.info), 1, f) != 1 || fread(c.spirv.data(), 4, nwords, f) != nwords) {
+                        damaged = true;
+                        break;
+                    }
+                    shader_disk_.emplace(std::vector<uint32_t>(key, key + 6), std::move(c));
+                }
+            }
+            fclose(f);
+        }
+        if (damaged) {
+            shader_disk_.clear();  // old version, damaged or missing: start a fresh file
+            RewriteShaderCache(path);
+        } else {
+            shader_cache_writable_ = true;
+        }
+        LOGI(kTag, "shader cache: %zu translated shaders loaded (%s)", shader_disk_.size(), path.c_str());
+    }
+    void AppendShaderCache(const std::vector<uint32_t>& key, const shader::TranslateResult& r) {
+        if (!shader_cache_writable_) return;
+        if (FILE* f = fopen(ShaderCachePath().c_str(), "ab")) {
+            WriteShaderRecord(f, key, r.spirv, r.info);
+            fclose(f);
+        }
+    }
+    // settings skip_shaders: fragment shaders listed here are not drawn (their pictures are left as they were).
+    void ParseSkipShaders() {
+        const std::string& list = dsr::GetRuntime().config.skip_shaders;
+        size_t pos = 0;
+        while (pos < list.size()) {
+            const size_t comma = list.find(',', pos);
+            const std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            pos = comma == std::string::npos ? list.size() : comma + 1;
+            if (!tok.empty()) skip_fs_.insert(strtoull(tok.c_str(), nullptr, 16));
+        }
+        if (!skip_fs_.empty()) LOGI(kTag, "skip_shaders: %zu fragment shader(s) will not be drawn", skip_fs_.size());
+    }
+    std::unordered_set<uint64_t> skip_fs_, reported_fs_;
+
     Shader* GetShader(const ShaderCode& code, const shader::TranslateOptions& opt) {
         const uint32_t parts[6] = {uint32_t(code.hash), uint32_t(code.hash >> 32), opt.int_attrib_mask,
                                    opt.signed_attrib_mask, uint32_t(opt.gl_depth_range), uint32_t(opt.alpha_func)};
@@ -3433,7 +3544,21 @@ private:
             return &it->second;
         }
         Shader& s = shaders_[key];
-        shader::TranslateResult r = shader::Translate(code.code.data(), code.code.size(), opt);
+        shader::TranslateResult r;
+        const auto disk = shader_disk_.find(key);
+        if (disk != shader_disk_.end()) {
+            r.ok = true;
+            r.spirv = disk->second.spirv;
+            r.info = disk->second.info;
+            shader_cache_hits_++;
+        } else {
+            r = shader::Translate(code.code.data(), code.code.size(), opt);
+            shader_cache_misses_++;
+            if (r.ok) {
+                shader_disk_[key] = CachedShader{r.spirv, r.info};
+                AppendShaderCache(key, r);
+            }
+        }
         if (!r.ok) {
             s.error = r.error;
             if (shader_failures_logged_++ < 24)
@@ -3685,6 +3810,14 @@ private:
         Shader* vs = GetShader(*st_.program[0], vopt);
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
+        if (st_.program[1]) {
+            const uint64_t fh = st_.program[1]->hash;
+            if (skip_fs_.count(fh)) return Skip("fragment shader listed in skip_shaders");
+            if (fs->ok && reported_fs_.size() < 300 && reported_fs_.insert(fh).second)
+                LOGI(kTag, "fragment shader %016llx: viewport %dx%d, %d textures, %u instructions",
+                     (unsigned long long)fh, int(st_.viewport[2]), int(st_.viewport[3]),
+                     __builtin_popcount(fs->info.texture_mask | fs->info.shadow_mask), fs->info.instruction_count);
+        }
         if (!vs->ok || (st_.program[1] && !fs->ok)) return Skip("shader not translated");
 
         VertexInput& vin = scratch_vin_;
