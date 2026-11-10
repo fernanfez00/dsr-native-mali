@@ -27,6 +27,7 @@
 
 namespace dsr {
 std::atomic<uint64_t> g_presented_frames{0};
+std::atomic<int> g_fps_shown{-1};
 }  // namespace dsr
 
 namespace dsr::hle::nvn {

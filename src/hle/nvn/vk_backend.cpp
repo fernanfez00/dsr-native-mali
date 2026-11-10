@@ -337,6 +337,7 @@ struct Image {
     // render_scale: a game target (1280x720) held at a smaller size; the present blit enlarges it.
     bool render_scaled = false;
     int game_width = 0, game_height = 0;
+    uint64_t last_used = 0;  // presented-frame count when the game last used it (cleanup)
     // Contents came from game memory (not rendered by the GPU): re-uploaded when the game rewrites the
     // memory. Checked via a sparse hash: after an unchanged check the next one comes twice as many command
     // lists later (up to kMaxCheckInterval); a change, or an explicit MarkTextureDirty, resets that.
@@ -1098,6 +1099,7 @@ public:
         if (!EnsureSwapchain()) return;
         // Acquire, copy and present run on the recorder after this frame's commands; the render thread goes on.
         BeginCommands();
+        EnsureOverlay();
         PresentJob pj;
         Image* src = tex.valid ? FindImage(tex) : nullptr;
         if (src && src->written && !IsDepthFormat(src->nvn_format)) {
@@ -1120,6 +1122,117 @@ public:
         Publish();
         NextSlot();
         if (++presented_ == 1) LOGI(kTag, "first frame on screen");
+        if (presented_ % 600 == 0) SweepUnusedImages();
+    }
+
+    // ---- cleanup: images the game has not used for ~40 s are released (their GPU memory with them) -----------
+    void SweepUnusedImages() {
+        size_t freed = 0;
+        for (auto it = images_.begin(); it != images_.end();) {
+            Image& img = it->second;
+            if (presented_ - img.last_used > 1200 && !InOpenPass(&img)) {
+                DestroyImage(img);
+                it = images_.erase(it);
+                freed++;
+            } else {
+                ++it;
+            }
+        }
+        if (freed) LOGI(kTag, "cleanup: %zu images not used for ~40 s released", freed);
+    }
+
+    // ---- FPS overlay: drawn on the screen by the presenter (no Android view involved) -----------------------
+    // Two 1x1 images, white (0) and black (1), are blitted as rectangles: a glyph pixel is one blit.
+    VkImage ov_img_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory ov_mem_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool ov_ready_ = false, ov_failed_ = false;
+
+    bool EnsureOverlay() {
+        if (ov_ready_ || ov_failed_) return ov_ready_;
+        for (int i = 0; i < 2; i++) {
+            VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+            ci.imageType = VK_IMAGE_TYPE_2D;
+            ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+            ci.extent = {1, 1, 1};
+            ci.mipLevels = 1;
+            ci.arrayLayers = 1;
+            ci.samples = VK_SAMPLE_COUNT_1_BIT;
+            ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (vkCreateImage(device_, &ci, nullptr, &ov_img_[i]) != VK_SUCCESS) return ov_failed_ = true, false;
+            VkMemoryRequirements req;
+            vkGetImageMemoryRequirements(device_, ov_img_[i], &req);
+            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex = FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (vkAllocateMemory(device_, &ai, nullptr, &ov_mem_[i]) != VK_SUCCESS) return ov_failed_ = true, false;
+            vkBindImageMemory(device_, ov_img_[i], ov_mem_[i], 0);
+            VkClearColorValue colour{};
+            colour.float32[0] = colour.float32[1] = colour.float32[2] = i == 0 ? 1.0f : 0.0f;
+            colour.float32[3] = 1.0f;
+            const VkImage img = ov_img_[i];
+            Rec([img, colour](VkCommandBuffer cb) {
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                CmdImageBarrier(cb, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                vkCmdClearColorImage(cb, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colour, 1, &range);
+                CmdImageBarrier(cb, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            });
+        }
+        ov_ready_ = true;
+        LOGI(kTag, "fps overlay ready (drawn by the presenter, top right)");
+        return true;
+    }
+
+    void OverlayRect(VkCommandBuffer cb, VkImage sc, int which, int x, int y, int w, int h) {
+        const int dw = int(sc_extent_.width), dh = int(sc_extent_.height);
+        if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > dw || y + h > dh) return;
+        VkImageBlit b{};
+        b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.srcOffsets[1] = {1, 1, 1};
+        b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.dstOffsets[0] = {x, y, 0};
+        b.dstOffsets[1] = {x + w, y + h, 1};
+        vkCmdBlitImage(cb, ov_img_[which], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &b, VK_FILTER_NEAREST);
+    }
+
+    // 3x5 pixel glyphs: '#' is a lit pixel.
+    static const char* const* FpsGlyph(char c) {
+        static const char* const kDigits[10][5] = {
+            {"###", "#.#", "#.#", "#.#", "###"}, {".#.", "##.", ".#.", ".#.", "###"},
+            {"###", "..#", "###", "#..", "###"}, {"###", "..#", "###", "..#", "###"},
+            {"#.#", "#.#", "###", "..#", "..#"}, {"###", "#..", "###", "..#", "###"},
+            {"###", "#..", "###", "#.#", "###"}, {"###", "..#", "..#", "..#", "..#"},
+            {"###", "#.#", "###", "#.#", "###"}, {"###", "#.#", "###", "..#", "###"}};
+        static const char* const kF[5] = {"###", "#..", "##.", "#..", "#.."};
+        static const char* const kP[5] = {"##.", "#.#", "##.", "#..", "#.."};
+        static const char* const kS[5] = {"###", "#..", "###", "..#", "###"};
+        static const char* const kSpace[5] = {"...", "...", "...", "...", "..."};
+        if (c >= '0' && c <= '9') return kDigits[c - '0'];
+        if (c == 'F') return kF;
+        if (c == 'P') return kP;
+        if (c == 'S') return kS;
+        return kSpace;
+    }
+
+    void DrawFpsOverlay(VkCommandBuffer cb, VkImage sc, int fps) {
+        const std::string text = std::to_string(std::max(0, std::min(fps, 999))) + " FPS";
+        const int dh = int(sc_extent_.height), dw = int(sc_extent_.width);
+        const int px = std::max(3, dh / 120);  // one glyph pixel, in screen pixels
+        const int adv = 4;                     // glyph advance: 3 columns + 1 gap
+        const int tw = int(text.size()) * adv * px - px, th = 5 * px;
+        const int pad = px * 2, margin = px * 3;
+        const int x0 = dw - margin - tw - pad, y0 = margin + pad;
+        OverlayRect(cb, sc, 1, x0 - pad, y0 - pad, tw + 2 * pad, th + 2 * pad);  // black box
+        for (size_t ci = 0; ci < text.size(); ci++) {
+            const char* const* rows = FpsGlyph(text[ci]);
+            for (int r = 0; r < 5; r++)
+                for (int col = 0; col < 3; col++)
+                    if (rows[r][col] == '#')
+                        OverlayRect(cb, sc, 0, x0 + int(ci) * adv * px + col * px, y0 + r * px, px, px);
+        }
     }
 
 private:
@@ -1177,6 +1290,8 @@ private:
             vkCmdBlitImage(cmd_, pj.src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &blit, VK_FILTER_LINEAR);
         }
+        const int shown_fps = dsr::g_fps_shown.load();
+        if (ov_ready_ && shown_fps >= 0) DrawFpsOverlay(cmd_, sc, shown_fps);
         CmdImageBarrier(cmd_, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         SubmitSlot(i, acquire_sem_, render_sem_);
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -1673,6 +1788,7 @@ private:
         auto it = images_.find(t.addr);
         if (it == images_.end()) return nullptr;
         Image& img = it->second;
+        img.last_used = presented_;
         if (img.render_scaled && img.nvn_format == t.tex.format && t.tex.width == img.game_width &&
             t.tex.height == img.game_height)
             return &img;
