@@ -430,6 +430,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 have_mali_barriers = true;
             } else if (!strcmp(key, "skip_shaders")) {
                 cfg->skip_shaders = value;
+            } else if (!strcmp(key, "no_depth_snapshot")) {
+                cfg->no_depth_snapshot = atoi(value) != 0;
+            } else if (!strcmp(key, "skip_postfx")) {
+                cfg->skip_postfx = atoi(value) != 0;
             } else if (!strcmp(key, "docked")) {
                 cfg->docked = v != 0;
                 have_docked = true;
