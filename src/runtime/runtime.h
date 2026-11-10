@@ -15,20 +15,26 @@ namespace dsr {
 extern std::atomic<uint64_t> g_presented_frames;
 // FPS drawn by the presenter (the number of frames shown in the last second; -1 = hidden).
 extern std::atomic<int> g_fps_shown;
+// Smoothed GPU time of one frame in ms (0 = unknown yet), written by the Vulkan backend from its GPU timestamps and
+// read by the dynamic frame-rate controller.
+extern std::atomic<float> g_gpu_frame_ms;
 
 struct RuntimeConfig {
     std::string game_dir;     // directory holding exefs/ and the romfs contents (dvdbnd*.bdt, ...)
     std::string save_dir;     // writable directory for save data
     std::string cache_dir;    // writable directory for caches (shaders etc.)
     std::string skip_shaders; // settings skip_shaders: fragment shader hashes (hex, comma separated) not drawn
-    bool no_depth_snapshot = true;  // settings no_depth_snapshot: draws that sample the depth buffer (soft particles, fog) are skipped
-    bool skip_postfx = true;        // settings skip_postfx: draws into the small post-process targets (bloom blur) are skipped
+    bool no_depth_snapshot = false; // settings no_depth_snapshot: 1 = draws that sample the depth buffer (soft particles, fog) are skipped (speed hack: breaks the picture)
+    bool skip_postfx = false;       // settings skip_postfx: 1 = draws into the small post-process targets (bloom blur, exposure) are skipped (speed hack: breaks the picture)
     bool dry_run = false;     // map + relocate + bind only, never execute guest code
     bool abort_on_unimplemented = false;
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
     std::string language = "es";  // game language (settings.txt: language = es, en-US, ...)
     // User settings (settings.txt next to the game folder on Android).
-    int target_fps = 60;          // presentation pace: 30 (the Switch rate) or 60
+    int target_fps = 60;          // highest presentation rate: 15..60 (30 = the Switch rate)
+    bool dynamic_fps = true;      // settings dynamic_fps: the rate follows what the device can sustain (60/30/20/15, never below
+                                  // min_fps) and the game's time step follows the frame time, so speed stays normal
+    int min_fps = 20;             // settings min_fps: lowest rate dynamic_fps may pick (15..30); also the longest time step
     bool async_pipelines = true;  // compile new GPU pipelines off the render thread (no hitch; the draw waits a frame)
     bool auto_capture = false;    // diagnostics: save a few frame captures automatically during play
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
@@ -72,7 +78,7 @@ float GameFrameTime();
 // plays, frames are paced at 30 instead of the configured rate (at 60 the video ran at double speed and
 // stopped every few frames to wait for its sound).
 void SetMoviePlaying(bool playing);
-int FrameRateNow();  // the configured rate (30..60), or 30 while a movie plays
+int FrameRateNow();  // the rate the frame limiter paces to now (dynamic_fps moves it), or 30 while a movie plays
 
 // Prints an import binding summary (implemented / unimplemented / data) to the log.
 void LogImportReport(bool list_unimplemented);
