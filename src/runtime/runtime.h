@@ -21,6 +21,8 @@ struct RuntimeConfig {
     std::string save_dir;     // writable directory for save data
     std::string cache_dir;    // writable directory for caches (shaders etc.)
     std::string skip_shaders; // settings skip_shaders: fragment shader hashes (hex, comma separated) not drawn
+    bool no_depth_snapshot = true;  // settings no_depth_snapshot: draws that sample the depth buffer (soft particles, fog) are skipped
+    bool skip_postfx = true;        // settings skip_postfx: draws into the small post-process targets (bloom blur) are skipped
     bool dry_run = false;     // map + relocate + bind only, never execute guest code
     bool abort_on_unimplemented = false;
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
