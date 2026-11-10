@@ -376,8 +376,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         bool resolution_set = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
-            char key[64], value[64];
-            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %63s", key, value) != 2) continue;
+            char key[64], value[1024];
+            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %1023s", key, value) != 2) continue;
             const int v = atoi(value);
             if (!strcmp(key, "fps")) cfg->target_fps = std::clamp(v, 30, 60);  // e.g. 45: a steady cap below 60
             else if (!strcmp(key, "async_pipelines")) cfg->async_pipelines = v != 0;
@@ -428,6 +428,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "mali_barriers")) {
                 cfg->mali_barriers = v != 0;
                 have_mali_barriers = true;
+            } else if (!strcmp(key, "skip_shaders")) {
+                cfg->skip_shaders = value;
             } else if (!strcmp(key, "docked")) {
                 cfg->docked = v != 0;
                 have_docked = true;
@@ -793,10 +795,24 @@ void PublishFps(android_app* app, float fps) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
         attached = true;
     }
+    // Typed argument array instead of varargs (no float-to-double promotion involved).
+    static int publishes = 0;
     jclass cls = env->GetObjectClass(app->activity->clazz);
     jmethodID mid = cls ? env->GetMethodID(cls, "setFps", "(F)V") : nullptr;
-    if (mid) env->CallVoidMethod(app->activity->clazz, mid, fps);
-    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!mid) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (publishes++ < 3) LOGW(kTag, "fps overlay: GameActivity.setFps not found (is GameActivity.java in the APK?)");
+    } else {
+        jvalue arg;
+        arg.f = fps;
+        env->CallVoidMethodA(app->activity->clazz, mid, &arg);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            if (publishes++ < 3) LOGW(kTag, "fps overlay: setFps threw an exception");
+        } else if (publishes++ == 0) {
+            LOGI(kTag, "fps overlay: first value published (%.0f FPS)", fps);
+        }
+    }
     if (cls) env->DeleteLocalRef(cls);
     if (attached) vm->DetachCurrentThread();
 }
