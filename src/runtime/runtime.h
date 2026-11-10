@@ -18,6 +18,7 @@ struct RuntimeConfig {
     std::string game_dir;     // directory holding exefs/ and the romfs contents (dvdbnd*.bdt, ...)
     std::string save_dir;     // writable directory for save data
     std::string cache_dir;    // writable directory for caches (shaders etc.)
+    std::string skip_shaders; // settings skip_shaders: fragment shader hashes (hex, comma separated) not drawn
     bool dry_run = false;     // map + relocate + bind only, never execute guest code
     bool abort_on_unimplemented = false;
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
