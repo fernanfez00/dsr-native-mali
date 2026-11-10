@@ -464,10 +464,6 @@ public:
                     Image* src = GetImage(c.copy->src, true);  // a CPU-written source (video frames) is refreshed
                     Image* dst = GetImage(c.copy->dst, false);
                     if (!src || !dst || src == dst) break;
-                    if (src->render_scaled || dst->render_scaled) {
-                        LogOnce("copy-scaled", "copy to or from a scaled render target skipped (render_scale)");
-                        break;
-                    }
                     Begin();
                     EndRendering();
                     CopyImage(*src, c.copy->src_region, *dst, c.copy->dst_region, c.flags);
@@ -2883,11 +2879,19 @@ private:
         img->cpu_source = false;
     }
 
+    // The game's regions are in its own (1280x720) pixels; a scaled target (render_scale) holds that picture at a
+    // smaller size, so its coordinates are mapped onto the real image and such copies become scaled blits.
     void CopyImage(Image& src, const CopyRegion& sr, Image& dst, const CopyRegion& dr, int flags) {
         if (IsDepthFormat(src.nvn_format) != IsDepthFormat(dst.nvn_format)) return;
+        const int sgw = src.render_scaled ? src.game_width : src.width, sgh = src.render_scaled ? src.game_height : src.height;
+        const int dgw = dst.render_scaled ? dst.game_width : dst.width, dgh = dst.render_scaled ? dst.game_height : dst.height;
         auto clampw = [](int v, int def) { return v > 0 ? v : def; };
-        int sw = clampw(sr.width, src.width), sh = clampw(sr.height, src.height);
-        int dw = clampw(dr.width, dst.width), dh = clampw(dr.height, dst.height);
+        int sw = clampw(sr.width, sgw), sh = clampw(sr.height, sgh);
+        int dw = clampw(dr.width, dgw), dh = clampw(dr.height, dgh);
+        const bool scaled = src.render_scaled || dst.render_scaled;
+        const float ksx = float(src.width) / float(sgw), ksy = float(src.height) / float(sgh);
+        const float kdx = float(dst.width) / float(dgw), kdy = float(dst.height) / float(dgh);
+        auto map = [](int v, float k) { return int(std::lround(float(v) * k)); };
         Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         const bool can_blit = (src.features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
@@ -2896,11 +2900,11 @@ private:
         if (can_blit) {
             VkImageBlit b{};
             b.srcSubresource = {src.aspect, 0, 0, 1};
-            b.srcOffsets[0] = {sr.x, sr.y, 0};
-            b.srcOffsets[1] = {sr.x + sw, sr.y + sh, 1};
+            b.srcOffsets[0] = {map(sr.x, ksx), map(sr.y, ksy), 0};
+            b.srcOffsets[1] = {map(sr.x + sw, ksx), map(sr.y + sh, ksy), 1};
             b.dstSubresource = {dst.aspect, 0, 0, 1};
-            b.dstOffsets[0] = {dr.x, dr.y, 0};
-            b.dstOffsets[1] = {dr.x + dw, dr.y + dh, 1};
+            b.dstOffsets[0] = {map(dr.x, kdx), map(dr.y, kdy), 0};
+            b.dstOffsets[1] = {map(dr.x + dw, kdx), map(dr.y + dh, kdy), 1};
             if (flags & 0x8) std::swap(b.dstOffsets[0].y, b.dstOffsets[1].y);  // MIRROR_Y
             if (flags & 0x4) std::swap(b.dstOffsets[0].x, b.dstOffsets[1].x);  // MIRROR_X
             VkFilter filter = ((flags & 0x1) && !IsDepthFormat(src.nvn_format) &&
@@ -2911,7 +2915,7 @@ private:
                 vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, di, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                                filter);
             });
-        } else if (src.vk_format == dst.vk_format && sw == dw && sh == dh) {
+        } else if (!scaled && src.vk_format == dst.vk_format && sw == dw && sh == dh) {
             VkImageCopy c{};
             c.srcSubresource = {src.aspect, 0, 0, 1};
             c.srcOffset = {sr.x, sr.y, 0};

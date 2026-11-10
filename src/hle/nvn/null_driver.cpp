@@ -25,6 +25,10 @@
 #include "hle/nvn/nvn_types.h"
 #include "hle/os/os.h"
 
+namespace dsr {
+std::atomic<uint64_t> g_presented_frames{0};
+}  // namespace dsr
+
 namespace dsr::hle::nvn {
 
 // ---- formats ------------------------------------------------------------------------------------
@@ -519,6 +523,7 @@ void QueuePresentTexture(void* queue, void* window, int index) {
 
     static uint64_t frames_at_report = 0;
     uint64_t n = ++frames;
+    dsr::g_presented_frames++;
     if (n == 1)
         LOGI(kTag, "first frame presented (window %p, texture %d: %dx%d format %d)", window, index, tex.tex.width,
              tex.tex.height, tex.tex.format);
