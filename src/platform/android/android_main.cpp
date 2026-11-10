@@ -312,6 +312,9 @@ bool g_face_by_position = false;  // `face_buttons` setting (see KeyToButton)
 #define BC3_HELP \
     "# bc3_etc2: 1 = keep BC3 (DXT5) textures as ETC2 RGBA8 instead of RGBA8: 4x less texture memory and bandwidth on\n" \
     "# GPUs without BC support (Mali). Slightly lossy (normal maps most); first load of a texture takes more CPU\n"
+#define RESOLUTION_HELP \
+    "# resolution: render size, WIDTHxHEIGHT (16:9), 640x360 - 1280x720. The game draws at 1280x720; smaller sizes\n" \
+    "# are enlarged at the end (less GPU work). Examples: 960x540, 854x480. Overrides render_scale when present.\n"
 #define MALI_BARRIERS_HELP \
     "# mali_barriers: 1 = narrow GPU barriers so vertex work can overlap the previous pass on tile-based GPUs\n" \
     "# (Mali, Adreno); 0 = old full barriers (use if you see missing or flickering post-processing)\n"
@@ -357,6 +360,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "# resolution, which the renderer does not support yet); 0 = handheld, 720p (default)\n"
                     "docked = 0\n"
                     BC3_HELP "bc3_etc2 = 0\n"
+                    RESOLUTION_HELP "resolution = 1280x720\n"
                     MALI_BARRIERS_HELP "mali_barriers = 1\n",
                     cfg->target_fps, cfg->async_pipelines ? 1 : 0, cfg->auto_capture ? 1 : 0, cfg->profile ? 1 : 0,
                     cfg->gamma, cfg->exposure);
@@ -367,7 +371,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         }
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false,
-               have_render_scale = false, have_bc3 = false, have_mali_barriers = false;
+               have_render_scale = false, have_bc3 = false, have_mali_barriers = false, have_resolution = false;
+        bool resolution_set = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[64];
@@ -399,8 +404,23 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 have_language = true;
             } else if (!strcmp(key, "render_scale")) {
                 const float rs = float(atof(value));
-                cfg->render_scale = rs >= 0.5f && rs <= 1.0f ? rs : 1.0f;
+                if (!resolution_set) cfg->render_scale = rs >= 0.5f && rs <= 1.0f ? rs : 1.0f;
                 have_render_scale = true;
+            } else if (!strcmp(key, "resolution")) {
+                int rw = 0, rh = 0;
+                have_resolution = true;
+                if (sscanf(value, "%dx%d", &rw, &rh) == 2 && rw > 0) {
+                    const float rs = std::clamp(float(rw) / 1280.0f, 0.5f, 1.0f);
+                    // 1280x720 is the default line: it must not undo a render_scale set in an older file.
+                    if (rs < 1.0f) {
+                        cfg->render_scale = rs;
+                        resolution_set = true;
+                    }
+                    LOGI(kTag, "settings: resolution %dx%d -> render scale %.3f (%dx%d)", rw, rh, rs,
+                         int(rs * 1280 + 0.5f), int(rs * 720 + 0.5f));
+                } else {
+                    LOGW(kTag, "settings: resolution '%s' not understood (use e.g. 960x540): using 1280x720", value);
+                }
             } else if (!strcmp(key, "bc3_etc2")) {
                 cfg->bc3_etc2 = v != 0;
                 have_bc3 = true;
@@ -454,6 +474,12 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fputs("\n" BC3_HELP "bc3_etc2 = 0\n", w);
                 fclose(w);
                 LOGI(kTag, "settings: added bc3_etc2 to %s", path.c_str());
+            }
+        if (!have_resolution)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n" RESOLUTION_HELP "resolution = 1280x720\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added resolution to %s", path.c_str());
             }
         if (!have_mali_barriers)
             if (FILE* w = fopen(path.c_str(), "a")) {
