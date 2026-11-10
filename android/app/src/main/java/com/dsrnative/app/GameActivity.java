@@ -33,6 +33,7 @@ public class GameActivity extends NativeActivity {
 
     // Called from native code once a second with the frames presented in that second.
     public void setFps(final float fps) {
+        android.util.Log.i("DSR", String.format(java.util.Locale.US, "fps overlay %.0f", fps));
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
