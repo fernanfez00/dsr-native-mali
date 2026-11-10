@@ -46,6 +46,7 @@
 #include "hle/nvn/layout.h"
 #include "hle/nvn/bc_decode.h"
 #include "hle/nvn/etc_encode.h"
+#include "hle/nvn/parallel.h"
 #include "hle/os/os.h"
 #include "hle/nvn/shader/translator.h"
 #include "hle/nvn/state.h"
@@ -1719,6 +1720,88 @@ private:
     size_t etc_cache_bytes_ = 0;
     static constexpr size_t kEtcCacheLimit = size_t(96) << 20;
 
+    // ---- BC -> ETC2 / RGBA8 conversion, spread over all CPU cores -----------------------------------------
+    // A texture upload used to convert every level on the render thread, one after another: 165 textures took
+    // 15 s when a scene loaded. The levels are now prepared in order (deswizzle, cache lookup, stream space),
+    // then converted in bands of block rows by a pool of workers, with the render thread helping.
+    struct ConvJob {
+        std::vector<uint8_t> blocks;  // deswizzled BC blocks of the level
+        uint8_t* out = nullptr;       // destination in the upload stream
+        int w = 0, h = 0, d = 0;
+        size_t row_bytes = 0;
+        int rows = 0;  // block rows per slice
+        BcTarget tgt = BcTarget::None;
+        int fmt = 0;
+        uint64_t key = 0;
+        size_t out_n = 0;
+    };
+    static constexpr int kBandRows = 16;  // block rows (64 texel rows) per task
+
+    static uint64_t HashBytes64(const uint8_t* p, size_t n, uint64_t h) {
+        while (n >= 8) {
+            uint64_t v;
+            memcpy(&v, p, 8);
+            h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+            h ^= h >> 29;
+            p += 8;
+            n -= 8;
+        }
+        while (n--) h = (h ^ *p++) * 1099511628211ull;
+        return h ^ (h >> 32);
+    }
+
+    static void ConvertBand(const ConvJob& j, int by0, int by1) {
+        const bool banded = by0 != 0 || by1 != j.rows;
+        const int y0 = by0 * 4;
+        const int hb = banded ? std::min(by1 * 4, j.h) - y0 : j.h;
+        const uint8_t* blocks = j.blocks.data() + size_t(by0) * j.row_bytes;
+        const int rows = by1 - by0;
+        if (j.tgt == BcTarget::Rgba8) {
+            uint8_t* dst = j.out + size_t(y0) * size_t(j.w) * 4;
+            DecodeBcBlocks(dst, blocks, j.w, hb, j.d, j.row_bytes, rows, j.fmt);
+            return;
+        }
+        thread_local std::vector<uint8_t> rgba;
+        const size_t need = size_t(j.w) * size_t(hb) * size_t(j.d) * 4;
+        if (rgba.size() < need) rgba.resize(need);
+        DecodeBcBlocks(rgba.data(), blocks, j.w, hb, j.d, j.row_bytes, rows, j.fmt);
+        const size_t bxn = size_t((j.w + 3) / 4);
+        EncodeEtc1(j.out + size_t(by0) * bxn * 8, rgba.data(), j.w, hb, j.d, j.tgt == BcTarget::EtcRgb8A1);
+    }
+
+    void RunConversions(std::vector<ConvJob>& jobs) {
+        if (jobs.empty()) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        struct Task {
+            const ConvJob* job;
+            int by0, by1;
+        };
+        std::vector<Task> tasks;
+        for (const ConvJob& j : jobs) {
+            const bool splittable = j.d == 1 && j.rows == (j.h + 3) / 4 && j.rows > kBandRows;
+            if (!splittable) {
+                tasks.push_back({&j, 0, j.rows});
+                continue;
+            }
+            for (int by = 0; by < j.rows; by += kBandRows) tasks.push_back({&j, by, std::min(by + kBandRows, j.rows)});
+        }
+        WorkPool::Get().Run(tasks.size(), [&](size_t i) { ConvertBand(*tasks[i].job, tasks[i].by0, tasks[i].by1); });
+        for (const ConvJob& j : jobs) {
+            if (j.tgt == BcTarget::Rgba8) continue;
+            if (etc_cache_bytes_ + j.out_n > kEtcCacheLimit) {
+                etc_cache_.clear();
+                etc_cache_bytes_ = 0;
+            }
+            etc_cache_[j.key].assign(j.out, j.out + j.out_n);
+            etc_cache_bytes_ += j.out_n;
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        static int logged = 0;
+        if (ms > 40.0 && logged++ < 30)
+            LOGI(kTag, "texture conversion: %zu levels in %zu tasks, %.1f ms (%d workers + render thread)", jobs.size(),
+                 tasks.size(), ms, WorkPool::Get().Workers());
+    }
+
     VkFormat PickFormat(int nvn_format, VkFormatFeatureFlags* features) {
         auto cached = format_cache_.find(nvn_format);
         if (cached != format_cache_.end()) {
@@ -1973,6 +2056,7 @@ private:
         Begin();
         EndRendering();
         if (StreamRemaining() < needed + 1024) Flush();
+        std::vector<ConvJob> jobs;
         std::vector<VkBufferImageCopy> regions;
         const uint8_t* base = reinterpret_cast<const uint8_t*>(t.addr);
         for (int layer = 0; layer < img.layers; layer++) {
@@ -1982,39 +2066,51 @@ private:
                 const uint8_t* src = base + size_t(layer) * layout.layer_stride + l.offset;
                 VkBufferImageCopy r{};
                 if (decode) {
-                    // Compressed blocks -> tightly packed (deswizzled) -> RGBA8 in the stream.
+                    // Compressed blocks -> tightly packed (deswizzled); the conversion itself runs afterwards, in
+                    // parallel (RunConversions).
                     std::vector<uint8_t> blocks(n);
                     if (layout.linear)
                         memcpy(blocks.data(), src, n);
                     else
                         DeswizzleLevel(blocks.data(), src, l);
+                    const size_t out_n = ConvertedBytes(l, tgt);
+                    VkDeviceSize off = StreamAlloc(out_n, 16);
                     if (tgt == BcTarget::Rgba8) {
-                        VkDeviceSize off = StreamAlloc(ConvertedBytes(l, tgt), 16);
-                        DecodeBcBlocks(stream_ptr_ + off, blocks.data(), l.width, l.height, l.depth,
-                                       size_t(l.row_bytes), l.rows, t.tex.format);
+                        ConvJob j;
+                        j.blocks = std::move(blocks);
+                        j.out = stream_ptr_ + off;
+                        j.w = l.width;
+                        j.h = l.height;
+                        j.d = l.depth;
+                        j.row_bytes = size_t(l.row_bytes);
+                        j.rows = int(l.rows);
+                        j.tgt = tgt;
+                        j.fmt = t.tex.format;
+                        j.out_n = out_n;
+                        jobs.push_back(std::move(j));
                         r.bufferOffset = off;  // tightly packed texels: row length and image height left at 0
                     } else {
                         // BC -> RGBA8 -> ETC2 blocks; rows of blocks are declared through the buffer row length.
-                        const size_t out_n = ConvertedBytes(l, tgt);
-                        const uint64_t key = Fnv(blocks.data(), blocks.size(), Fnv(&tgt, sizeof(tgt))) ^
+                        const uint64_t key = HashBytes64(blocks.data(), blocks.size(), uint64_t(tgt) + 0x51ed270b) ^
                                              (uint64_t(l.width) << 40) ^ (uint64_t(l.height) << 20) ^
-                                             uint64_t(l.depth);
-                        VkDeviceSize off = StreamAlloc(out_n, 16);
+                                             uint64_t(l.depth) ^ (uint64_t(t.tex.format) << 56);
                         const auto hit = etc_cache_.find(key);
                         if (hit != etc_cache_.end() && hit->second.size() == out_n) {
                             memcpy(stream_ptr_ + off, hit->second.data(), out_n);
                         } else {
-                            std::vector<uint8_t> rgba(size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4);
-                            DecodeBcBlocks(rgba.data(), blocks.data(), l.width, l.height, l.depth,
-                                           size_t(l.row_bytes), l.rows, t.tex.format);
-                            EncodeEtc1(stream_ptr_ + off, rgba.data(), l.width, l.height, l.depth,
-                                       tgt == BcTarget::EtcRgb8A1);
-                            if (etc_cache_bytes_ + out_n > kEtcCacheLimit) {
-                                etc_cache_.clear();
-                                etc_cache_bytes_ = 0;
-                            }
-                            etc_cache_[key].assign(stream_ptr_ + off, stream_ptr_ + off + out_n);
-                            etc_cache_bytes_ += out_n;
+                            ConvJob j;
+                            j.blocks = std::move(blocks);
+                            j.out = stream_ptr_ + off;
+                            j.w = l.width;
+                            j.h = l.height;
+                            j.d = l.depth;
+                            j.row_bytes = size_t(l.row_bytes);
+                            j.rows = int(l.rows);
+                            j.tgt = tgt;
+                            j.fmt = t.tex.format;
+                            j.key = key;
+                            j.out_n = out_n;
+                            jobs.push_back(std::move(j));
                         }
                         r.bufferOffset = off;
                         r.bufferRowLength = uint32_t(((l.width + 3) / 4) * 4);
@@ -2038,6 +2134,7 @@ private:
                 regions.push_back(r);
             }
         }
+        RunConversions(jobs);
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         Rec([regions = std::move(regions), buf = stream_, image = img.image](VkCommandBuffer cb) {
             vkCmdCopyBufferToImage(cb, buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
