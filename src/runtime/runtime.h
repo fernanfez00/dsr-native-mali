@@ -30,6 +30,8 @@ struct RuntimeConfig {
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
     bool pin_render_thread = false;  // keep the render thread on the fastest CPU core(s) (slower on 8 Gen 2: off)
     float exposure = 1.37f;       // scales the tone-mapping exposure (1.0 = as the game draws it)
+    bool bc3_etc2 = false;        // settings bc3_etc2: BC3 textures -> ETC2 RGBA8 (4x smaller than RGBA8; lossy) on GPUs without BC
+    bool mali_barriers = true;    // settings mali_barriers: narrow layout-transition barriers (no ALL_COMMANDS) for tile-based GPUs
     float render_scale = 1.0f;    // settings render_scale: 1.0 = 1280x720 targets as the game makes them (default)
 };
 
