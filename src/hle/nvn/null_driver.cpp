@@ -534,9 +534,9 @@ void QueuePresentTexture(void* queue, void* window, int index) {
         TakeGameWaits(&wait_present, &wait_sync);
         if (ft_n)
             LOGI(kTag, "frame times: %.1f ms average, %.1f ms worst, %llu over %.0f ms (hitches); game step %.1f ms average; "
-                 "game waited for the render thread %.0f ms at presents, %.0f ms in sync waits (last 10 s)",
+                 "game waited for the render thread %.0f ms at presents, %.0f ms in sync waits (last 10 s); cap %d fps",
                  ft_sum / ft_n, ft_max, (unsigned long long)ft_hitches, 2.0 * 1000.0 / fps, 1000.0 * step_sum / ft_n,
-                 wait_present, wait_sync);
+                 wait_present, wait_sync, fps);
         ft_sum = ft_max = step_sum = 0;
         ft_n = ft_hitches = 0;
         GpuStats s = Stats();

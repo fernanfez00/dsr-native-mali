@@ -2703,8 +2703,14 @@ private:
         if (!sl.ts || !sl.ts_written) return;
         sl.ts_written = false;
         uint64_t t[2];
-        if (vkGetQueryPoolResults(device_, sl.ts, 0, 2, sizeof(t), t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
-            gpu_busy_ms_ += double(t[1] - t[0]) * props_.limits.timestampPeriod / 1e6;
+        if (vkGetQueryPoolResults(device_, sl.ts, 0, 2, sizeof(t), t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0]) {
+            const double ms = double(t[1] - t[0]) * props_.limits.timestampPeriod / 1e6;
+            gpu_busy_ms_ += ms;
+            // Smoothed per-frame GPU time for the dynamic frame-rate controller (a stall is not a frame's cost).
+            const float prev = dsr::g_gpu_frame_ms.load(std::memory_order_relaxed);
+            const float cur = float(std::min(ms, 200.0));
+            dsr::g_gpu_frame_ms.store(prev > 0.0f ? prev + 0.1f * (cur - prev) : cur, std::memory_order_relaxed);
+        }
     }
 
     // Submits the current slot's commands and moves to the other slot. The CPU waits only if that slot's
