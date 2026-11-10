@@ -351,6 +351,9 @@ struct Image {
     // Was an attachment of a render pass with no barrier on it since: a later pass that uses it again in the same
     // layout needs a barrier first (see BeginRendering).
     bool attach_unsynced = false;
+    // PassEndBarrier made this render target readable by fragment shaders only (mali_barriers); a vertex shader that
+    // samples it needs one more barrier first.
+    bool frag_only_sync = false;
     VkClearValue clear_value{};
     VkImageAspectFlags clear_aspect = 0;
     int clear_layer = 0, clear_level = 0;
@@ -1254,6 +1257,9 @@ private:
         bc_native_ = have.features.textureCompressionBC;
         etc_native_ = have.features.textureCompressionETC2;
         en.textureCompressionETC2 = have.features.textureCompressionETC2;
+        mali_barriers_ = dsr::GetRuntime().config.mali_barriers;
+        bc3_etc2_ = dsr::GetRuntime().config.bc3_etc2;
+        LOGI(kTag, "settings: mali_barriers %d, bc3_etc2 %d", int(mali_barriers_), int(bc3_etc2_));
         render_scale_ = std::clamp(dsr::GetRuntime().config.render_scale, 0.5f, 1.0f);
         if (render_scale_ < 1.0f) LOGI(kTag, "render_scale %.2f: 1280x720 targets are rendered at %dx%d", render_scale_,
                                        int(std::lround(1280 * render_scale_)), int(std::lround(720 * render_scale_)));
@@ -1681,12 +1687,13 @@ private:
     // BC textures on a GPU without BC support are converted on the CPU when uploaded:
     //  - BC1 (65, 69) -> ETC2 RGB8, BC1 with alpha (66, 70) -> ETC2 RGB8A1, when the GPU has ETC2;
     //  - any other BC format we can decode (BC1-BC5) -> RGBA8.
-    enum class BcTarget { None, Rgba8, EtcRgb, EtcRgb8A1 };
+    enum class BcTarget { None, Rgba8, EtcRgb, EtcRgb8A1, EtcRgba8 };
     // Diagnostic switch: with false, BC1 goes to RGBA8 even when ETC2 exists (used to tell apart
     // encoder/bit-layout problems from problems in the rest of the texture path).
     static constexpr bool kEtcConversion = true;
     BcTarget TargetFor(int nvn) const {
         if (bc_native_) return BcTarget::None;
+        if (bc3_etc2_ && kEtcConversion && etc_native_ && IsEtcRgba8Encodable(nvn)) return BcTarget::EtcRgba8;
         if (kEtcConversion && etc_native_ && IsEtcEncodable(nvn))
             return EtcHasPunchThrough(nvn) ? BcTarget::EtcRgb8A1 : BcTarget::EtcRgb;
         if (IsBcDecodable(nvn)) return BcTarget::Rgba8;
@@ -1697,7 +1704,10 @@ private:
     static size_t ConvertedBytes(const LevelLayout& l, BcTarget tgt) {
         if (tgt == BcTarget::Rgba8)
             return size_t(l.width) * size_t(l.height) * size_t(l.depth) * 4;
-        return EtcLevelBytes(l.width, l.height, l.depth);
+        return EtcBytesFor(tgt, l.width, l.height, l.depth);
+    }
+    static size_t EtcBytesFor(BcTarget tgt, int w, int h, int d) {
+        return tgt == BcTarget::EtcRgba8 ? EtcRgba8LevelBytes(w, h, d) : EtcLevelBytes(w, h, d);
     }
     std::vector<VkFormat> Candidates(int nvn) const {
         const bool srgb = nvn == 69 || nvn == 70 || nvn == 71 || nvn == 72;
@@ -1708,12 +1718,16 @@ private:
                 return {srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK};
             case BcTarget::EtcRgb8A1:
                 return {srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK};
+            case BcTarget::EtcRgba8:
+                return {srgb ? VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK};
             default:
                 return ImageCandidates(nvn);
         }
     }
     bool bc_native_ = false;
     bool etc_native_ = false;
+    bool bc3_etc2_ = false;       // settings bc3_etc2
+    bool mali_barriers_ = true;   // settings mali_barriers
     float render_scale_ = 1.0f;  // settings render_scale: 1.0 = the game's own size (default)
     // Converted ETC levels, keyed by the source blocks: the game uploads the same textures many times.
     std::unordered_map<uint64_t, std::vector<uint8_t>> etc_cache_;
@@ -1766,7 +1780,10 @@ private:
         if (rgba.size() < need) rgba.resize(need);
         DecodeBcBlocks(rgba.data(), blocks, j.w, hb, j.d, j.row_bytes, rows, j.fmt);
         const size_t bxn = size_t((j.w + 3) / 4);
-        EncodeEtc1(j.out + size_t(by0) * bxn * 8, rgba.data(), j.w, hb, j.d, j.tgt == BcTarget::EtcRgb8A1);
+        if (j.tgt == BcTarget::EtcRgba8)
+            EncodeEtc2Rgba8(j.out + size_t(by0) * bxn * 16, rgba.data(), j.w, hb, j.d);
+        else
+            EncodeEtc1(j.out + size_t(by0) * bxn * 8, rgba.data(), j.w, hb, j.d, j.tgt == BcTarget::EtcRgb8A1);
     }
 
     void RunConversions(std::vector<ConvJob>& jobs) {
@@ -2715,9 +2732,27 @@ private:
         ReapRetired();
     }
 
+    // Stages that use an image in `layout`. A layout transition only has to hold back THESE stages of the commands after
+    // it (the destination scope), not ALL_COMMANDS: on a tile-based GPU (Mali) a barrier whose destination includes the
+    // vertex stage makes the next pass's vertex/tiler work wait for the previous pass's fragment work, which is
+    // what lets the two overlap otherwise. (Source stays ALL_COMMANDS: every writer is waited for.)
+    static VkPipelineStageFlags StagesUsing(VkImageLayout layout) {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+                return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: return VK_PIPELINE_STAGE_TRANSFER_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            default: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+    }
     void RawBarrier(VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
                     uint32_t levels = 1, uint32_t layers = 1) {
         barriers_++;
+        const VkPipelineStageFlags dst_stages = mali_barriers_ ? StagesUsing(to) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -2727,9 +2762,8 @@ private:
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = image;
         b.subresourceRange = {aspect, 0, levels, 0, layers};
-        Rec([b](VkCommandBuffer cb) {
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                                 nullptr, 1, &b);
+        Rec([b, dst_stages](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dst_stages, 0, 0, nullptr, 0, nullptr, 1, &b);
         });
     }
     void Transition(Image& img, VkImageLayout to) {
@@ -2738,6 +2772,7 @@ private:
         RawBarrier(img.image, img.aspect, img.layout, to, uint32_t(img.levels), uint32_t(img.layers));
         img.layout = to;
         img.attach_unsynced = false;
+        img.frag_only_sync = false;  // the barrier above waited for every earlier write
     }
 
     // ======================================================================================================
@@ -3097,7 +3132,7 @@ private:
         const bool decode = tgt != BcTarget::None;
         const size_t out_size = !decode                    ? row * rows * size_t(d)
                                 : tgt == BcTarget::Rgba8  ? size_t(w) * size_t(h) * size_t(d) * 4
-                                                           : EtcLevelBytes(w, h, d);
+                                                           : EtcBytesFor(tgt, w, h, d);
         if (StreamRemaining() < out_size + 1024) Flush();
         VkDeviceSize off = StreamAlloc(out_size, 16);
         const uint8_t* src = reinterpret_cast<const uint8_t*>(c.src_addr);
@@ -3112,7 +3147,10 @@ private:
             } else {
                 std::vector<uint8_t> rgba(size_t(w) * size_t(h) * size_t(d) * 4);
                 DecodeBcBlocks(rgba.data(), blocks.data(), w, h, d, row, int(rows), img->nvn_format);
-                EncodeEtc1(stream_ptr_ + off, rgba.data(), w, h, d, tgt == BcTarget::EtcRgb8A1);
+                if (tgt == BcTarget::EtcRgba8)
+                    EncodeEtc2Rgba8(stream_ptr_ + off, rgba.data(), w, h, d);
+                else
+                    EncodeEtc1(stream_ptr_ + off, rgba.data(), w, h, d, tgt == BcTarget::EtcRgb8A1);
             }
         } else {
             for (int z = 0; z < d; z++)
@@ -3175,15 +3213,41 @@ private:
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = img.image;
         b.subresourceRange = {img.aspect, 0, uint32_t(img.levels), 0, uint32_t(img.layers)};
-        Rec([b](VkCommandBuffer cb) {
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &b);
+        // mali_barriers: readable by fragment shaders only. Fragment -> vertex dependencies are what stop a tile-based
+        // GPU from running the next pass's vertex work while this pass shades; a vertex shader sampling a render
+        // target is rare, and gets its own barrier (VertexReadBarrier).
+        const VkPipelineStageFlags dst = mali_barriers_ ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                                        : (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        Rec([b, dst](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, dst, 0, 0, nullptr, 0, nullptr, 1, &b);
         });
         img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         img.attach_unsynced = false;
+        img.frag_only_sync = mali_barriers_;
     }
+    // Outside a render pass: lets vertex shaders read a render target that PassEndBarrier only released to fragment
+    // shaders.
+    void VertexReadBarrier(Image& img) {
+        barriers_++;
+        vertex_read_barriers_++;
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = {img.aspect, 0, uint32_t(img.levels), 0, uint32_t(img.layers)};
+        Rec([b](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &b);
+        });
+        img.frag_only_sync = false;
+    }
+    uint64_t vertex_read_barriers_ = 0;
 
     void EndRendering(int line = __builtin_LINE()) {
         if (rendering_) {
@@ -3694,6 +3758,11 @@ private:
                     // Sampling the bound depth buffer (soft particles, fog): read a snapshot copy instead.
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
+                }
+                if (stage == 0 && img->frag_only_sync && img->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+                    !img->clear_pending) {
+                    EndRendering();
+                    VertexReadBarrier(*img);
                 }
                 if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || img->clear_pending) {
                     if (rendering_) {
@@ -5194,8 +5263,9 @@ private:
                 for (uint64_t& c : video_cadence_) c = 0;
             }
         }
-        LOGI(kTag, "last 10 s: %llu render passes started, %llu image barriers", (unsigned long long)render_passes_,
-             (unsigned long long)barriers_);
+        LOGI(kTag, "last 10 s: %llu render passes started, %llu image barriers (%llu of them for vertex-shader reads of render targets)",
+             (unsigned long long)render_passes_, (unsigned long long)barriers_, (unsigned long long)vertex_read_barriers_);
+        vertex_read_barriers_ = 0;
         render_passes_ = barriers_ = 0;
         if (!pass_breaks_.empty()) {
             std::vector<std::pair<uint64_t, int>> v;

@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace dsr::hle::nvn {
 namespace {
@@ -208,11 +209,182 @@ void StoreBigEndian(uint8_t* out, uint64_t v) {
     for (int k = 0; k < 8; k++) out[k] = uint8_t(v >> (56 - 8 * k));
 }
 
+
+// ---- ETC2 RGBA8: EAC alpha block + ETC1-style colour block ---------------------------------------------------------
+// EAC alpha modifier tables (8 ascending modifiers each). Block: byte 0 = base codeword, byte 1 = multiplier (high
+// nibble) | table (low nibble), then sixteen 3-bit indices (48 bits, big endian, texel order x * 4 + y).
+constexpr int kEacMods[16][8] = {
+    {-3, -6, -9, -15, 2, 5, 8, 14}, {-3, -7, -10, -13, 2, 6, 9, 12}, {-2, -5, -8, -13, 1, 4, 7, 12},
+    {-2, -4, -6, -13, 1, 3, 5, 12}, {-3, -6, -8, -12, 2, 5, 7, 11}, {-3, -7, -9, -11, 2, 6, 8, 10},
+    {-4, -7, -8, -11, 3, 6, 7, 10}, {-3, -5, -8, -11, 2, 4, 7, 10}, {-2, -6, -8, -10, 1, 5, 7, 9},
+    {-2, -5, -8, -10, 1, 4, 7, 9},  {-2, -4, -8, -10, 1, 3, 7, 9},  {-2, -5, -7, -10, 1, 4, 6, 9},
+    {-3, -4, -7, -10, 2, 3, 6, 9},  {-1, -2, -3, -10, 0, 1, 2, 9},  {-4, -6, -8, -9, 3, 5, 7, 8},
+    {-3, -5, -7, -9, 2, 4, 6, 8},
+};
+// Table 13 has a zero modifier at index 4: a flat block (very common: opaque textures) is stored exactly.
+constexpr int kEacFlatTable = 13, kEacFlatIndex = 4;
+
+// The tables sorted ascending (with each entry's original index), for a 3-step nearest-value search.
+struct EacSorted {
+    int mod[16][8];
+    int index[16][8];
+    EacSorted() {
+        for (int t = 0; t < 16; t++) {
+            for (int k = 0; k < 8; k++) {
+                mod[t][k] = kEacMods[t][k];
+                index[t][k] = k;
+            }
+            for (int i = 1; i < 8; i++)  // insertion sort
+                for (int j = i; j > 0 && mod[t][j - 1] > mod[t][j]; j--) {
+                    std::swap(mod[t][j - 1], mod[t][j]);
+                    std::swap(index[t][j - 1], index[t][j]);
+                }
+        }
+    }
+};
+const EacSorted& Sorted() {
+    static const EacSorted s;
+    return s;
+}
+
+// Squared error of one (table, multiplier, base) choice, giving up once it reaches `limit`; fills idx[] (index into
+// the table per texel).
+int EacTry(const uint8_t a[16], int table, int mult, int base, int idx[16], int limit = 1 << 30) {
+    const EacSorted& s = Sorted();
+    int vals[8];
+    for (int k = 0; k < 8; k++) vals[k] = ClampByte(base + s.mod[table][k] * mult);  // ascending
+    int err = 0;
+    for (int i = 0; i < 16; i++) {
+        const int v2 = int(a[i]) * 2;
+        int pos = v2 > vals[3] + vals[4] ? 4 : 0;
+        pos += v2 > vals[pos + 1] + vals[pos + 2] ? 2 : 0;
+        pos += v2 > vals[pos] + vals[pos + 1] ? 1 : 0;
+        idx[i] = s.index[table][pos];
+        const int d = int(a[i]) - vals[pos];
+        err += d * d;
+        if (err >= limit) return err;
+    }
+    return err;
+}
+
+void StoreEac(uint8_t* out, int base, int mult, int table, const int idx[16]) {
+    out[0] = uint8_t(base);
+    out[1] = uint8_t((mult << 4) | table);
+    uint64_t bits = 0;
+    for (int i = 0; i < 16; i++) bits |= uint64_t(idx[i] & 7) << (45 - 3 * i);
+    for (int k = 0; k < 6; k++) out[2 + k] = uint8_t(bits >> (40 - 8 * k));
+}
+
+void EncodeEacBlock(uint8_t* out, const uint8_t a[16]) {
+    int lo = 255, hi = 0;
+    for (int i = 0; i < 16; i++) {
+        lo = a[i] < lo ? a[i] : lo;
+        hi = a[i] > hi ? a[i] : hi;
+    }
+    int idx[16];
+    if (lo == hi) {
+        for (int& v : idx) v = kEacFlatIndex;
+        StoreEac(out, lo, 1, kEacFlatTable, idx);
+        return;
+    }
+    const int range = hi - lo;
+    // The rows are not sorted (indices 0-3 are the negative modifiers, 4-7 the positive ones): take min and max.
+    int tmin[16], tmax[16];
+    for (int t = 0; t < 16; t++) {
+        tmin[t] = tmax[t] = kEacMods[t][0];
+        for (int k = 1; k < 8; k++) {
+            tmin[t] = kEacMods[t][k] < tmin[t] ? kEacMods[t][k] : tmin[t];
+            tmax[t] = kEacMods[t][k] > tmax[t] ? kEacMods[t][k] : tmax[t];
+        }
+    }
+    auto centre = [&](int t, int m) {
+        const double c = (lo + hi) * 0.5 - m * (tmin[t] + tmax[t]) * 0.5;
+        return ClampByte(int(c + 0.5));
+    };
+    // Search: every table, multipliers around the one whose span just covers the block's range, a few bases around the
+    // centred one (candidates that cannot beat the best so far are dropped early), then a finer pass on the winner.
+    int bt = 0, bm = 1, bb = lo, be = 1 << 30;
+    for (int t = 0; t < 16; t++) {
+        const int span = tmax[t] - tmin[t];
+        const int m0 = (range + span - 1) / span;
+        for (int m = m0; m <= m0 + 1; m++) {
+            if (m < 1 || m > 15) continue;
+            const int b0 = centre(t, m);
+            for (int db = -3; db <= 3; db += 6) {
+                const int b = ClampByte(b0 + db);
+                const int e = EacTry(a, t, m, b, idx, be);
+                if (e < be) {
+                    be = e;
+                    bt = t;
+                    bm = m;
+                    bb = b;
+                }
+            }
+        }
+    }
+    for (int dm = -1; dm <= 1; dm++) {
+        const int m = bm + dm;
+        if (m < 1 || m > 15) continue;
+        for (int db = -4; db <= 4; db++) {
+            const int b = ClampByte(bb + db * (dm == 0 ? 1 : 2));
+            const int e = EacTry(a, bt, m, b, idx, be);
+            if (e < be) {
+                be = e;
+                bm = m;
+                bb = b;
+            }
+        }
+    }
+    EacTry(a, bt, bm, bb, idx);
+    StoreEac(out, bb, bm, bt, idx);
+}
+
 }  // namespace
 
 bool IsEtcEncodable(int f) { return f == 65 || f == 66 || f == 69 || f == 70; }
 
 bool EtcHasPunchThrough(int f) { return f == 66 || f == 70; }
+
+bool IsEtcRgba8Encodable(int f) { return f == 68 || f == 72; }
+
+size_t EtcRgba8LevelBytes(int width, int height, int depth) {
+    const size_t bx = size_t((width + 3) / 4), by = size_t((height + 3) / 4);
+    return bx * by * size_t(depth > 0 ? depth : 1) * 16;
+}
+
+void EncodeEtc2Rgba8(uint8_t* out, const uint8_t* rgba, int width, int height, int depth) {
+    const int bxn = (width + 3) / 4, byn = (height + 3) / 4;
+    for (int z = 0; z < depth; z++) {
+        const uint8_t* slice = rgba + size_t(z) * size_t(width) * size_t(height) * 4;
+        for (int by = 0; by < byn; by++)
+            for (int bx = 0; bx < bxn; bx++) {
+                Texel t[16];
+                GatherBlock(slice, width, height, bx, by, false, t);
+                uint8_t a[16];
+                for (int x = 0; x < 4; x++)
+                    for (int y = 0; y < 4; y++) {
+                        const int sx = bx * 4 + x < width ? bx * 4 + x : width - 1;
+                        const int sy = by * 4 + y < height ? by * 4 + y : height - 1;
+                        a[x * 4 + y] = slice[(size_t(sy) * size_t(width) + size_t(sx)) * 4 + 3];
+                    }
+                uint8_t* dst = out + ((size_t(z) * byn + by) * bxn + bx) * 16;
+                EncodeEacBlock(dst, a);
+                StoreBigEndian(dst + 8, EncodeBlock(t, false));
+            }
+    }
+}
+
+void DecodeEacAlphaBlock(const uint8_t* b, uint8_t out[16]) {
+    const int base = b[0], mult = b[1] >> 4, table = b[1] & 15;
+    uint64_t bits = 0;
+    for (int k = 0; k < 6; k++) bits = (bits << 8) | b[2 + k];
+    for (int x = 0; x < 4; x++)
+        for (int y = 0; y < 4; y++) {
+            const int i = x * 4 + y;
+            const int k = int((bits >> (45 - 3 * i)) & 7);
+            out[y * 4 + x] = uint8_t(ClampByte(base + kEacMods[table][k] * mult));
+        }
+}
 
 size_t EtcLevelBytes(int width, int height, int depth) {
     const size_t bx = size_t((width + 3) / 4), by = size_t((height + 3) / 4);
