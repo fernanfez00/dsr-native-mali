@@ -316,6 +316,15 @@ bool g_face_by_position = false;  // `face_buttons` setting (see KeyToButton)
 #define RESOLUTION_HELP \
     "# resolution: render size, WIDTHxHEIGHT (16:9), 640x360 - 1280x720. The game draws at 1280x720; smaller sizes\n" \
     "# are enlarged at the end (less GPU work). Examples: 960x540, 854x480. Overrides render_scale when present.\n"
+#define DYNAMIC_FPS_HELP \
+    "# dynamic_fps: 1 = the frame rate follows what the device sustains (60, 30, 20 or 15 fps, never below min_fps; these\n" \
+    "# divide 60 and 90 Hz screens, so frames are evenly spaced) and the game's time step follows the real frame time, so\n" \
+    "# the game keeps normal speed instead of slowing down; fps is then the highest rate used. 0 = fixed rate = fps.\n" \
+    "# min_fps: lowest rate dynamic_fps may use (15 - 30). Lower = smoother speed in heavy areas, but longer time steps\n" \
+    "# (below 20 the game's collision and animation timing may misbehave).\n"
+#define SPEED_HACKS_HELP \
+    "# skip_postfx / no_depth_snapshot: speed hacks, 1 = skip draws into the small post-process targets (320x180, 160x90)\n" \
+    "# / draws that sample the depth buffer. They can leave the in-game picture black: keep them at 0 unless testing.\n"
 #define MALI_BARRIERS_HELP \
     "# mali_barriers: 1 = narrow GPU barriers so vertex work can overlap the previous pass on tile-based GPUs\n" \
     "# (Mali, Adreno); 0 = old full barriers (use if you see missing or flickering post-processing)\n"
@@ -326,7 +335,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         if (FILE* w = fopen(path.c_str(), "w")) {
             fprintf(w,
                     "# DSR Native settings (read at start-up)\n"
-                    "# fps: frame rate cap, 30 (as on Switch) to 60; e.g. 45 for a steady rate in heavy areas\n"
+                    "# fps: highest frame rate, 15 to 60 (30 as on Switch; 20 = a steady, light rate for weak GPUs)\n"
                     "fps = %d\n"
                     "# async_pipelines: 1 = compile new GPU pipelines in the background (no hitch; a new object may\n"
                     "# appear a frame late), 0 = compile on the spot (can hitch the first time something is seen)\n"
@@ -362,7 +371,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "docked = 0\n"
                     BC3_HELP "bc3_etc2 = 0\n"
                     RESOLUTION_HELP "resolution = 1280x720\n"
-                    MALI_BARRIERS_HELP "mali_barriers = 1\n",
+                    MALI_BARRIERS_HELP "mali_barriers = 1\n"
+                    SPEED_HACKS_HELP "skip_postfx = 0\n" "no_depth_snapshot = 0\n"
+                    DYNAMIC_FPS_HELP "dynamic_fps = 1\n" "min_fps = 20\n",
                     cfg->target_fps, cfg->async_pipelines ? 1 : 0, cfg->auto_capture ? 1 : 0, cfg->profile ? 1 : 0,
                     cfg->gamma, cfg->exposure);
             fclose(w);
@@ -373,13 +384,18 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false,
                have_render_scale = false, have_bc3 = false, have_mali_barriers = false, have_resolution = false;
+        bool have_dynamic_fps = false;
         bool resolution_set = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[1024];
             if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %1023s", key, value) != 2) continue;
             const int v = atoi(value);
-            if (!strcmp(key, "fps")) cfg->target_fps = std::clamp(v, 30, 60);  // e.g. 45: a steady cap below 60
+            if (!strcmp(key, "fps")) cfg->target_fps = std::clamp(v, 15, 60);  // highest rate; 20 = steady and light
+            else if (!strcmp(key, "dynamic_fps")) {
+                cfg->dynamic_fps = v != 0;
+                have_dynamic_fps = true;
+            } else if (!strcmp(key, "min_fps")) cfg->min_fps = std::clamp(v, 15, 30);
             else if (!strcmp(key, "async_pipelines")) cfg->async_pipelines = v != 0;
             else if (!strcmp(key, "auto_capture")) cfg->auto_capture = v != 0;
             else if (!strcmp(key, "profile")) cfg->profile = v != 0;
@@ -494,6 +510,12 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fclose(w);
                 LOGI(kTag, "settings: added mali_barriers to %s", path.c_str());
             }
+        if (!have_dynamic_fps)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n" DYNAMIC_FPS_HELP "dynamic_fps = 1\n" "min_fps = 20\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added dynamic_fps and min_fps to %s", path.c_str());
+            }
         if (!have_docked)
             if (FILE* w = fopen(path.c_str(), "a")) {
                 fputs("\n# docked: 1 = report console mode to the game (experimental); 0 = handheld, 720p\n"
@@ -502,6 +524,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 LOGI(kTag, "settings: added docked to %s", path.c_str());
             }
     }
+    LOGI(kTag, "settings: fps %d max, dynamic fps %s, min fps %d", cfg->target_fps, cfg->dynamic_fps ? "on" : "off",
+         cfg->min_fps);
     LOGI(kTag, "settings (%s): fps %d, async pipelines %s, auto capture %s, profile %s, gamma %.2f, exposure %.2f, "
          "present mode %s, face buttons by %s",
          path.c_str(), cfg->target_fps, cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
