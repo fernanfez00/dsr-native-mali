@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <vector>
 #include <cmath>
@@ -783,6 +784,23 @@ void OnCmd(android_app* app, int32_t cmd) {
 }
 }  // namespace
 
+// FPS overlay: GameActivity.setFps(float) shows the presented frames of the last second.
+void PublishFps(android_app* app, float fps) {
+    JavaVM* vm = app->activity->vm;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+        attached = true;
+    }
+    jclass cls = env->GetObjectClass(app->activity->clazz);
+    jmethodID mid = cls ? env->GetMethodID(cls, "setFps", "(F)V") : nullptr;
+    if (mid) env->CallVoidMethod(app->activity->clazz, mid, fps);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (cls) env->DeleteLocalRef(cls);
+    if (attached) vm->DetachCurrentThread();
+}
+
 void android_main(android_app* app) {
     dsr::SetLogLevel(dsr::LogLevel::Debug);
     SetupLogFile(app);
@@ -791,6 +809,16 @@ void android_main(android_app* app) {
     LogDeviceInfo();
     app->onAppCmd = OnCmd;
     app->onInputEvent = OnInput;
+    std::atomic<bool> fps_stop{false};
+    std::thread fps_thread([app, &fps_stop] {
+        uint64_t last = 0;
+        while (!fps_stop.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            const uint64_t now = dsr::g_presented_frames.load();
+            PublishFps(app, float(now - last));
+            last = now;
+        }
+    });
     while (!app->destroyRequested) {
         int events;
         android_poll_source* source;
@@ -799,6 +827,8 @@ void android_main(android_app* app) {
             if (app->destroyRequested) break;
         }
     }
+    fps_stop = true;
+    fps_thread.join();
     LOGI(kTag, "activity destroyed (android_main returning)");
 }
 
