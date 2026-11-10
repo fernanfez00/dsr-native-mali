@@ -309,6 +309,13 @@ bool g_face_by_position = false;  // `face_buttons` setting (see KeyToButton)
     "# position, as on a Switch pad (for Xbox-style controllers whose A sits where the Switch's B is)\n"
 
 // settings.txt beside the game folder: "key = value" lines, '#' comments. Written with defaults if missing.
+#define BC3_HELP \
+    "# bc3_etc2: 1 = keep BC3 (DXT5) textures as ETC2 RGBA8 instead of RGBA8: 4x less texture memory and bandwidth on\n" \
+    "# GPUs without BC support (Mali). Slightly lossy (normal maps most); first load of a texture takes more CPU\n"
+#define MALI_BARRIERS_HELP \
+    "# mali_barriers: 1 = narrow GPU barriers so vertex work can overlap the previous pass on tile-based GPUs\n" \
+    "# (Mali, Adreno); 0 = old full barriers (use if you see missing or flickering post-processing)\n"
+
 void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     FILE* f = fopen(path.c_str(), "r");
     if (!f) {
@@ -348,7 +355,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "language = es\n"
                     "# docked: 1 = report console mode to the game (experimental: the game may then ask for a larger\n"
                     "# resolution, which the renderer does not support yet); 0 = handheld, 720p (default)\n"
-                    "docked = 0\n",
+                    "docked = 0\n"
+                    BC3_HELP "bc3_etc2 = 0\n"
+                    MALI_BARRIERS_HELP "mali_barriers = 1\n",
                     cfg->target_fps, cfg->async_pipelines ? 1 : 0, cfg->auto_capture ? 1 : 0, cfg->profile ? 1 : 0,
                     cfg->gamma, cfg->exposure);
             fclose(w);
@@ -358,7 +367,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         }
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_language = false, have_docked = false,
-               have_render_scale = false;
+               have_render_scale = false, have_bc3 = false, have_mali_barriers = false;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[64];
@@ -392,6 +401,12 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 const float rs = float(atof(value));
                 cfg->render_scale = rs >= 0.5f && rs <= 1.0f ? rs : 1.0f;
                 have_render_scale = true;
+            } else if (!strcmp(key, "bc3_etc2")) {
+                cfg->bc3_etc2 = v != 0;
+                have_bc3 = true;
+            } else if (!strcmp(key, "mali_barriers")) {
+                cfg->mali_barriers = v != 0;
+                have_mali_barriers = true;
             } else if (!strcmp(key, "docked")) {
                 cfg->docked = v != 0;
                 have_docked = true;
@@ -433,6 +448,18 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                       "render_scale = 1.0\n", w);
                 fclose(w);
                 LOGI(kTag, "settings: added render_scale to %s", path.c_str());
+            }
+        if (!have_bc3)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n" BC3_HELP "bc3_etc2 = 0\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added bc3_etc2 to %s", path.c_str());
+            }
+        if (!have_mali_barriers)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n" MALI_BARRIERS_HELP "mali_barriers = 1\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added mali_barriers to %s", path.c_str());
             }
         if (!have_docked)
             if (FILE* w = fopen(path.c_str(), "a")) {
