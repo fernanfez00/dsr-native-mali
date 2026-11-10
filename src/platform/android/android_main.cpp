@@ -831,6 +831,7 @@ void android_main(android_app* app) {
         while (!fps_stop.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             const uint64_t now = dsr::g_presented_frames.load();
+            dsr::g_fps_shown.store(int(now - last));
             PublishFps(app, float(now - last));
             last = now;
         }
