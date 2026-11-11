@@ -456,6 +456,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "hud_box")) cfg->hud_box = v != 0;
             else if (!strcmp(key, "compositor_scaling")) cfg->compositor_scaling = v != 0;
             else if (!strcmp(key, "max_anisotropy")) cfg->max_anisotropy = v;
+            else if (!strcmp(key, "bc_etc2")) cfg->bc_etc2 = v != 0;
+            else if (!strcmp(key, "bc3_etc2")) cfg->bc3_etc2 = v != 0;
             else if (!strcmp(key, "aspect_ratio")) {
                 cfg->aspect_ratio = value;
                 have_aspect = true;

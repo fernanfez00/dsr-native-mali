@@ -46,6 +46,8 @@
 #include "common/platform.h"
 #include "hle/nvn/backend.h"
 #include "hle/nvn/bc_decode.h"
+#include "hle/nvn/etc_encode.h"
+#include "hle/nvn/parallel.h"
 #include "runtime/runtime.h"
 #include "hle/nvn/layout.h"
 #include "hle/os/os.h"
@@ -143,6 +145,12 @@ VkFormat SrgbTwin(VkFormat f) {
         case VK_FORMAT_BC3_SRGB_BLOCK: return VK_FORMAT_BC3_UNORM_BLOCK;
         case VK_FORMAT_BC7_UNORM_BLOCK: return VK_FORMAT_BC7_SRGB_BLOCK;
         case VK_FORMAT_BC7_SRGB_BLOCK: return VK_FORMAT_BC7_UNORM_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK: return VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK: return VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK: return VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK: return VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK: return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
+        case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK: return VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
         default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -309,6 +317,19 @@ VkFormat BcDecodedFormat(int f) {
     }
 }
 
+// What a BC texture becomes on a GPU without BC support: decoded (RGBA8, R8, RG8, RGBA16F) or re-encoded as ETC2.
+enum class BcTo : uint8_t { Decoded, Etc2, Etc2Rgba8 };
+VkFormat ConvertedFormat(int f, BcTo to) {
+    const bool srgb = f == 69 || f == 70 || f == 71 || f == 72 || f == 78;
+    if (to == BcTo::Etc2 && IsEtcEncodable(f)) {
+        if (EtcHasPunchThrough(f)) return srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
+        return srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+    }
+    if (to == BcTo::Etc2Rgba8 && IsEtcRgba8Encodable(f))
+        return srgb ? VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+    return BcDecodedFormat(f);
+}
+
 VkCompareOp CompareOp(int f) {  // NEVER=1 .. ALWAYS=8
     static const VkCompareOp k[] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS,
                                     VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER,
@@ -449,7 +470,8 @@ struct Image {
     bool depth_exported = false;
     // Ever had depth written by a fragment shader (gl_FragDepth): depth tests against it are done in the shader.
     bool fragdepth_written = false;
-    BcKind bc = BcKind::None;  // block-compressed texture decoded on upload (GPU without BC support)
+    BcKind bc = BcKind::None;  // block-compressed texture converted on upload (GPU without BC support)
+    BcTo bc_to = BcTo::Decoded;  // ... into what
     bool storage = false;      // created with VK_IMAGE_USAGE_STORAGE_BIT
     bool mutable_fmt = false;  // created with VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT (views in `twin` allowed)
     uint64_t attach_gen = 0;  // times attached to a render pass (`hole_test` 16 copies)
@@ -1386,6 +1408,7 @@ private:
         vkGetPhysicalDeviceFeatures2(phys_, &have);
         VkPhysicalDeviceFeatures en{};
         en.textureCompressionBC = have.features.textureCompressionBC;
+        en.textureCompressionETC2 = have.features.textureCompressionETC2;
         en.samplerAnisotropy = have.features.samplerAnisotropy;
         en.shaderImageGatherExtended = have.features.shaderImageGatherExtended;
         en.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -1402,9 +1425,9 @@ private:
         VkPhysicalDeviceFeatures2 en2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         en2.features = en;
         if (v13) en2.pNext = &en13;
-        LOGI(kTag, "features: dynamic rendering %d, BC textures %d, anisotropy %d, gather-extended %d",
-             int(en13.dynamicRendering), int(en.textureCompressionBC), int(en.samplerAnisotropy),
-             int(en.shaderImageGatherExtended));
+        LOGI(kTag, "features: dynamic rendering %d, BC textures %d, ETC2 textures %d, anisotropy %d, gather-extended %d",
+             int(en13.dynamicRendering), int(en.textureCompressionBC), int(en.textureCompressionETC2),
+             int(en.samplerAnisotropy), int(en.shaderImageGatherExtended));
 
         float prio = 1.0f;
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -1902,6 +1925,22 @@ private:
              bc_forced_ ? " - BC textures used as they are (not decoded)" : " - BC textures stay decoded on upload");
     }
 
+    // What a BC texture is converted into when the GPU cannot sample BC: ETC2 when the GPU has it (BC1 always;
+    // BC3 with settings bc3_etc2), else decoded. ETC2 keeps BC1 textures at their compressed size (8 bytes per
+    // 4x4 block; decoded RGBA8 is 4x larger), which saves memory and texture bandwidth on Mali.
+    BcTo BcTarget(int nvn_format) {
+        const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
+        if (!features_.textureCompressionETC2 || !c.bc_etc2) return BcTo::Decoded;
+        BcTo to = BcTo::Decoded;
+        if (IsEtcEncodable(nvn_format)) to = BcTo::Etc2;
+        else if (c.bc3_etc2 && IsEtcRgba8Encodable(nvn_format)) to = BcTo::Etc2Rgba8;
+        if (to == BcTo::Decoded) return to;
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, to), &p);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        return (p.optimalTilingFeatures & need) == need ? to : BcTo::Decoded;
+    }
+
     VkFormat PickFormat(int nvn_format, VkFormatFeatureFlags* features) {
         auto cached = format_cache_.find(nvn_format);
         if (cached != format_cache_.end()) {
@@ -1926,15 +1965,16 @@ private:
             }
         }
         if (chosen == VK_FORMAT_UNDEFINED && BcKindOf(nvn_format) != BcKind::None) {
-            // No BC support (Adreno 6xx and older, Mali): decoded on upload into an uncompressed format.
-            const VkFormat f = BcDecodedFormat(nvn_format);
+            // No BC support (Adreno 6xx and older, Mali): converted on upload, into ETC2 or decoded.
+            const BcTo to = BcTarget(nvn_format);
+            const VkFormat f = ConvertedFormat(nvn_format, to);
             VkFormatProperties p;
             vkGetPhysicalDeviceFormatProperties(phys_, f, &p);
             if ((p.optimalTilingFeatures & need) == need) {
                 chosen = f;
                 feats = p.optimalTilingFeatures;
-                LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: decoded on upload to Vulkan format %d",
-                     nvn_format, int(f));
+                LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: %s on upload (Vulkan format %d)",
+                     nvn_format, to == BcTo::Decoded ? "decoded" : "re-encoded as ETC2", int(f));
                 if (BcKindOf(nvn_format) == BcKind::BC7 || BcKindOf(nvn_format) == BcKind::BC6H_S ||
                     BcKindOf(nvn_format) == BcKind::BC6H_U)
                     LOGW(kTag, "NVN format %d: decoding not implemented yet, shown as grey", nvn_format);
@@ -2135,7 +2175,13 @@ private:
         img.addr = t.addr;
         img.tex = t.tex;
         img.vk_format = vf;
-        if (BcKindOf(t.tex.format) != BcKind::None && vf == BcDecodedFormat(t.tex.format)) img.bc = BcKindOf(t.tex.format);
+        if (BcKindOf(t.tex.format) != BcKind::None)  // a BC texture in a format the GPU has instead: converted
+            for (BcTo to : {BcTo::Etc2, BcTo::Etc2Rgba8, BcTo::Decoded})
+                if (vf == ConvertedFormat(t.tex.format, to) && (to == BcTo::Decoded || vf != BcDecodedFormat(t.tex.format))) {
+                    img.bc = BcKindOf(t.tex.format);
+                    img.bc_to = to;
+                    break;
+                }
         img.width = t.tex.width;
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
@@ -2222,9 +2268,102 @@ private:
         return h;
     }
 
-    // Fills a sampled texture from game memory: deswizzle each level/layer into the stream, then copy.
+    // Bytes one level of a converted BC texture takes in the upload stream.
+    static size_t ConvertedLevelBytes(const Image& img, int w, int h, int d) {
+        switch (img.bc_to) {
+            case BcTo::Etc2: return EtcLevelBytes(w, h, d);
+            case BcTo::Etc2Rgba8: return EtcRgba8LevelBytes(w, h, d);
+            default: return size_t(w) * size_t(h) * size_t(d) * size_t(BcDecodedBytes(img.bc));
+        }
+    }
+
+    // ---- BC texture conversion (GPUs without BC), spread over the CPU cores ------------------------------------
+    // From pull request #13 (fernanfez00): a texture's levels used to be converted one after another on the render
+    // thread (scenes with many new textures took seconds to load). The blocks of every level are deswizzled first,
+    // then converted in bands of block rows by a pool of workers (parallel.h), the render thread helping. ETC2
+    // results are also kept in a cache keyed by the source blocks: the game uploads the same textures again.
+    struct BcJob {
+        BcKind kind;
+        BcTo to;
+        bool punch;
+        const uint8_t* blocks;  // deswizzled, tightly packed rows of `bx` blocks, `brows` rows per slice
+        int bx, brows, w, h, depth;
+        uint8_t* out;
+        size_t out_bytes;
+        uint64_t key;  // ETC2 cache key (0: not cached)
+    };
+    struct BcTask {
+        uint32_t job;
+        int z, row0, rows;
+    };
     std::vector<uint8_t> bc_scratch_;
+    std::vector<BcJob> bc_jobs_;
+    std::vector<BcTask> bc_tasks_;
     uint64_t bc_decoded_bytes_ = 0;
+    std::unordered_map<uint64_t, std::vector<uint8_t>> etc_cache_;
+    size_t etc_cache_bytes_ = 0;
+    static constexpr size_t kEtcCacheLimit = 96u << 20;
+    double bc_convert_ms_ = 0;     // conversion time, for the stats line
+    uint64_t bc_cache_hits_ = 0, bc_converted_levels_ = 0;
+
+    void RunBcJobs() {
+        if (bc_jobs_.empty()) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        bc_tasks_.clear();
+        for (uint32_t j = 0; j < bc_jobs_.size(); j++) {
+            const BcJob& job = bc_jobs_[j];
+            const int band = std::max(2, 4096 / std::max(1, job.bx));  // ~4096 blocks per task
+            for (int z = 0; z < job.depth; z++)
+                for (int r = 0; r < job.brows && r * 4 < job.h; r += band)
+                    bc_tasks_.push_back({j, z, r, std::min(band, job.brows - r)});
+        }
+        WorkPool::Get().Run(bc_tasks_.size(), [this](size_t i) {
+            thread_local std::vector<uint8_t> rgba;
+            const BcTask& k = bc_tasks_[i];
+            const BcJob& j = bc_jobs_[k.job];
+            const int bpb = (j.kind == BcKind::BC1 || j.kind == BcKind::BC4U || j.kind == BcKind::BC4S) ? 8 : 16;
+            const uint8_t* blocks = j.blocks + (size_t(k.z) * size_t(j.brows) + size_t(k.row0)) * size_t(j.bx) * bpb;
+            const int y0 = k.row0 * 4, hh = std::min(j.h - y0, k.rows * 4);
+            const size_t slice = j.out_bytes / size_t(std::max(1, j.depth));
+            uint8_t* out = j.out + size_t(k.z) * slice;
+            const int bxn = (j.w + 3) / 4;
+            switch (j.to) {
+                case BcTo::Decoded:
+                    BcDecode(j.kind, blocks, j.bx, k.rows, out + size_t(y0) * size_t(j.w) * size_t(BcDecodedBytes(j.kind)),
+                             j.w, hh);
+                    break;
+                case BcTo::Etc2:
+                case BcTo::Etc2Rgba8:
+                    rgba.resize(size_t(j.w) * size_t(hh) * 4);
+                    BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
+                    if (j.to == BcTo::Etc2)
+                        EncodeEtc2Rgb(out + size_t(k.row0) * size_t(bxn) * 8, rgba.data(), j.w, hh, 1, j.punch);
+                    else
+                        EncodeEtc2Rgba8(out + size_t(k.row0) * size_t(bxn) * 16, rgba.data(), j.w, hh, 1);
+                    break;
+            }
+        });
+        for (const BcJob& j : bc_jobs_) {
+            bc_converted_levels_++;
+            if (!j.key) continue;
+            if (etc_cache_bytes_ + j.out_bytes > kEtcCacheLimit) {
+                etc_cache_.clear();
+                etc_cache_bytes_ = 0;
+            }
+            auto& e = etc_cache_[j.key];
+            etc_cache_bytes_ += j.out_bytes - e.size();
+            e.assign(j.out, j.out + j.out_bytes);
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        bc_convert_ms_ += ms;
+        static int logged = 0;
+        if (ms > 30 && logged++ < 20)
+            LOGI(kTag, "texture conversion: %zu levels in %zu tasks, %.1f ms (%d workers + render thread)",
+                 bc_jobs_.size(), bc_tasks_.size(), ms, WorkPool::Get().Workers());
+        bc_jobs_.clear();
+    }
+
+    // Fills a sampled texture from game memory: deswizzle each level/layer into the stream, then copy.
     void Upload(Image& img, const TexRef& t) {
         img.uploaded = true;
         img.cpu_source = true;
@@ -2243,9 +2382,9 @@ private:
         for (int layer = 0; layer < img.layers; layer++)
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv)];
-                needed += img.bc != BcKind::None
-                              ? size_t(l.width) * size_t(std::max(1, l.height)) * size_t(l.depth) * size_t(BcDecodedBytes(img.bc)) + 16
-                              : size_t(l.row_bytes) * l.rows * l.depth + 16;
+                needed += img.bc != BcKind::None ? ConvertedLevelBytes(img, std::max(1, l.width), std::max(1, l.height),
+                                                                       l.depth) + 16
+                                                 : size_t(l.row_bytes) * l.rows * l.depth + 16;
             }
         if (needed > kStreamSize - kMaxUniformRange) {
             LogOnce("upload-size", "texture too large to upload in one go (%zu bytes)", needed);
@@ -2256,6 +2395,16 @@ private:
         if (StreamRemaining() < needed + 1024) Flush();
         std::vector<VkBufferImageCopy> regions;
         const uint8_t* base = reinterpret_cast<const uint8_t*>(t.addr);
+        if (img.bc != BcKind::None) {  // room for every level's deswizzled blocks (converted after the loop)
+            size_t scratch = 0;
+            for (int layer = 0; layer < img.layers; layer++)
+                for (int lv = 0; lv < img.levels; lv++) {
+                    const LevelLayout& l = layout.levels[size_t(lv)];
+                    scratch += size_t(l.row_bytes) * l.rows * l.depth;
+                }
+            if (bc_scratch_.size() < scratch) bc_scratch_.resize(scratch);
+        }
+        size_t scratch_used = 0;
         for (int layer = 0; layer < img.layers; layer++) {
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv)];
@@ -2263,19 +2412,32 @@ private:
                 const uint8_t* src = base + size_t(layer) * layout.layer_stride + l.offset;
                 VkBufferImageCopy r{};
                 if (img.bc != BcKind::None) {
-                    // Deswizzle the blocks, then decode them into texels in the upload buffer.
-                    bc_scratch_.resize(n);
+                    // Deswizzle the blocks now; they are converted into the upload buffer after the loop (RunBcJobs),
+                    // in parallel, or copied from the ETC2 cache.
+                    uint8_t* blocks = bc_scratch_.data() + scratch_used;
+                    scratch_used += n;
                     if (layout.linear)
-                        memcpy(bc_scratch_.data(), src, n);
+                        memcpy(blocks, src, n);
                     else
-                        DeswizzleLevel(bc_scratch_.data(), src, l);
+                        DeswizzleLevel(blocks, src, l);
                     const int w = std::max(1, l.width), h = std::max(1, l.height);
-                    const size_t slice = size_t(w) * size_t(h) * size_t(BcDecodedBytes(img.bc));
-                    VkDeviceSize off = StreamAlloc(slice * size_t(l.depth), 16);
-                    const int bx = int(l.row_bytes / std::max(1, fi.bytes_per_block));
-                    for (int z = 0; z < l.depth; z++)
-                        BcDecode(img.bc, bc_scratch_.data() + size_t(z) * size_t(l.row_bytes) * size_t(l.rows), bx, int(l.rows),
-                                 stream_ptr_ + off + size_t(z) * slice, w, h);
+                    const size_t out_bytes = ConvertedLevelBytes(img, w, h, l.depth);
+                    VkDeviceSize off = StreamAlloc(out_bytes, 16);
+                    BcJob job{img.bc, img.bc_to, EtcHasPunchThrough(img.nvn_format), blocks,
+                              int(l.row_bytes / std::max(1, fi.bytes_per_block)), int(l.rows), w, h, l.depth,
+                              stream_ptr_ + off, out_bytes, 0};
+                    bool cached = false;
+                    if (img.bc_to != BcTo::Decoded) {
+                        job.key = HashStep(Fnv(blocks, n), uint64_t(img.nvn_format) << 48 ^ uint64_t(w) << 24 ^
+                                                               uint64_t(h) ^ uint64_t(l.depth) << 40) | 1;
+                        auto hit = etc_cache_.find(job.key);
+                        if (hit != etc_cache_.end() && hit->second.size() == out_bytes) {
+                            memcpy(job.out, hit->second.data(), out_bytes);
+                            bc_cache_hits_++;
+                            cached = true;
+                        }
+                    }
+                    if (!cached) bc_jobs_.push_back(job);
                     r.bufferOffset = off;
                     bc_decoded_bytes_ += n;
                 } else {
@@ -2296,6 +2458,7 @@ private:
                 regions.push_back(r);
             }
         }
+        RunBcJobs();  // the converted texels are in the stream before the copy is recorded
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         Rec([regions = std::move(regions), buf = stream_, image = img.image](VkCommandBuffer cb) {
             vkCmdCopyBufferToImage(cb, buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
@@ -2320,8 +2483,8 @@ private:
     // The Vulkan format a view with NVN format `view_nvn` uses on `img` (UNDEFINED: the image's own).
     VkFormat ViewFormat(const Image& img, int view_nvn) {
         if (!view_nvn || view_nvn == img.nvn_format) return VK_FORMAT_UNDEFINED;
-        if (img.bc != BcKind::None && BcKindOf(view_nvn) != BcKind::None) {  // decoded: compare decoded formats
-            const VkFormat f = BcDecodedFormat(view_nvn);
+        if (img.bc != BcKind::None && BcKindOf(view_nvn) != BcKind::None) {  // converted: compare converted formats
+            const VkFormat f = ConvertedFormat(view_nvn, img.bc_to);
             if (f == img.vk_format) return VK_FORMAT_UNDEFINED;
             if (f == img.twin && f != VK_FORMAT_UNDEFINED) return f;
         }
@@ -5494,6 +5657,13 @@ private:
         for (auto& [reason, n] : skipped_) skipped += " | " + std::to_string(n) + " " + reason;
         LOGI(kTag, "draws: %llu drawn, %zu pipelines, %d shaders, %d uploads, %d flushes%s", (unsigned long long)drawn_,
              pipelines_.size(), shaders_translated_, uploads_, flushes_, skipped.c_str());
+        if (bc_converted_levels_ || bc_cache_hits_) {
+            LOGI(kTag, "BC textures converted on the CPU: %llu levels in %.0f ms, %llu from the ETC2 cache (%.0f MB)",
+                 (unsigned long long)bc_converted_levels_, bc_convert_ms_, (unsigned long long)bc_cache_hits_,
+                 etc_cache_bytes_ / 1048576.0);
+            bc_converted_levels_ = bc_cache_hits_ = 0;
+            bc_convert_ms_ = 0;
+        }
         {
             long rss_kb = 0;
             if (FILE* f = fopen("/proc/self/statm", "r")) {

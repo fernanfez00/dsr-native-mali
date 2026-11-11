@@ -20,6 +20,9 @@
 #include "loader/sha256.h"
 
 static int g_failures = 0;
+#include "hle/nvn/etc_encode.h"
+#include "hle/nvn/parallel.h"
+
 #define CHECK(cond)                                                              \
     do {                                                                         \
         if (!(cond)) {                                                           \
@@ -515,6 +518,66 @@ static void TestAbi() {
 }
 #endif
 
+// BC -> ETC2 re-encoding (GPUs without BC): blocks decode back close to the source (spec decoder), cut-out alpha is
+// kept exactly in the punch-through format (no individual mode there), and the work pool runs every task once.
+static void TestEtcEncode() {
+    using namespace dsr::hle::nvn;
+    const int W = 37, H = 29;  // edges not on block boundaries
+    std::vector<uint8_t> img(size_t(W) * H * 4);
+    uint32_t seed = 7;
+    auto rnd = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint8_t* p = &img[(size_t(y) * W + x) * 4];
+            p[0] = uint8_t(x * 6 + rnd() % 9);
+            p[1] = uint8_t(y * 8 + rnd() % 9);
+            p[2] = uint8_t(((x ^ y) & 8) ? 220 : 30);
+            p[3] = ((x / 3 + y / 5) % 3 == 0) ? 0 : 255;
+        }
+    for (int mode = 0; mode < 3; mode++) {
+        const bool punch = mode == 1, rgba = mode == 2;
+        const int bpb = rgba ? 16 : 8, bxn = (W + 3) / 4, byn = (H + 3) / 4;
+        std::vector<uint8_t> out(size_t(bxn) * byn * bpb);
+        CHECK(out.size() == (rgba ? EtcRgba8LevelBytes(W, H, 1) : EtcLevelBytes(W, H, 1)));
+        if (rgba)
+            EncodeEtc2Rgba8(out.data(), img.data(), W, H, 1);
+        else
+            EncodeEtc2Rgb(out.data(), img.data(), W, H, 1, punch);
+        double se = 0;
+        long n = 0;
+        int alpha_wrong = 0;
+        for (int by = 0; by < byn; by++)
+            for (int bx = 0; bx < bxn; bx++) {
+                const uint8_t* b = &out[(size_t(by) * bxn + bx) * bpb];
+                uint8_t d[16][4], a[16];
+                DecodeEtc2RgbBlock(rgba ? b + 8 : b, punch, d);
+                if (rgba) DecodeEacAlphaBlock(b, a);
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++) {
+                        const int sx = bx * 4 + x, sy = by * 4 + y;
+                        if (sx >= W || sy >= H) continue;
+                        const uint8_t* p = &img[(size_t(sy) * W + sx) * 4];
+                        const uint8_t* q = d[y * 4 + x];
+                        const int src_a = (punch || rgba) ? p[3] : 255, dec_a = rgba ? a[y * 4 + x] : q[3];
+                        if ((src_a >= 128) != (dec_a >= 128)) alpha_wrong++;
+                        if (src_a >= 128)
+                            for (int c = 0; c < 3; c++) {
+                                const double e = double(q[c]) - p[c];
+                                se += e * e;
+                                n++;
+                            }
+                    }
+            }
+        CHECK(alpha_wrong == 0);
+        CHECK(n > 0 && se / n < 40.0 * 40.0 / 4);  // PSNR above ~28 dB on this noisy, hard-edged picture
+    }
+    std::vector<int> hits(1000);
+    WorkPool::Get().Run(hits.size(), [&](size_t i) { hits[i]++; });
+    bool once = true;
+    for (int h : hits) once = once && h == 1;
+    CHECK(once);
+}
+
 int main() {
     struct T { const char* name; void (*fn)(); } tests[] = {
         {"lz4", TestLz4},
@@ -525,6 +588,7 @@ int main() {
         {"nvn_commands", TestNvnCommands},
         {"shader_translator", TestShaderTranslator},
         {"block_linear", TestBlockLinear},
+        {"etc_encode", TestEtcEncode},
 #if defined(__aarch64__)
         {"abi_arm64", TestAbi},
 #endif

@@ -48,6 +48,11 @@ struct RuntimeConfig {
     // The swapchain has the game's frame size and the system compositor scales it to the screen, instead of the
     // GPU filling a screen-sized image each frame.
     bool compositor_scaling = true;
+    // GPUs without BC textures (Mali; Adreno 6xx without BCeNabler): BC1 textures are re-encoded as ETC2 (same size
+    // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2); BC3 too with bc3_etc2
+    // (4x smaller than RGBA8, but lossier: off by default).
+    bool bc_etc2 = true;
+    bool bc3_etc2 = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
