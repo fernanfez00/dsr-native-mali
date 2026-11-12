@@ -2669,12 +2669,11 @@ private:
         }
         if (shadow) {
             ci.compareEnable = VK_TRUE;
-            // NVN's sampler compare is "texel OP reference"; Vulkan's is "reference OP texel": the operands swap.
-            // (The game's shadow lookups use GREATER and treat 1 as lit: the shadow map texel is farther than the
-            // surface. Taken as Vulkan's GREATER, lit ground came out shadowed and the player's shadow lit.)
-            ci.compareOp = s.compare_mode ? SwapCompareOperands(CompareOp(s.compare_func)) : VK_COMPARE_OP_LESS_OR_EQUAL;
+            // The game's shadow lookups (GREATER) give the shadow amount: the shaders compute light as 1 - result *
+            // strength, so 1 means shadowed (surface farther than the shadow map's texel), as in Vulkan.
+            ci.compareOp = s.compare_mode ? CompareOp(s.compare_func) : VK_COMPARE_OP_LESS_OR_EQUAL;
             switch (dsr::GetRuntime().config.shadow_compare) {  // diagnostics (settings shadow_compare)
-                case 1: ci.compareOp = s.compare_mode ? CompareOp(s.compare_func) : VK_COMPARE_OP_LESS_OR_EQUAL; break;
+                case 1: ci.compareOp = s.compare_mode ? SwapCompareOperands(CompareOp(s.compare_func)) : VK_COMPARE_OP_GREATER_OR_EQUAL; break;
                 case 2: ci.compareOp = VK_COMPARE_OP_ALWAYS; break;
                 case 3: ci.compareOp = VK_COMPARE_OP_NEVER; break;
                 default: break;

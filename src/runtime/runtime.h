@@ -55,8 +55,8 @@ struct RuntimeConfig {
     // (4x smaller than RGBA8, but lossier: off by default).
     bool bc_etc2 = true;
     bool bc3_etc2 = false;
-    // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = as NVN, operands swapped for Vulkan;
-    // 1 = the game's function as Vulkan's, unswapped; 2 = always lit (1); 3 = always shadowed (0)).
+    // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = the game's function as Vulkan's;
+    // 1 = operands swapped; 2 = always 1 (shadowed); 3 = always 0 (lit)).
     int shadow_compare = 0;
     // game_hooks = 0: none of the engine patches (frame rate, resolution, log hooks) are installed.
     bool game_hooks = true;
