@@ -81,7 +81,12 @@ void* GetProc(const char* name) {
     if (impl != Impls().end()) {
         thunk = loader::MakeDynamicThunk(impl->second, 0);
     } else if (prefix_fn) {
-        thunk = loader::MakeDynamicThunk(prefix_fn, 0);
+        // Entry points done as no-ops (state getters, debug markers, ...): through the named stub, which logs
+        // each one's first call (diagnostics: which ones the game actually uses) and returns 0 like the no-op.
+        // The tag lets the stub tell these from unimplemented entry points.
+        auto* np = new NopProc;
+        np->name = strdup(name);
+        thunk = loader::MakeDynamicThunk(arch::UnimplementedNamedEntry(), reinterpret_cast<uint64_t>(np));
     } else {
         // The name string must outlive the thunk; keep a private copy.
         const char* copy = strdup(name);

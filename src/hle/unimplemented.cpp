@@ -6,6 +6,7 @@
 
 #include "arch/arch.h"
 #include "common/log.h"
+#include "hle/nvn.h"
 #include "runtime/runtime.h"
 
 namespace {
@@ -33,6 +34,12 @@ extern "C" uint64_t dsr_hle_unimplemented(uint64_t import_index) {
 // Named stubs are NVN entry points. Object creation calls (`...Initialize`, `...SetShaders`) return an
 // NVNboolean; report success so the game keeps going, everything else returns 0.
 extern "C" uint64_t dsr_hle_unimplemented_named(const char* name) {
+    if (name && name[0] == '\x01') {  // an NVN entry point done as a no-op: its first call is logged
+        auto* np = reinterpret_cast<dsr::hle::nvn::NopProc*>(const_cast<char*>(name));
+        if (np->calls.fetch_add(1, std::memory_order_relaxed) == 0)
+            LOGI("nvn", "no-op NVN entry point used: %s", np->name);
+        return 0;
+    }
     std::string n = name ? name : "(unnamed)";
     Report(n);
     const bool creates = n.find("Initialize") != std::string::npos ||

@@ -233,6 +233,19 @@ void TexturePoolRegisterTexture(void* pool, int id, const void* texture, const v
         changed = it == g_texture_ids.end() || it->second.addr != r.addr || it->second.tex.format != r.tex.format ||
                   it->second.tex.width != r.tex.width || it->second.tex.height != r.tex.height ||
                   it->second.view_format != r.view_format;
+        // Diagnostics: the pools textures are registered in (ids are kept per id only), and ids taking another
+        // texture.
+        static std::unordered_set<const void*> pools;
+        if (pools.insert(pool).second)
+            LOGI(kTag, "texture pool %p: first registration (id %d); %zu texture pools seen", pool, id, pools.size());
+        static int rereg = 0;
+        if (it != g_texture_ids.end() && changed && rereg < 12) {
+            rereg++;
+            LOGI(kTag, "texture id %d now names another texture: %dx%d fmt %d @%llx -> %dx%d fmt %d @%llx", id,
+                 it->second.tex.width, it->second.tex.height, it->second.tex.format,
+                 (unsigned long long)it->second.addr, r.tex.width, r.tex.height, r.tex.format,
+                 (unsigned long long)r.addr);
+        }
         g_texture_ids[id] = r;
     }
     // A texture (re)registered under this id: its memory may hold a newly streamed-in texture (the game reuses
