@@ -221,6 +221,12 @@ void InstallGameHooks() {
     Runtime& rt = GetRuntime();
     for (const GameBuild& b : kBuilds)
         if (rt.main_nso.build_id_hex.rfind(b.build_id, 0) == 0) g_build = &b;
+    if (g_build && !rt.config.game_hooks) {
+        LOGW("hooks", "game version %s: engine patches off (settings game_hooks = 0): 30 fps, 16:9, no engine log",
+             g_build->version);
+        rt.config.target_fps = 30;
+        return;
+    }
     if (!g_build) {
         LOGW("hooks", "unknown game build %.32s: engine hooks disabled (supported: 1.0.0, 1.0.3)",
              rt.main_nso.build_id_hex.c_str());

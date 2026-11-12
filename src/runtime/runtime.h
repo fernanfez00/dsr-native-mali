@@ -55,6 +55,11 @@ struct RuntimeConfig {
     // (4x smaller than RGBA8, but lossier: off by default).
     bool bc_etc2 = true;
     bool bc3_etc2 = false;
+    // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = as NVN, operands swapped for Vulkan;
+    // 1 = the game's function as Vulkan's, unswapped; 2 = always lit (1); 3 = always shadowed (0)).
+    int shadow_compare = 0;
+    // game_hooks = 0: none of the engine patches (frame rate, resolution, log hooks) are installed.
+    bool game_hooks = true;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
