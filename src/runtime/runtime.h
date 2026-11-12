@@ -37,7 +37,9 @@ struct RuntimeConfig {
     std::string aspect_ratio = "16:9";
     float screen_aspect = 0;  // width / height of the screen (Android: the window), 0 = unknown
     bool hud_box = true;      // other aspect ratios: keep the HUD and menus in a centred 16:9 box
-    int render_width = 1280;  // the game's render width once aspect_ratio is applied (height 720)
+    int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied
+    int render_height = 720;
+    float render_scale = 1.0f;  // settings render_scale: 0.5 - 1.0 of the game's 720-line resolution
     // GPU driver: settings.txt `gpu_driver` (a file in DSRNative/drivers, or "system"). The Android front end
     // copies (or unzips) it into the app's private folder: gpu_driver_dir (ends in '/') holds gpu_driver_lib.
     // Empty gpu_driver_lib: the system driver.

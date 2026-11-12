@@ -3,7 +3,9 @@ package com.dsrnative.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -24,6 +26,7 @@ import android.view.Window;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -43,8 +46,9 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The in-game settings menu, opened by holding - and + for a second (controller or on-screen buttons). Two tabs:
- * Driver (the GPU driver used from the next start) and Settings. Choices are saved to settings.txt at once; those
+ * The in-game settings menu, opened by holding - and + for a second (controller or on-screen buttons). Tabs:
+ * Driver (the GPU driver used from the next start), Settings, Touch (touch controls and their layout) and Language
+ * (the game's language, and the menu's at once). Choices are saved to settings.txt at once; those
  * that can change while the game runs are applied at once (native code), the others at the next start (a message
  * says so). The game is held while the menu shows. Works with touch and with a controller (D-pad / stick to move,
  * A to choose, B to close, L / R to switch tabs).
@@ -72,16 +76,43 @@ public final class SettingsMenu {
         sGameDir = gameDir;
         sDefaultGameDir = defaultGameDir;
         Map<String, String> v = readSettings();
+        Strings.setLanguage(v.containsKey("language") ? v.get("language") : "en-US");
         TouchControls.sRecenter = !"0".equals(v.get("touch_camera_recenter"));
+        TouchControls.setLayout(v.get("touch_layout"));
         if ("1".equals(v.get("fps_counter"))) FpsCounter.apply(activity, true);
+        showFirstLaunchTip(activity);
+    }
+
+    /** The first time the game starts: how to open this menu. */
+    private static void showFirstLaunchTip(final Activity activity) {
+        final SharedPreferences prefs = activity.getSharedPreferences("dsrnative", Context.MODE_PRIVATE);
+        if (prefs.getBoolean("menu_tip_shown", false)) return;
+        activity.runOnUiThread(() -> new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (activity.isFinishing() || sOpen != null || TouchControls.sEditing) return;
+            try {
+                AlertDialog d = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle(Strings.t("tip_t"))
+                        .setMessage(Strings.t("tip"))
+                        .setPositiveButton(Strings.t("ok"), null)
+                        .create();
+                d.setOnDismissListener(x -> {
+                    if (sOpen == null && !TouchControls.sEditing) nativeMenuOpen(false);
+                });
+                nativeMenuOpen(true);  // the game waits while the tip shows
+                GameActivity.showImmersive(d);
+                prefs.edit().putBoolean("menu_tip_shown", true).apply();
+            } catch (Exception e) {
+                android.util.Log.w("DSRNative", "settings menu: could not show the first-launch tip", e);
+            }
+        }, 1500));
     }
 
     /** Called by native code when - and + have been held for a second. */
     public static void show(final Activity activity) {
         activity.runOnUiThread(() -> {
-            if (sOpen != null) return;
+            if (sOpen != null || TouchControls.sEditing) return;
             try {
-                new SettingsMenu(activity).open();
+                new SettingsMenu(activity).open(0);
             } catch (Exception e) {
                 android.util.Log.w("DSRNative", "settings menu: could not open", e);
                 sOpen = null;
@@ -232,8 +263,11 @@ public final class SettingsMenu {
     private Dialog mDialog;
     private LinearLayout mBody;
     private ScrollView mScroll;
-    private TextView mTabDriver, mTabSettings;
+    private static final String[] TAB_KEYS = {"tab_driver", "tab_settings", "tab_touch", "tab_language"};
+    private final TextView[] mTabs = new TextView[TAB_KEYS.length];
+    private TextView mHint, mClose, mScaleLabel;
     private int mTab = 0;
+    private boolean mEditingLayout;
     private Map<String, String> mValues = new HashMap<>();
 
     private SettingsMenu(Activity a) {
@@ -245,7 +279,7 @@ public final class SettingsMenu {
         return Math.round(v * mDp);
     }
 
-    private void open() {
+    private void open(int tab) {
         sOpen = this;
         nativeMenuOpen(true);
         TouchControls.releaseForMenu();
@@ -260,25 +294,37 @@ public final class SettingsMenu {
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = text("DSR Native", 20, GOLD, true);
-        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        mTabDriver = chip("Driver", true);
-        mTabSettings = chip("Settings", true);
-        mTabDriver.setOnClickListener(v -> showTab(0));
-        mTabSettings.setOnClickListener(v -> showTab(1));
-        header.addView(mTabDriver);
-        header.addView(mTabSettings);
-        TextView close = chip("Close", true);
-        close.setOnClickListener(v -> mDialog.dismiss());
+        header.addView(title);
+        // Tabs: scroll sideways when the names do not fit (long words in some languages, small screens).
+        HorizontalScrollView tabScroll = new HorizontalScrollView(mA);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.setFillViewport(true);
+        LinearLayout tabs = new LinearLayout(mA);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < mTabs.length; i++) {
+            final int t = i;
+            mTabs[i] = chip("", true);
+            mTabs[i].setOnClickListener(v -> showTab(t));
+            tabs.addView(mTabs[i]);
+        }
+        tabScroll.addView(tabs, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tlp.leftMargin = dp(10);
+        header.addView(tabScroll, tlp);
+        mClose = chip("", true);
+        mClose.setOnClickListener(v -> mDialog.dismiss());
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.leftMargin = dp(18);
-        header.addView(close, clp);
+        header.addView(mClose, clp);
         root.addView(header);
 
-        TextView hint = text("Hold − and + for a second to open this menu.  Controller: D-pad to move, A to choose, "
-                + "B to close, L / R to switch tabs.", 12, DIM, false);
-        hint.setPadding(0, dp(4), 0, dp(8));
-        root.addView(hint);
+        mHint = text("", 12, DIM, false);
+        mHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(mHint);
+        relabel();
 
         mScroll = new ScrollView(mA);
         mScroll.setFillViewport(true);
@@ -296,7 +342,7 @@ public final class SettingsMenu {
         mDialog.setCanceledOnTouchOutside(true);
         mDialog.setOnDismissListener(d -> {
             sOpen = null;
-            nativeMenuOpen(false);
+            if (!mEditingLayout) nativeMenuOpen(false);  // the layout editor keeps the game held
         });
         mDialog.setOnKeyListener((d, keyCode, e) -> {
             boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
@@ -313,10 +359,10 @@ public final class SettingsMenu {
                     return true;
                 }
                 case KeyEvent.KEYCODE_BUTTON_L1:
-                    if (down) showTab(0);
+                    if (down && e.getRepeatCount() == 0) showTab((mTab + mTabs.length - 1) % mTabs.length);
                     return true;
                 case KeyEvent.KEYCODE_BUTTON_R1:
-                    if (down) showTab(1);
+                    if (down && e.getRepeatCount() == 0) showTab((mTab + 1) % mTabs.length);
                     return true;
                 case KeyEvent.KEYCODE_BUTTON_START:
                 case KeyEvent.KEYCODE_BUTTON_SELECT:
@@ -325,40 +371,47 @@ public final class SettingsMenu {
                     return false;
             }
         });
-        showTab(0);
+        showTab(tab);
         GameActivity.showImmersive(mDialog);
         if (w != null) {
             DisplayMetrics m = mA.getResources().getDisplayMetrics();
             w.setLayout(Math.round(m.widthPixels * 0.86f), Math.round(m.heightPixels * 0.92f));
         }
-        mTabDriver.requestFocus();
+        mTabs[tab].requestFocus();
+    }
+
+    /** Texts of the tabs, Close and the hint, in the menu's language. */
+    private void relabel() {
+        for (int i = 0; i < mTabs.length; i++) mTabs[i].setText(Strings.t(TAB_KEYS[i]));
+        mClose.setText(Strings.t("close"));
+        mHint.setText(Strings.t("hint"));
     }
 
     private void showTab(int tab) {
         mTab = tab;
-        mTabDriver.setSelected(tab == 0);
-        mTabSettings.setSelected(tab == 1);
+        for (int i = 0; i < mTabs.length; i++) mTabs[i].setSelected(i == tab);
         mBody.removeAllViews();
+        mScaleLabel = null;
         mValues = readSettings();
-        if (tab == 0)
-            buildDriverTab();
-        else
-            buildSettingsTab();
+        switch (tab) {
+            case 0: buildDriverTab(); break;
+            case 1: buildSettingsTab(); break;
+            case 2: buildTouchTab(); break;
+            default: buildLanguageTab(); break;
+        }
         mScroll.scrollTo(0, 0);
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
 
     private static String driverLabel(String d) {
-        return d == null || d.isEmpty() || d.equals("system") ? "System driver" : d;
+        return d == null || d.isEmpty() || d.equals("system") ? Strings.t("system_driver") : d;
     }
 
     private void buildDriverTab() {
-        section("GPU driver");
-        note("The Vulkan driver the game runs on. The phone's own (system) driver is the default. Others are "
-                + "AdrenoTools driver packages (.zip, e.g. Mesa Turnip) or .so files in " + sDriversDir + ". "
-                + "A new choice is remembered and used the next time the game starts.");
-        note("In use now: " + driverLabel(sRunningDriver));
+        section(Strings.t("gpu_driver"));
+        note(Strings.t("driver_note", sDriversDir));
+        note(Strings.t("in_use_now", driverLabel(sRunningDriver)));
 
         String chosen = mValues.containsKey("gpu_driver") ? mValues.get("gpu_driver") : "system";
         if (chosen == null || chosen.isEmpty()) chosen = "system";
@@ -377,26 +430,24 @@ public final class SettingsMenu {
 
         final List<TextView> rows = new ArrayList<>();
         for (final String d : drivers) {
-            String label = d.equals("system") ? "System driver (default)" : d;
-            if (d.equals(sRunningDriver)) label += "   • in use now";
-            if (!d.equals("system") && !new File(dir, d).isFile()) label += "   • file missing";
+            String label = d.equals("system") ? Strings.t("system_driver") + " " + Strings.t("default_mark") : d;
+            if (d.equals(sRunningDriver)) label += "   • " + Strings.t("mark_in_use");
+            if (!d.equals("system") && !new File(dir, d).isFile()) label += "   • " + Strings.t("mark_missing");
             final TextView row = chip(label, false);
             row.setSelected(d.equals(chosen));
             row.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
             row.setOnClickListener(v -> {
                 if (row.isSelected()) return;
                 if (!writeSetting("gpu_driver", d)) {
-                    popup("Could not save", "settings.txt could not be written:\n" + sSettingsPath);
+                    cantSave();
                     return;
                 }
                 for (TextView r : rows) r.setSelected(r == row);
                 mValues.put("gpu_driver", d);
                 if (d.equals(sRunningDriver))
-                    popup("Driver", driverLabel(d) + " is the driver in use now; it stays in use.");
+                    popup(Strings.t("tab_driver"), Strings.t("driver_same", driverLabel(d)));
                 else
-                    popup("Driver changed", driverLabel(d) + " will be used the next time you start the game.\n\n"
-                            + "Close the app completely and open it again to switch now. If it cannot be loaded, the "
-                            + "system driver is used.");
+                    popup(Strings.t("driver_changed_t"), Strings.t("driver_changed", driverLabel(d)));
             });
             rows.add(row);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -405,7 +456,7 @@ public final class SettingsMenu {
             mBody.addView(row, lp);
         }
 
-        TextView add = chip("Add a driver file…", false);
+        TextView add = chip(Strings.t("add_driver"), false);
         add.setGravity(Gravity.CENTER);
         add.setOnClickListener(v -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -414,7 +465,7 @@ public final class SettingsMenu {
             try {
                 mA.startActivityForResult(i, REQ_DRIVER);
             } catch (Exception e) {
-                popup("No file picker", "Copy the driver file into " + sDriversDir + " instead.");
+                popup(Strings.t("no_picker_t"), Strings.t("no_picker", sDriversDir));
             }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -434,7 +485,7 @@ public final class SettingsMenu {
         if (name != null) name = name.substring(name.lastIndexOf('/') + 1);
         String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
         if (!lower.endsWith(".zip") && !lower.endsWith(".so")) {
-            popup("Not a driver", "Choose a driver package (.zip, as made for AdrenoTools) or a .so file.");
+            popup(Strings.t("not_driver_t"), Strings.t("not_driver"));
             return;
         }
         File dir = new File(sDriversDir);
@@ -448,70 +499,259 @@ public final class SettingsMenu {
             while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
         } catch (IOException e) {
             out.delete();
-            popup("Could not add the driver", "Copying " + name + " failed: " + e.getMessage());
+            popup(Strings.t("driver_failed_t"), Strings.t("driver_failed", name, e.getMessage()));
             return;
         }
         if (mTab == 0) showTab(0);
-        popup("Driver added", name + " was copied to the drivers folder. Choose it in the list to use it.");
+        popup(Strings.t("driver_added_t"), Strings.t("driver_added", name));
     }
 
     // ---- Settings tab -------------------------------------------------------------------------------------------
 
     private void buildSettingsTab() {
-        section("Display");
-        choice("fps", "Frame rate cap", "Changes at once.", new String[] {"30", "45", "60"},
+        section(Strings.t("sec_display"));
+        choice("fps", Strings.t("fps_t"), Strings.t("changes_now"), new String[] {"30", "45", "60"},
                 new String[] {"30 fps", "45 fps", "60 fps"}, "60");
-        choice("aspect_ratio", "Aspect ratio (experimental)", "16:9 is the game's own. Fill screen widens (or narrows) the view "
-                + "to the screen's shape. Changes at the next start.",
+        choice("aspect_ratio", Strings.t("aspect_t"), Strings.t("aspect_n"),
                 new String[] {"16:9", "auto", "4:3", "21:9"},
-                new String[] {"16:9 (default)", "Fill screen", "4:3", "21:9"}, "16:9");
-        toggle("fps_counter", "FPS counter",
-                "Shows the frame rate at the top of the screen. Drawn by Android over the game, so it costs the game "
-                        + "no frames. Changes at once.",
+                new String[] {"16:9 " + Strings.t("default_mark"), Strings.t("aspect_fill"), "4:3", "21:9"}, "16:9");
+        renderScale();
+        toggle("fps_counter", Strings.t("fpscounter_t"), Strings.t("fpscounter_n") + " " + Strings.t("changes_now"),
                 "1", "0", "0");
-        choice("exposure", "Brightness", "Changes at once.", new String[] {"1.0", "1.37", "1.7"},
-                new String[] {"Original", "Default", "Brighter"}, "1.37");
-        choice("present_mode", "Frame presentation", "Changes at the next start.",
-                new String[] {"mailbox", "fifo"}, new String[] {"Low latency (default)", "V-sync"}, "mailbox");
+        choice("exposure", Strings.t("bright_t"), Strings.t("changes_now"), new String[] {"1.0", "1.37", "1.7"},
+                new String[] {Strings.t("bright_orig"), Strings.t("bright_def"), Strings.t("bright_more")}, "1.37");
+        choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
+                new String[] {"mailbox", "fifo"},
+                new String[] {Strings.t("present_mailbox") + " " + Strings.t("default_mark"), Strings.t("present_vsync")},
+                "mailbox");
 
-        section("Controls");
-        toggle("face_buttons", "Swap A / B and X / Y inputs",
-                "On: the controller's face buttons act by position, as on a Switch (the right button confirms). "
-                        + "Changes at once.",
+        section(Strings.t("sec_controls"));
+        toggle("face_buttons", Strings.t("swap_t"), Strings.t("swap_n") + " " + Strings.t("changes_now"),
                 "position", "label", "label");
-        choice("touch_controls", "Touch controls", "Changes at once.", new String[] {"1", "0"},
-                new String[] {"On", "Off"}, "1");
-        choice("touch_opacity", "Touch controls opacity", "Changes at once.",
-                new String[] {"0.3", "0.5", "0.7", "1.0"}, new String[] {"30%", "50%", "70%", "100%"}, "0.7");
-        choice("touch_camera_speed", "Touch camera speed", "Changes at once.",
-                new String[] {"0.75", "1.0", "1.5", "2.0"}, new String[] {"Slow", "Normal", "Fast", "Faster"}, "1.0");
-        toggle("touch_camera_recenter", "Prevent right stick centre drift",
-                "On: the touch camera stick stays where it is while your thumb rests on it, so the camera keeps "
-                        + "turning until you move back. Off: it drifts back to the centre under a resting thumb and the "
-                        + "camera eases to a stop. Changes at once.",
-                "0", "1", "1");
-        choice("touch_camera_invert", "Invert touch camera", "Changes at once.", new String[] {"0", "1"},
-                new String[] {"Off", "On"}, "0");
 
-        section("Game folder");
+        section(Strings.t("sec_folder"));
         String custom = mValues.containsKey("game_dir") ? mValues.get("game_dir") : "";
-        note("Game files in use: " + sGameDir);
-        note("The app looks in " + sDefaultGameDir + " first. If the game is not there, it uses the folder chosen "
-                + "here (or asks for one)." + (custom == null || custom.isEmpty() ? "" : "\nChosen folder: " + custom));
-        TextView pick = chip("Choose another game folder…", false);
+        note(Strings.t("folder_inuse", sGameDir));
+        note(Strings.t("folder_note", sDefaultGameDir)
+                + (custom == null || custom.isEmpty() ? "" : "\n" + Strings.t("folder_chosen", custom)));
+        TextView pick = chip(Strings.t("folder_pick"), false);
         pick.setGravity(Gravity.CENTER);
         pick.setOnClickListener(v -> {
             try {
                 mA.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_FOLDER);
             } catch (Exception e) {
-                popup("No file manager", "No app is available to choose a folder.");
+                popup(Strings.t("no_fm_t"), Strings.t("no_fm"));
             }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(8);
         mBody.addView(pick, lp);
-        note("Settings are saved in " + sSettingsPath);
+        note(Strings.t("saved_in", sSettingsPath));
+    }
+
+    // ---- render scale -------------------------------------------------------------------------------------------
+
+    private static final float SCALE_MIN = 0.5f, SCALE_STEP = 0.05f;
+    private static final int SCALE_STEPS = 10;  // 0.5 .. 1.0
+
+    /** The screen's long side / short side (what "Fill screen" uses). */
+    private float screenAspect() {
+        DisplayMetrics m = new DisplayMetrics();
+        mA.getWindowManager().getDefaultDisplay().getRealMetrics(m);
+        float a = Math.max(m.widthPixels, m.heightPixels), b = Math.min(m.widthPixels, m.heightPixels);
+        return b > 0 ? a / b : 16f / 9f;
+    }
+
+    /** The game's render size for a scale, worked out as native code does (hooks.cpp). */
+    private int[] renderSize(float scale) {
+        String ar = mValues.containsKey("aspect_ratio") ? mValues.get("aspect_ratio") : "16:9";
+        float aspect = 16f / 9f;
+        if ("auto".equalsIgnoreCase(ar)) {
+            aspect = screenAspect();
+        } else if (ar != null) {
+            int c = ar.indexOf(':');
+            try {
+                float w = Float.parseFloat(c > 0 ? ar.substring(0, c) : ar);
+                float h = c > 0 ? Float.parseFloat(ar.substring(c + 1)) : 1f;
+                if (w > 0 && h > 0 && w / h >= 1.0f && w / h <= 4.0f) aspect = w / h;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        float s = Math.max(0.5f, Math.min(1.0f, scale));
+        int h = Math.max(360, Math.min(720, Math.round(720f * s / 8f) * 8));
+        int w = Math.max(320, Math.min(1920, Math.round(h * aspect / 8f) * 8));
+        if (Math.abs(aspect - 16f / 9f) < 0.01f && h == 720) w = 1280;
+        return new int[] {w, h};
+    }
+
+    private void updateScaleLabel(float scale) {
+        if (mScaleLabel == null) return;
+        int[] r = renderSize(scale);
+        mScaleLabel.setText(String.format(Locale.ROOT, "%d%%   ·   ", Math.round(scale * 100))
+                + Strings.t("scale_res", r[0], r[1]));
+    }
+
+    private void renderScale() {
+        final String title = Strings.t("scale_t");
+        TextView t = text(title, 15, TEXT, true);
+        t.setPadding(0, dp(10), 0, 0);
+        mBody.addView(t);
+        mBody.addView(text(Strings.t("scale_n"), 12, DIM, false));
+        float cur = parse(mValues.get("render_scale"), 1.0f);
+        cur = Math.max(SCALE_MIN, Math.min(1.0f, cur));
+        mScaleLabel = text("", 14, GOLD, true);
+        mScaleLabel.setPadding(0, dp(6), 0, 0);
+        mBody.addView(mScaleLabel);
+        updateScaleLabel(cur);
+
+        final SeekBar bar = new SeekBar(mA);
+        bar.setMax(SCALE_STEPS);
+        bar.setProgress(Math.round((cur - SCALE_MIN) / SCALE_STEP));
+        bar.setFocusable(true);
+        bar.setPadding(dp(18), dp(12), dp(18), dp(12));
+        bar.setProgressTintList(ColorStateList.valueOf(GOLD));
+        bar.setThumbTintList(ColorStateList.valueOf(GOLD));
+        bar.setProgressBackgroundTintList(ColorStateList.valueOf(0xFF555555));
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, rounded(0xFF3A3A3A, 10, 0xFFFFFFFF));
+        bg.addState(new int[] {}, rounded(CARD, 10, 0));
+        bar.setBackground(bg);
+        final boolean[] touching = {false};
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar b, int progress, boolean fromUser) {
+                float s = SCALE_MIN + progress * SCALE_STEP;
+                updateScaleLabel(s);
+                if (fromUser && !touching[0]) save(s, false);  // D-pad: saved at each step
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar b) {
+                touching[0] = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar b) {
+                touching[0] = false;
+                save(SCALE_MIN + b.getProgress() * SCALE_STEP, true);
+            }
+
+            private void save(float s, boolean tell) {
+                String v = String.format(Locale.ROOT, "%.2f", s);
+                if (same(v, mValues.get("render_scale")) || (!mValues.containsKey("render_scale") && same(v, "1.0")))
+                    return;
+                if (!writeSetting("render_scale", v)) {
+                    cantSave();
+                    return;
+                }
+                mValues.put("render_scale", v);
+                if (tell)
+                    popup(title, Strings.t("next_start", title));
+                else
+                    Toast.makeText(mA, Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        mBody.addView(bar, lp);
+    }
+
+    // ---- Touch tab ----------------------------------------------------------------------------------------------
+
+    private void buildTouchTab() {
+        section(Strings.t("sec_touch"));
+        toggle("touch_controls", Strings.t("touch_t"), Strings.t("changes_now"), "1", "0", "1");
+        choice("touch_opacity", Strings.t("opacity_t"), null, new String[] {"0.3", "0.5", "0.7", "1.0"},
+                new String[] {"30%", "50%", "70%", "100%"}, "0.7");
+        choice("touch_camera_speed", Strings.t("camspeed_t"), null, new String[] {"0.75", "1.0", "1.5", "2.0"},
+                new String[] {Strings.t("speed_slow"), Strings.t("speed_normal"), Strings.t("speed_fast"),
+                        Strings.t("speed_faster")}, "1.0");
+        toggle("touch_camera_invert", Strings.t("invert_t"), null, "1", "0", "0");
+        toggle("touch_camera_recenter", Strings.t("drift_t"), Strings.t("drift_n"), "0", "1", "1");
+
+        section(Strings.t("sec_layout"));
+        note(Strings.t("layout_n"));
+        TextView edit = chip(Strings.t("edit_layout"), false);
+        edit.setGravity(Gravity.CENTER);
+        edit.setOnClickListener(v -> editLayout());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        mBody.addView(edit, lp);
+        TextView reset = chip(Strings.t("reset_layout"), false);
+        reset.setGravity(Gravity.CENTER);
+        reset.setOnClickListener(v -> {
+            if (!writeSetting("touch_layout", "")) {
+                cantSave();
+                return;
+            }
+            mValues.put("touch_layout", "");
+            TouchControls.setLayout("");
+            Toast.makeText(mA, Strings.t("layout_reset_done"), Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp2.topMargin = dp(8);
+        mBody.addView(reset, lp2);
+    }
+
+    /** Closes the menu (the game stays held), lets the player move the controls, then opens the menu again. */
+    private void editLayout() {
+        mEditingLayout = true;
+        TouchControls.sEditing = true;  // no menu from - and + meanwhile
+        final Activity a = mA;
+        mDialog.dismiss();
+        TouchControls.editLayout(a, () -> {
+            try {
+                new SettingsMenu(a).open(2);
+            } catch (Exception e) {
+                android.util.Log.w("DSRNative", "settings menu: could not open again", e);
+                sOpen = null;
+                nativeMenuOpen(false);
+            }
+        });
+    }
+
+    // ---- Language tab -------------------------------------------------------------------------------------------
+
+    private void buildLanguageTab() {
+        section(Strings.t("tab_language"));
+        note(Strings.t("lang_n"));
+        String cur = mValues.containsKey("language") ? mValues.get("language") : "en-US";
+        int curIndex = Strings.indexOf(cur);
+        for (int i = 0; i < Strings.CODES.length; i++) {
+            final String code = Strings.CODES[i];
+            final TextView row = chip(Strings.NAMES[i], false);
+            row.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+            row.setSelected(i == curIndex);
+            row.setOnClickListener(v -> {
+                if (row.isSelected()) return;
+                if (!writeSetting("language", code)) {
+                    cantSave();
+                    return;
+                }
+                mValues.put("language", code);
+                Strings.setLanguage(code);
+                relabel();
+                showTab(3);
+                mBody.post(() -> {  // keep the controller's focus on the chosen language
+                    for (int k = 0; k < mBody.getChildCount(); k++) {
+                        View c = mBody.getChildAt(k);
+                        if (c.isSelected()) {
+                            c.requestFocus();
+                            break;
+                        }
+                    }
+                });
+                popup(Strings.t("tab_language"), Strings.t("lang_changed"));
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = dp(6);
+            mBody.addView(row, lp);
+        }
     }
 
     private void chooseGameFolder(Uri uri) {
@@ -520,21 +760,17 @@ public final class SettingsMenu {
         if (root == null) {
             String partial = findPartialGameRoot(path);
             if (partial != null)
-                popup("Game files incomplete", partial + " is missing:\n" + missingGameFiles(partial)
-                        + "\n\nThese files belong next to the exefs folder. Choose a folder that holds the complete "
-                        + "game.");
+                popup(Strings.t("incomplete_t"), Strings.t("incomplete", partial, missingGameFiles(partial)));
             else
-                popup("No game files there", (path == null ? "That folder" : path) + " does not hold the game "
-                        + "files. Choose the folder that contains the exefs folder, dvdbnd0.bdt and dvdbnd1.bdt.");
+                popup(Strings.t("nofiles_t"), Strings.t("nofiles", path == null ? Strings.t("that_folder") : path));
             return;
         }
         if (!writeSetting("game_dir", root)) {
-            popup("Could not save", "settings.txt could not be written:\n" + sSettingsPath);
+            cantSave();
             return;
         }
         if (mTab == 1) showTab(1);
-        popup("Game folder", "Game folder set to " + root + ".\n\nIt is used from the next start whenever the game "
-                + "is not in " + sDefaultGameDir + ".");
+        popup(Strings.t("sec_folder"), Strings.t("folder_set", root, sDefaultGameDir));
     }
 
     // ---- building blocks ----------------------------------------------------------------------------------------
@@ -573,7 +809,7 @@ public final class SettingsMenu {
             c.setOnClickListener(v -> {
                 if (c.isSelected()) return;
                 if (!writeSetting(key, value)) {
-                    popup("Could not save", "settings.txt could not be written:\n" + sSettingsPath);
+                    cantSave();
                     return;
                 }
                 for (TextView o : chips) o.setSelected(o == c);
@@ -619,7 +855,7 @@ public final class SettingsMenu {
         state.setDuplicateParentStateEnabled(false);
         final boolean[] on = {same(cur, onValue)};
         final Runnable paint = () -> {
-            state.setText(on[0] ? "On" : "Off");
+            state.setText(on[0] ? Strings.t("on") : Strings.t("off"));
             state.setTextColor(on[0] ? 0xFF151515 : TEXT);
             state.setBackground(rounded(on[0] ? GOLD : 0xFF444444, 14, 0));
         };
@@ -631,7 +867,7 @@ public final class SettingsMenu {
         row.setOnClickListener(v -> {
             String value = on[0] ? offValue : onValue;
             if (!writeSetting(key, value)) {
-                popup("Could not save", "settings.txt could not be written:\n" + sSettingsPath);
+                cantSave();
                 return;
             }
             on[0] = !on[0];
@@ -664,10 +900,15 @@ public final class SettingsMenu {
                     parse(mValues.get("touch_camera_speed"), 1.0f));
             now = true;
         }
+        if (key.equals("aspect_ratio")) updateScaleLabel(parse(mValues.get("render_scale"), 1.0f));
         if (now)
-            Toast.makeText(mA, title + ": applied", Toast.LENGTH_SHORT).show();
+            Toast.makeText(mA, Strings.t("applied", title), Toast.LENGTH_SHORT).show();
         else
-            popup(title, title + " will change the next time you start the game.");
+            popup(title, Strings.t("next_start", title));
+    }
+
+    private void cantSave() {
+        popup(Strings.t("cant_save_t"), Strings.t("cant_save", sSettingsPath));
     }
 
     private static float parse(String s, float def) {
@@ -679,7 +920,7 @@ public final class SettingsMenu {
     }
 
     private void section(String title) {
-        TextView t = text(title.toUpperCase(Locale.ROOT), 13, GOLD, true);
+        TextView t = text(title.toUpperCase(Locale.getDefault()), 13, GOLD, true);
         t.setLetterSpacing(0.08f);
         t.setPadding(0, dp(mBody.getChildCount() == 0 ? 2 : 18), 0, dp(2));
         mBody.addView(t);
@@ -738,7 +979,7 @@ public final class SettingsMenu {
         AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(title)
                 .setMessage(message)
-                .setPositiveButton(android.R.string.ok, null)
+                .setPositiveButton(Strings.t("ok"), null)
                 .create();
         GameActivity.showImmersive(d);
     }

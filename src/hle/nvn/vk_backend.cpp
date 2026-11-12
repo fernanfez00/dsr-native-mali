@@ -1464,9 +1464,11 @@ private:
         }
         LoadDeviceFunctions(device_);
         ProbePatchedBc();
-        if (const int rw = dsr::GetRuntime().config.render_width; rw != 1280 && rw > 0 && dsr::GetRuntime().config.hud_box) {
-            hud_box_w_ = std::min(rw, 1280);
-            hud_box_h_ = hud_box_w_ * 9 / 16;
+        if (const int rw = dsr::GetRuntime().config.render_width, rh = dsr::GetRuntime().config.render_height;
+            (rw != 1280 || rh != 720) && rw > 0 && rh > 0 && dsr::GetRuntime().config.hud_box) {
+            // The largest 16:9 box in the frame (the whole frame at 16:9, e.g. with a render scale).
+            hud_box_w_ = std::min(rw, rh * 16 / 9);
+            hud_box_h_ = std::min(rh, hud_box_w_ * 9 / 16);
             LOGI(kTag, "aspect ratio: HUD and menus drawn in a centred %dx%d box of the %dx720 frame", hud_box_w_,
                  hud_box_h_, rw);
         }
@@ -4529,10 +4531,11 @@ private:
         // shaders: quads, text, bars) goes into a centred 16:9 box instead: 1280x720 in the middle of wider frames,
         // the full width and 9/16 of it high on narrower ones, so the HUD keeps its shape and layout. Full-screen
         // quads (fades, dimming behind menus) still cover the whole frame.
-        if (hud_box_w_ && extent.height == 720 && int(extent.width) == dsr::GetRuntime().config.render_width &&
-            HudBoxed(p, vin)) {
-            const float sx = float(hud_box_w_) / float(extent.width), sy = float(hud_box_h_) / 720.0f;
-            const float x0 = float((int(extent.width) - hud_box_w_) / 2), y0 = float((720 - hud_box_h_) / 2);
+        if (hud_box_w_ && int(extent.height) == dsr::GetRuntime().config.render_height &&
+            int(extent.width) == dsr::GetRuntime().config.render_width && HudBoxed(p, vin)) {
+            const int fh = int(extent.height);
+            const float sx = float(hud_box_w_) / float(extent.width), sy = float(hud_box_h_) / float(fh);
+            const float x0 = float((int(extent.width) - hud_box_w_) / 2), y0 = float((fh - hud_box_h_) / 2);
             d.dyn.vp.x = x0 + d.dyn.vp.x * sx;
             d.dyn.vp.width *= sx;
             d.dyn.vp.y = y0 + d.dyn.vp.y * sy;
@@ -4547,12 +4550,14 @@ private:
                 const float kx = float(hud_box_w_) / 1280.0f, ky = float(hud_box_h_) / 720.0f;
                 l = std::max(l, x0 + float(st_.scissor[0]) * kx);
                 t = std::max(t, y0 + float(st_.scissor[1]) * ky);
-                // The game cuts its rectangles at the frame's edge (960 on a 4:3 frame), which in layout units is
-                // not the right edge: one ending there runs to the layout's right edge (1280).
+                // The game cuts its rectangles at the frame's edges (960 on a 4:3 frame, 540 high at a 0.75 render
+                // scale), which in layout units are not the layout's edges: one ending there runs to them.
                 const float right = st_.scissor[0] + st_.scissor[2] >= float(extent.width) - 0.5f
                                         ? 1280.0f : st_.scissor[0] + st_.scissor[2];
+                const float bottom = st_.scissor[1] + st_.scissor[3] >= float(fh) - 0.5f
+                                         ? 720.0f : st_.scissor[1] + st_.scissor[3];
                 r = std::min(r, x0 + right * kx);
-                b = std::min(b, y0 + float(st_.scissor[1] + st_.scissor[3]) * ky);
+                b = std::min(b, y0 + bottom * ky);
             }
             const int il = int(std::floor(l)), it = int(std::floor(t)), ir = int(std::ceil(r)), ib = int(std::ceil(b));
             sc.offset = {il, it};

@@ -456,6 +456,16 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "hud_box")) cfg->hud_box = v != 0;
             else if (!strcmp(key, "compositor_scaling")) cfg->compositor_scaling = v != 0;
             else if (!strcmp(key, "max_anisotropy")) cfg->max_anisotropy = v;
+            else if (!strcmp(key, "render_scale")) cfg->render_scale = std::clamp(float(atof(value)), 0.5f, 1.0f);
+            else if (!strcmp(key, "language")) {
+                // The game's languages (nn::settings codes it recognises); the settings menu lists the same.
+                static const char* const kLanguages[] = {"en-US", "fr", "de", "it", "es", "pt", "ru", "ja", "ko",
+                                                         "zh-CN", "zh-TW", "en-GB", "fr-CA", "es-419"};
+                bool known = false;
+                for (const char* code : kLanguages) known = known || !strcmp(code, value);
+                if (known) cfg->language = value;
+                else LOGW(kTag, "settings: unknown language '%s': using %s", value, cfg->language.c_str());
+            }
             else if (!strcmp(key, "bc_etc2")) cfg->bc_etc2 = v != 0;
             else if (!strcmp(key, "bc3_etc2")) cfg->bc3_etc2 = v != 0;
             else if (!strcmp(key, "aspect_ratio")) {
@@ -550,7 +560,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          path.c_str(), cfg->target_fps, cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
-    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d", cfg->gpu_driver.c_str(), int(cfg->bc_enabler));
+    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f", cfg->gpu_driver.c_str(),
+         int(cfg->bc_enabler), cfg->language.c_str(), cfg->render_scale);
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");

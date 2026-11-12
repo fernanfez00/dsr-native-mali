@@ -232,17 +232,30 @@ void InstallGameHooks() {
     // game's half- and quarter-size buffers (640x360, 320x180) keep their 720-line sizes whatever the render
     // resolution, and a 4:3 test at 1280x960 died silently on loading a save. Only the width changes: wider
     // than 16:9 shows more at the sides, narrower (4:3: 960x720) less.
-    if (rt.config.aspect_ratio != "16:9" && !rt.config.docked) {
-        float ar = 0;
+    // Render scale (settings render_scale, 0.5 - 1.0): the same resolution settings at a lower size, height and
+    // width together (the height also has a getter with its own default, main+0x6a193c: main+0x6a1968 mov w2, #720).
+    // The game draws less and the frame is enlarged to the screen at the end. Heights stay at or below 720 (the
+    // fixed half- and quarter-size buffers are then larger than needed, which is harmless).
+    if (!rt.config.docked) {
+        float ar = 16.0f / 9.0f;
+        bool ar_ok = true;
         if (rt.config.aspect_ratio == "auto") {
             ar = rt.config.screen_aspect;
-        } else {
+        } else if (rt.config.aspect_ratio != "16:9") {
             float w = 0, h = 0;
             if (sscanf(rt.config.aspect_ratio.c_str(), "%f:%f", &w, &h) == 2 && h > 0) ar = w / h;
+            else ar = 0;
         }
-        if (ar > 0) {
-            const int height = 720;
-            const int width = std::clamp(int(std::lround(720.0f * ar / 8.0f)) * 8, 640, 1920);
+        if (!(ar > 0.5f && ar < 4.0f)) {
+            LOGW("hooks", "aspect_ratio %s: not understood (or screen size unknown), staying at 16:9",
+                 rt.config.aspect_ratio.c_str());
+            ar = 16.0f / 9.0f;
+            ar_ok = false;
+        }
+        const float scale = std::clamp(rt.config.render_scale, 0.5f, 1.0f);
+        const int height = std::clamp(int(std::lround(720.0f * scale / 8.0f)) * 8, 360, 720);
+        const int width = std::clamp(int(std::lround(float(height) * ar / 8.0f)) * 8, 320, 1920);
+        if (width != 1280 || height != 720) {
             std::string err;
             auto mov = [](int rd, int v) { return 0x52800000u | (uint32_t(v) << 5) | uint32_t(rd); };
             bool ok = true;
@@ -250,18 +263,20 @@ void InstallGameHooks() {
                 ok = ok && rt.main.PatchInstruction(0x6a170c, 0x5280A002, mov(2, width), &err) &&
                      rt.main.PatchInstruction(0x6a18f8, 0x5280A002, mov(2, width), &err) &&
                      rt.main.PatchInstruction(0x716170, 0x5280A001, mov(1, width), &err);
+            if (height != 720)
+                ok = ok && rt.main.PatchInstruction(0x6a1758, 0x52805A02, mov(2, height), &err) &&
+                     rt.main.PatchInstruction(0x6a1968, 0x52805A02, mov(2, height), &err) &&
+                     rt.main.PatchInstruction(0x716178, 0x52805A02, mov(2, height), &err);
             if (ok) {
-                LOGI("hooks", "aspect ratio %s (%.3f): the game renders at %dx%d (was 1280x720)",
-                     rt.config.aspect_ratio.c_str(), ar, width, height);
+                LOGI("hooks", "aspect ratio %s (%.3f), render scale %.2f: the game renders at %dx%d (was 1280x720)",
+                     ar_ok ? rt.config.aspect_ratio.c_str() : "16:9", ar, scale, width, height);
                 g_aspect = float(width) / float(height);
                 rt.config.render_width = width;
-                std::thread(CameraAspectThread).detach();
+                rt.config.render_height = height;
+                if (std::fabs(g_aspect - 16.0f / 9.0f) > 0.01f) std::thread(CameraAspectThread).detach();
+            } else {
+                LOGW("hooks", "resolution patch failed: %s", err.c_str());
             }
-            else
-                LOGW("hooks", "aspect ratio patch failed: %s", err.c_str());
-        } else {
-            LOGW("hooks", "aspect_ratio %s: not understood (or screen size unknown), staying at 16:9",
-                 rt.config.aspect_ratio.c_str());
         }
     }
     for (const Hook& h : kHooks) {
