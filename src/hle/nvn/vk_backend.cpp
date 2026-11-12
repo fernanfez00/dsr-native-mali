@@ -336,6 +336,16 @@ VkCompareOp CompareOp(int f) {  // NEVER=1 .. ALWAYS=8
                                     VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
     return (f >= 1 && f <= 8) ? k[f] : VK_COMPARE_OP_ALWAYS;
 }
+// The same comparison with its operands exchanged (a < b == b > a).
+VkCompareOp SwapCompareOperands(VkCompareOp op) {
+    switch (op) {
+        case VK_COMPARE_OP_LESS: return VK_COMPARE_OP_GREATER;
+        case VK_COMPARE_OP_GREATER: return VK_COMPARE_OP_LESS;
+        case VK_COMPARE_OP_LESS_OR_EQUAL: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case VK_COMPARE_OP_GREATER_OR_EQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        default: return op;  // never, equal, not equal, always
+    }
+}
 VkBlendFactor BlendFactor(int f) {
     switch (f) {
         case 1: return VK_BLEND_FACTOR_ZERO;
@@ -2659,7 +2669,10 @@ private:
         }
         if (shadow) {
             ci.compareEnable = VK_TRUE;
-            ci.compareOp = s.compare_mode ? CompareOp(s.compare_func) : VK_COMPARE_OP_LESS_OR_EQUAL;
+            // NVN's sampler compare is "texel OP reference"; Vulkan's is "reference OP texel": the operands swap.
+            // (The game's shadow lookups use GREATER and treat 1 as lit: the shadow map texel is farther than the
+            // surface. Taken as Vulkan's GREATER, lit ground came out shadowed and the player's shadow lit.)
+            ci.compareOp = s.compare_mode ? SwapCompareOperands(CompareOp(s.compare_func)) : VK_COMPARE_OP_LESS_OR_EQUAL;
         }
         ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         VkSampler smp = VK_NULL_HANDLE;
