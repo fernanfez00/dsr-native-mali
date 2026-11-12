@@ -407,6 +407,13 @@ void SetScissors(void* cb, int first, int n, const int* v) {
     if (first == 0 && n > 0 && v) SetF(cb, CmdType::SetScissor, float(v[0]), float(v[1]), float(v[2]), float(v[3]));
 }
 void SetDepthRange(void* cb, float n, float f) { SetF(cb, CmdType::SetDepthRange, n, f); }
+// Depth bias (polygon offset), as glPolygonOffsetClamp: used by the game's shadow map passes.
+void SetPolygonOffsetClamp(void* cb, float factor, float units, float clamp) {
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 4)
+        LOGI("nvn", "polygon offset: factor %g, units %g, clamp %g", factor, units, clamp);
+    SetF(cb, CmdType::SetPolygonOffset, factor, units, clamp);
+}
 void SetAlphaRef(void* cb, float ref) { SetF(cb, CmdType::SetAlphaRef, ref); }
 void SetBlendColor(void* cb, const float* c) { SetF(cb, CmdType::SetBlendColor, c[0], c[1], c[2], c[3]); }
 void SetStencil(void* cb, int which, int face, int value) {
@@ -817,6 +824,7 @@ const Proc kProcs[] = {
     P("nvnCommandBufferSetScissor", SetScissor),
     P("nvnCommandBufferSetScissors", SetScissors),
     P("nvnCommandBufferSetDepthRange", SetDepthRange),
+    P("nvnCommandBufferSetPolygonOffsetClamp", SetPolygonOffsetClamp),
     P("nvnCommandBufferSetAlphaRef", SetAlphaRef),
     P("nvnCommandBufferSetBlendColor", SetBlendColor),
     P("nvnCommandBufferSetStencilRef", SetStencilRef),

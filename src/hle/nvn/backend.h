@@ -64,6 +64,7 @@ enum class CmdType : uint8_t {
     CopyBufferToBuffer, // src_addr, dst_addr, index = size (bytes; see `size64`)
     Report,             // dst_addr; index 0: value (`mask` = the value), 1: counter (`mask` = NVNcounterType)
     CallList,           // obj: const CmdList, executed in place (nvnCommandBufferCallCommands / CopyCommands)
+    SetPolygonOffset,   // f[0..2] = factor, units, clamp (nvnCommandBufferSetPolygonOffsetClamp)
 };
 
 struct BufferRange {  // NVNbufferRange

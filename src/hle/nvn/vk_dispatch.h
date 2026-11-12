@@ -56,6 +56,7 @@
     X(vkCmdSetBlendConstants)        \
     X(vkCmdSetScissor)               \
     X(vkCmdSetStencilCompareMask)    \
+    X(vkCmdSetDepthBias)             \
     X(vkCmdSetStencilReference)      \
     X(vkCmdSetStencilWriteMask)      \
     X(vkCmdSetViewport)              \

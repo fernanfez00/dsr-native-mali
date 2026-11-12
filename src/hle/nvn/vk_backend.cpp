@@ -507,6 +507,7 @@ struct DrawState {
     float scissor[4] = {0, 0, 0, 0};
     bool scissor_set = false;
     float depth_range[2] = {0.0f, 1.0f};
+    float poly_offset[3] = {0.0f, 0.0f, 0.0f};  // factor, units, clamp
     float alpha_ref = 0.0f;
     float blend_color[4] = {0, 0, 0, 0};
     uint32_t stencil_ref[2] = {0, 0}, stencil_write[2] = {0xFF, 0xFF}, stencil_compare[2] = {0xFF, 0xFF};
@@ -707,6 +708,11 @@ public:
                 case CmdType::SetDepthRange:
                     st_.depth_range[0] = c.f[0];
                     st_.depth_range[1] = c.f[1];
+                    break;
+                case CmdType::SetPolygonOffset:
+                    st_.poly_offset[0] = c.f[0];
+                    st_.poly_offset[1] = c.f[1];
+                    st_.poly_offset[2] = c.f[2];
                     break;
                 case CmdType::SetAlphaRef: st_.alpha_ref = c.f[0]; break;
                 case CmdType::SetBlendColor: memcpy(st_.blend_color, c.f, sizeof(st_.blend_color)); break;
@@ -1025,7 +1031,9 @@ public:
             default: break;
         }
         if (depth) raw_bpp = HasDepth(img.nvn_format) ? 4 : 0;
-        if (raw_bpp && img.type == VK_IMAGE_TYPE_2D && it.src_w * it.src_h <= 1280u * 720u) {
+        // Depth up to 2048x2048 (shadow maps, 16 MB raw), the rest up to the screen size.
+        const uint32_t max_px = depth ? 2048u * 2048u : 1280u * 720u;
+        if (raw_bpp && img.type == VK_IMAGE_TYPE_2D && it.src_w * it.src_h <= max_px) {
             // Array images: up to 4 layers, stacked vertically (flag 16).
             const uint32_t layers = uint32_t(std::min(6, std::max(1, img.layers)));
             it.w = it.src_w;
@@ -1416,6 +1424,7 @@ private:
         en.dualSrcBlend = have.features.dualSrcBlend;
         en.imageCubeArray = have.features.imageCubeArray;
         en.depthClamp = have.features.depthClamp;
+        en.depthBiasClamp = have.features.depthBiasClamp;
         en.fragmentStoresAndAtomics = have.features.fragmentStoresAndAtomics;
         en.geometryShader = have.features.geometryShader;  // gl_PrimitiveID in fragment shaders
         en.shaderStorageImageWriteWithoutFormat = have.features.shaderStorageImageWriteWithoutFormat;
@@ -1572,9 +1581,24 @@ private:
     VkDeviceSize StreamRemaining() const { return kStreamSize - stream_off_; }
 
     // Compiled pipelines are kept on disk so a second run does not stall on them.
+    // One file per driver (its pipeline cache UUID): a cache written by another driver (e.g. Turnip, then the
+    // phone's own) is never handed to this one. Drivers should reject foreign data themselves, but a stock Adreno
+    // driver given Turnip's cache drew garbled geometry.
     std::string PipelineCachePath() const {
         const std::string& dir = dsr::GetRuntime().config.cache_dir;
-        return dir.empty() ? std::string() : dir + "/vk_pipelines.bin";
+        if (dir.empty()) return std::string();
+        char id[40];
+        snprintf(id, sizeof(id), "%08x_", props_.driverVersion);
+        for (int i = 0; i < 8; i++) snprintf(id + 9 + i * 2, 3, "%02x", props_.pipelineCacheUUID[i]);
+        return dir + "/vk_pipelines_" + id + ".bin";
+    }
+    // The header Vulkan defines for pipeline cache data: this device and driver, or nothing.
+    bool PipelineCacheMatches(const std::vector<uint8_t>& d) const {
+        if (d.size() < 32) return false;
+        uint32_t h[4];
+        memcpy(h, d.data(), sizeof(h));
+        return h[0] >= 32 && h[1] == VK_PIPELINE_CACHE_HEADER_VERSION_ONE && h[2] == props_.vendorID &&
+               h[3] == props_.deviceID && memcmp(d.data() + 16, props_.pipelineCacheUUID, VK_UUID_SIZE) == 0;
     }
     void LoadPipelineCache() {
         std::vector<uint8_t> data;
@@ -1589,6 +1613,13 @@ private:
             }
             fclose(f);
         }
+        if (!data.empty() && !PipelineCacheMatches(data)) {
+            LOGW(kTag, "pipeline cache %s was written by another GPU driver: not used", path.c_str());
+            data.clear();
+        }
+        // The single file of earlier versions (any driver): no longer read.
+        const std::string& dir = dsr::GetRuntime().config.cache_dir;
+        if (!dir.empty()) remove((dir + "/vk_pipelines.bin").c_str());
         VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
         ci.initialDataSize = data.size();
         ci.pInitialData = data.empty() ? nullptr : data.data();
@@ -2644,6 +2675,7 @@ private:
         VkRect2D sc;
         float blend[4];
         uint32_t stencil[6];
+        float bias[3];  // depth bias: constant (units), clamp, slope (factor)
     };
     // One draw for the recorder: everything it needs, worked out on the render thread.
     struct DrawPacket {
@@ -4996,6 +5028,20 @@ private:
         const uint32_t stencil[6] = {st_.stencil_ref[0], st_.stencil_ref[1], st_.stencil_write[0], st_.stencil_write[1],
                                      st_.stencil_compare[0], st_.stencil_compare[1]};
         memcpy(out->stencil, stencil, sizeof(stencil));
+        // Polygon offset: NVN (like OpenGL) offsets by factor * slope + units * r, as Vulkan's depth bias does.
+        if (PolygonOffsetOn()) {
+            out->bias[0] = st_.poly_offset[1];
+            out->bias[1] = features_.depthBiasClamp ? st_.poly_offset[2] : 0.0f;
+            out->bias[2] = st_.poly_offset[0];
+        } else {
+            out->bias[0] = out->bias[1] = out->bias[2] = 0.0f;
+        }
+    }
+    // The polygon state enables the offset per polygon mode (NVN: point 1, line 2, fill 4).
+    bool PolygonOffsetOn() const {
+        const int mode = st_.polygon.mode;
+        const int bit = mode == 0 ? 1 : mode == 1 ? 2 : 4;
+        return (st_.polygon.offset_enables & bit) != 0;
     }
     // Dynamic state lasts for the whole command buffer: record only what changed since the last draw (recorder).
     void ApplyDynamicState(const DynState& s) {
@@ -5010,6 +5056,7 @@ private:
         if (all || s.stencil[3] != dyn_.stencil[3]) vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, s.stencil[3]);
         if (all || s.stencil[4] != dyn_.stencil[4]) vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_BIT, s.stencil[4]);
         if (all || s.stencil[5] != dyn_.stencil[5]) vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_BACK_BIT, s.stencil[5]);
+        if (all || memcmp(s.bias, dyn_.bias, sizeof(s.bias)) != 0) vkCmdSetDepthBias(cb, s.bias[0], s.bias[1], s.bias[2]);
         dyn_ = s;
         dyn_valid_ = true;
     }
@@ -5072,7 +5119,7 @@ private:
         cb.pAttachments = j.blend.data();
         VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
                                 VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-                                VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK};
+                                VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_DEPTH_BIAS};
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dy.dynamicStateCount = uint32_t(sizeof(dyn) / sizeof(dyn[0]));
         dy.pDynamicStates = dyn;
@@ -5220,6 +5267,7 @@ private:
                                               : VK_CULL_MODE_NONE;
         rs.frontFace = st_.polygon.front_face == 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rs.lineWidth = 1.0f;
+        rs.depthBiasEnable = PolygonOffsetOn() ? VK_TRUE : VK_FALSE;  // values: dynamic state
         VkPipelineDepthStencilStateCreateInfo& ds = j.ds;
         const bool has_depth = depth_format != VK_FORMAT_UNDEFINED && HasDepth(depth_nvn_format);
         const bool has_stencil = depth_format != VK_FORMAT_UNDEFINED && HasStencil(depth_nvn_format);
