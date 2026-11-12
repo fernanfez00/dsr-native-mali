@@ -928,6 +928,7 @@ public:
             query_pass_.clear();
             capture_draws_logged_ = 0;
             geo_dumps_ = 0;
+            map_geo_dumps_ = 0;
             if (!query_pool_) {  // requested captures had no pool: no per-draw sample counts
                 VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 qi.queryType = VK_QUERY_TYPE_OCCLUSION;
@@ -1141,6 +1142,7 @@ public:
     void FinishCapture() {
         capture_draws_logged_ = 0;
         geo_dumps_ = 0;
+        map_geo_dumps_ = 0;
         WaitGpuIdle();  // the readback buffers are written by the submission that just went out
         capture_active_ = false;
         if (ts_pool_ && ts_count_ > 1) {
@@ -4170,10 +4172,12 @@ private:
                         pass_tex_desc_.clear();
                         tex_desc_draw_ = drawn_;
                     }
-                    char d[160];
-                    snprintf(d, sizeof(d), " [%s%u: fmt %d %dx%d @%llx%s%s%s]", stage ? "fs" : "vs", slot, img->nvn_format,
-                             img->width, img->height, (unsigned long long)bt.texture.addr, img->written ? " drawn" : "",
-                             img->uploaded ? " uploaded" : "", shadow ? " compare" : "");
+                    char d[200];
+                    const SamplerObj& so = bt.sampler;  // wrap s/t/r, min/mag filter: stretched or black surfaces
+                    snprintf(d, sizeof(d), " [%s%u: fmt %d %dx%d @%llx%s%s%s wrap %d%d%d filter %d/%d]", stage ? "fs" : "vs",
+                             slot, img->nvn_format, img->width, img->height, (unsigned long long)bt.texture.addr,
+                             img->written ? " drawn" : "", img->uploaded ? " uploaded" : "", shadow ? " compare" : "",
+                             so.wrap[0], so.wrap[1], so.wrap[2], so.min_filter, so.mag_filter);
                     if (tex_desc_draw_ != drawn_) {
                         pass_tex_desc_.clear();
                         tex_desc_draw_ = drawn_;
@@ -4664,8 +4668,14 @@ private:
             {
                 const uint64_t fs_hash = st_.program[1] ? st_.program[1]->hash : 0;
                 const bool effect = fs_hash == 0x6f634579337b2b69ull || fs_hash == 0x3fc1b1baa8114318ull;
+                // Map geometry (stretched ground in 1.0.3): its vertex shaders, a few draws.
+                const uint64_t vs_hash = st_.program[0] ? st_.program[0]->hash : 0;
+                const bool map = (vs_hash == 0xbcef43496f5e76f0ull || vs_hash == 0xe45c8b7260213764ull ||
+                                  vs_hash == 0x418df1fd521dac42ull) && map_geo_dumps_ < 8;
                 const int isz = p.index_type == 0 ? 1 : p.index_type == 1 ? 2 : p.index_type == 2 ? 4 : 0;
-                if (effect && extent.width <= 640 && geo_dumps_ < 40 && isz && p.count > 0 && p.count <= 16384 && p.index_address &&
+                if (map && isz && p.count > 0 && p.count <= 65536) map_geo_dumps_++;
+                if (((effect && extent.width <= 640) || map) && geo_dumps_ < 40 && isz && p.count > 0 &&
+                    p.count <= (map ? 65536 : 16384) && p.index_address &&
                     GuestRangeValid(p.index_address, size_t(p.count) * isz) && !vin.bindings.empty()) {
                     geo_dumps_++;
                     const VkVertexInputBindingDescription& vb0 = vin.bindings[0];
@@ -5656,6 +5666,7 @@ private:
     // Vertex data read past the end of the bound buffer (or of known memory): the part inside is copied and the
     // rest is zeros, as the hardware's out-of-range vertex fetches return. (Such draws were skipped: whole
     // batches of particles went missing, leaving see-through squares in smoke and dust.)
+    int map_geo_dumps_ = 0;  // per capture
     uint64_t padded_fetches_ = 0;
     int padded_logged_ = 0;
     VkDeviceSize UploadPadded(const BufferRange& r, uint64_t start, uint64_t bytes) {
