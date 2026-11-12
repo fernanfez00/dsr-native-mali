@@ -1062,6 +1062,7 @@ int GameFolderState(android_app* app) {
     int r = 0;
     if (m && !env->ExceptionCheck()) r = env->CallStaticIntMethod(cls, m);
     if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(cls);  // polled while waiting: no local references may pile up on this thread
     return r;
 }
 std::string TakeGameFolder(android_app* app) {
@@ -1232,14 +1233,15 @@ void StartGame(android_app* app) {
             if (!partial.empty()) {
                 title = "Game files incomplete";
                 msg = "The game folder " + partial + " is missing:\n" + JoinFiles(MissingGameFiles(partial)) +
-                      "\n\nThese files belong next to the exefs folder. Copy the complete game folder there (the base "
-                      "game with the 1.0.3 update merged in), or choose a folder that holds all of it.";
+                      "\n\nThese files belong next to the exefs folder. Copy the complete game folder there, choose "
+                      "a folder that holds all of it, or select the game's .nsp / .xci file to install it.";
             } else {
                 title = "Game files not found";
                 msg = "Dark Souls Remastered was not found in " + base + "/game";
                 if (!g_custom_game_dir.empty()) msg += " or in the folder chosen before (" + g_custom_game_dir + ")";
-                msg += ".\n\nChoose the folder that holds the game files: the one that contains the exefs folder, "
-                       "dvdbnd0.bdt and dvdbnd1.bdt.";
+                msg += ".\n\nChoose the folder that holds the game files (the one that contains the exefs folder, "
+                       "dvdbnd0.bdt and dvdbnd1.bdt), or select the game's .nsp / .xci file (and its update, if "
+                       "you have one) to install it there.";
             }
             AskGameFolder(app, title, msg);
         }
@@ -1422,10 +1424,15 @@ void android_main(android_app* app) {
     while (!app->destroyRequested) {
         int events;
         android_poll_source* source;
-        while (ALooper_pollOnce(-1, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0) {
+        // Until the game starts, wake twice a second: a game installed from an .nsp / .xci (or a folder chosen)
+        // while the app stays in front starts without a lifecycle event.
+        int r;
+        while ((r = ALooper_pollOnce(g_game_started ? -1 : 500, nullptr, &events,
+                                     reinterpret_cast<void**>(&source))) >= 0) {
             if (source) source->process(app, source);
             if (app->destroyRequested) break;
         }
+        if (r == ALOOPER_POLL_TIMEOUT && !g_game_started && app->window && GameFolderState(app) == 2) StartGame(app);
     }
     if (g_glue_env) app->activity->vm->DetachCurrentThread();  // attached for the touch controls
     LOGI(kTag, "activity destroyed (android_main returning)");

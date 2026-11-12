@@ -84,3 +84,8 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure -V
+
+      - name: Test the .nsp / .xci installer
+        run: |
+          pip install --quiet cryptography || sudo apt-get install -y python3-cryptography
+          tests/switch_package/run.sh
