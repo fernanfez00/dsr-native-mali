@@ -30,7 +30,10 @@ Table<MultisampleStateObj> g_ms;
 std::mutex g_pool_mutex;
 std::unordered_map<int, TexRef> g_texture_ids;
 std::unordered_map<int, TexRef> g_image_ids;  // nvnTexturePoolRegisterImage (storage images)
-std::unordered_map<int, SamplerObj> g_sampler_ids;
+std::unordered_map<int, SamplerObj> g_sampler_ids;  // the last sampler registered under each id, any pool
+// Samplers per pool: a sampler id names the sampler registered under it in the pool the command buffer has
+// bound (nvnCommandBufferSetSamplerPool). Ids of different pools may overlap.
+std::unordered_map<const void*, std::unordered_map<int, SamplerObj>> g_sampler_pools;
 std::unordered_map<const void*, std::shared_ptr<const ShaderCode>> g_programs;
 std::atomic<int> g_depth_mode{0}, g_origin_mode{0};
 
@@ -300,15 +303,34 @@ void TexturePoolRegisterImage(void* pool, int id, const void* texture, const voi
              r.tex.format, r.tex.target);
     g_image_ids[id] = r;
 }
-void SamplerPoolRegisterSampler(void* pool, int id, const void* sampler) {
-    SamplerObj s = LoadSampler(sampler, "sampler");
+void RegisterSampler(void* pool, int id, const SamplerObj& s) {
     std::lock_guard<std::mutex> lk(g_pool_mutex);
+    auto& ids = g_sampler_pools[pool];
+    // Diagnostics: the pools samplers are registered in, ids registered again with other state.
+    if (ids.empty())
+        LOGI(kTag, "sampler pool %p: first registration (id %d); %zu sampler pools seen", pool, id,
+             g_sampler_pools.size());
+    static int changed = 0, crossed = 0;
+    auto old = ids.find(id);
+    if (old != ids.end() && !(old->second == s) && changed < 12) {
+        changed++;
+        LOGI(kTag, "sampler id %d in pool %p now: wrap %d%d%d filter %d/%d compare %d (was wrap %d%d%d compare %d)",
+             id, pool, s.wrap[0], s.wrap[1], s.wrap[2], s.min_filter, s.mag_filter, s.compare_mode,
+             old->second.wrap[0], old->second.wrap[1], old->second.wrap[2], old->second.compare_mode);
+    }
+    auto g = g_sampler_ids.find(id);
+    if (old == ids.end() && g != g_sampler_ids.end() && !(g->second == s) && crossed < 12) {
+        crossed++;
+        LOGI(kTag, "sampler id %d registered in pool %p differs from the same id in another pool", id, pool);
+    }
+    ids[id] = s;
     g_sampler_ids[id] = s;
 }
+void SamplerPoolRegisterSampler(void* pool, int id, const void* sampler) {
+    RegisterSampler(pool, id, LoadSampler(sampler, "sampler"));
+}
 void SamplerPoolRegisterBuilder(void* pool, int id, const void* builder) {
-    SamplerObj s = LoadSampler(builder, "sampler builder");
-    std::lock_guard<std::mutex> lk(g_pool_mutex);
-    g_sampler_ids[id] = s;
+    RegisterSampler(pool, id, LoadSampler(builder, "sampler builder"));
 }
 // ---- device modes --------------------------------------------------------------------------------------
 void DeviceSetDepthMode(void* dev, int mode) {
@@ -397,9 +419,16 @@ TexRef ImageById(int id) {
     auto t = g_texture_ids.find(id);
     return t == g_texture_ids.end() ? TexRef{} : t->second;
 }
-SamplerObj SamplerById(int id) {
+SamplerObj SamplerById(int id, const void* pool) {
     std::lock_guard<std::mutex> lk(g_pool_mutex);
-    auto it = g_sampler_ids.find(id);
+    if (pool) {
+        auto p = g_sampler_pools.find(pool);
+        if (p != g_sampler_pools.end()) {
+            auto it = p->second.find(id);
+            if (it != p->second.end()) return it->second;
+        }
+    }
+    auto it = g_sampler_ids.find(id);  // no pool bound (or not registered there): the last registered
     return it == g_sampler_ids.end() ? SamplerObj{} : it->second;
 }
 void SetProgramCode(const void* program, std::shared_ptr<const ShaderCode> code) {

@@ -12,6 +12,7 @@
 #include "arch/arch.h"
 #include "hle/nvn.h"
 #include "hle/nvn/backend.h"
+#include "hle/nvn/state.h"
 #include "hle/nvn/layout.h"
 #include "hle/nvn/shader/translator.h"
 #include "hle/registry.h"
@@ -324,6 +325,44 @@ static void TestNvnCommands() {
     CHECK(Nvn<bool (*)(void*, const void*)>("nvnWindowInitialize")(window, wb));
     Nvn<void (*)(void*, void*, int)>("nvnQueuePresentTexture")(nullptr, window, 0);
     CHECK(be.presents == 1 && be.last_present.valid && be.last_present.addr == reinterpret_cast<uint64_t>(storage));
+
+    // Sampler ids are per sampler pool: the same id in two pools names two samplers, and a texture handle
+    // resolves its sampler in the pool the command buffer has bound (in later recordings too).
+    {
+        alignas(16) uint8_t sb[96], spool_a[64], spool_b[64], tpool[64], cb3[256];
+        auto reg = [&](void* sp, int wrap) {
+            Nvn<void (*)(void*)>("nvnSamplerBuilderSetDefaults")(sb);
+            Nvn<void (*)(void*, int, int, int)>("nvnSamplerBuilderSetWrapMode")(sb, wrap, wrap, wrap);
+            Nvn<void (*)(void*, int, const void*)>("nvnSamplerPoolRegisterSamplerBuilder")(sp, 5, sb);
+        };
+        reg(spool_a, 5);
+        reg(spool_b, 7);
+        Nvn<void (*)(void*, int, const void*, const void*)>("nvnTexturePoolRegisterTexture")(tpool, 300, color, nullptr);
+        const uint64_t handle = (uint64_t(5) << 20) | 300;
+        auto record = [&](void* sp) {
+            Nvn<void (*)(void*)>("nvnCommandBufferBeginRecording")(cb3);
+            if (sp) Nvn<void (*)(void*, const void*)>("nvnCommandBufferSetSamplerPool")(cb3, sp);
+            Nvn<void (*)(void*, int, int, uint64_t)>("nvnCommandBufferBindTexture")(cb3, 1, 0, handle);
+            return Nvn<uint64_t (*)(void*)>("nvnCommandBufferEndRecording")(cb3);
+        };
+        uint64_t hs[3] = {record(spool_a), record(spool_b), record(nullptr)};
+        be.executed.clear();
+        Nvn<void (*)(void*, int, const uint64_t*)>("nvnQueueSubmitCommands")(nullptr, 3, hs);
+        auto wrap_of = [&](size_t i) {
+            int w = -1, pools = 0;
+            if (i < be.executed.size())
+                ForEachCmd(be.executed[i], [&](const Cmd& c) {
+                    if (c.type == CmdType::SetSamplerPool) pools++;
+                    if (c.type == CmdType::BindTextures)
+                        w = One<BoundTexture>(c).sampler.wrap[0];
+                });
+            return std::make_pair(w, pools);
+        };
+        CHECK(wrap_of(0).first == 5);
+        CHECK(wrap_of(1).first == 7);
+        CHECK(wrap_of(2).first == 7 && wrap_of(2).second == 1);  // pool b still bound, re-bound at the start
+        CHECK(SamplerById(5, spool_a).wrap[0] == 5 && SamplerById(5, spool_b).wrap[0] == 7);
+    }
 
     SetBackendForTesting(nullptr);
 }

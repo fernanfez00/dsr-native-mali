@@ -65,6 +65,7 @@ enum class CmdType : uint8_t {
     Report,             // dst_addr; index 0: value (`mask` = the value), 1: counter (`mask` = NVNcounterType)
     CallList,           // obj: const CmdList, executed in place (nvnCommandBufferCallCommands / CopyCommands)
     SetPolygonOffset,   // f[0..2] = factor, units, clamp (nvnCommandBufferSetPolygonOffsetClamp)
+    SetSamplerPool,     // src_addr: the NVNsamplerPool (sampler ids of texture handles read from uniforms)
 };
 
 struct BufferRange {  // NVNbufferRange

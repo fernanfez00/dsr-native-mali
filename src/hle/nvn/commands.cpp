@@ -54,6 +54,7 @@ struct Recorder {
     CmdList cmds;
     size_t last_size = 0;  // commands in this buffer's previous recording (storage reserved up front)
     size_t command_used = 0, control_used = 0;
+    const void* sampler_pool = nullptr;  // nvnCommandBufferSetSamplerPool: sampler ids of handles name its samplers
 };
 Table<Recorder> g_recorders;
 
@@ -161,6 +162,13 @@ void BeginRecording(void* cb) {
     if (r.cmds.capacity() < r.last_size) r.cmds.reserve(r.last_size + r.last_size / 4);  // no growth copies
     r.control_used += kControlBytesPerRecording;
     g_begin_count++;
+    // The bound sampler pool is command buffer state: a recording that does not bind one again still uses it.
+    if (r.sampler_pool) {
+        Cmd c;
+        c.type = CmdType::SetSamplerPool;
+        c.src_addr = reinterpret_cast<uint64_t>(r.sampler_pool);
+        Append(cb, std::move(c));
+    }
 }
 void AddCommandMemory(void* cb, const void*, int64_t, size_t) { RecorderOf(cb).command_used = 0; }
 void AddControlMemory(void* cb, void*, size_t) { RecorderOf(cb).control_used = 0; }
@@ -356,20 +364,33 @@ void BindUniformBuffer(void* cb, int stage, int index, uint64_t addr, uint64_t s
 void BindUniformBuffers(void* cb, int stage, int first, int n, const BufferRange* ranges) {
     BindItems(cb, CmdType::BindUniformBuffers, ranges, ranges ? size_t(std::max(0, n)) : 0, stage, first);
 }
-// NVN texture handles: texture ID in the low 20 bits, sampler ID above (see DeviceGetTextureHandle).
-BoundTexture ResolveHandle(uint64_t handle) {
+// NVN texture handles: texture ID in the low 20 bits, sampler ID above (see DeviceGetTextureHandle). The sampler
+// ID names a sampler of the pool this command buffer has bound.
+BoundTexture ResolveHandle(void* cb, uint64_t handle) {
     BoundTexture b;
     b.texture = TextureById(int(handle & 0xFFFFF));
-    b.sampler = SamplerById(int(handle >> 20));
+    b.sampler = SamplerById(int(handle >> 20), RecorderOf(cb).sampler_pool);
     b.valid = b.texture.valid;
     return b;
 }
+void SetSamplerPool(void* cb, const void* pool) {
+    RecorderOf(cb).sampler_pool = pool;
+    Cmd c;
+    c.type = CmdType::SetSamplerPool;
+    c.src_addr = reinterpret_cast<uint64_t>(pool);
+    Append(cb, std::move(c));
+    static std::mutex m;
+    static std::unordered_map<const void*, int> seen;
+    std::lock_guard<std::mutex> lk(m);
+    if (seen.size() < 16 && seen.emplace(pool, 0).second)
+        LOGI(kTag, "command buffer %p binds sampler pool %p (%zu pools bound so far)", cb, pool, seen.size());
+}
 void BindTexture(void* cb, int stage, int index, uint64_t handle) {
-    BindOne(cb, CmdType::BindTextures, ResolveHandle(handle), stage, index);
+    BindOne(cb, CmdType::BindTextures, ResolveHandle(cb, handle), stage, index);
 }
 void BindTextures(void* cb, int stage, int first, int n, const uint64_t* handles) {
     std::vector<BoundTexture> v;
-    for (int i = 0; i < n && handles; i++) v.push_back(ResolveHandle(handles[i]));
+    for (int i = 0; i < n && handles; i++) v.push_back(ResolveHandle(cb, handles[i]));
     BindItems(cb, CmdType::BindTextures, v.data(), v.size(), stage, first);
 }
 // Image handles (nvnDeviceGetImageHandle) are the pool ids.
@@ -825,6 +846,7 @@ const Proc kProcs[] = {
     P("nvnCommandBufferSetScissors", SetScissors),
     P("nvnCommandBufferSetDepthRange", SetDepthRange),
     P("nvnCommandBufferSetPolygonOffsetClamp", SetPolygonOffsetClamp),
+    P("nvnCommandBufferSetSamplerPool", SetSamplerPool),
     P("nvnCommandBufferSetAlphaRef", SetAlphaRef),
     P("nvnCommandBufferSetBlendColor", SetBlendColor),
     P("nvnCommandBufferSetStencilRef", SetStencilRef),

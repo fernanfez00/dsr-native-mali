@@ -518,6 +518,7 @@ struct DrawState {
     bool scissor_set = false;
     float depth_range[2] = {0.0f, 1.0f};
     float poly_offset[3] = {0.0f, 0.0f, 0.0f};  // factor, units, clamp
+    uint64_t sampler_pool = 0;                   // NVNsamplerPool bound (SetSamplerPool)
     float alpha_ref = 0.0f;
     float blend_color[4] = {0, 0, 0, 0};
     uint32_t stencil_ref[2] = {0, 0}, stencil_write[2] = {0xFF, 0xFF}, stencil_compare[2] = {0xFF, 0xFF};
@@ -718,6 +719,10 @@ public:
                 case CmdType::SetDepthRange:
                     st_.depth_range[0] = c.f[0];
                     st_.depth_range[1] = c.f[1];
+                    break;
+                case CmdType::SetSamplerPool:
+                    if (st_.sampler_pool != c.src_addr) handle_memo_list_ = ~0ull;  // memo: other pool's samplers
+                    st_.sampler_pool = c.src_addr;
                     break;
                 case CmdType::SetPolygonOffset:
                     st_.poly_offset[0] = c.f[0];
@@ -3961,7 +3966,7 @@ private:
         auto memo = handle_memo_.find(handle);
         if (memo != handle_memo_.end()) return memo->second;
         bt.texture = TextureById(int(handle & 0xFFFFF));
-        bt.sampler = SamplerById(int(handle >> 20));
+        bt.sampler = SamplerById(int(handle >> 20), reinterpret_cast<const void*>(st_.sampler_pool));
         bt.valid = bt.texture.valid;
         handle_memo_.emplace(handle, bt);
         if (!bt.valid && handles_logged_++ < 8)
