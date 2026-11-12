@@ -29,14 +29,31 @@ public final class SwitchPackageTest {
         }
     }
 
+    static void copyTree(File from, File to) throws Exception {
+        to.mkdirs();
+        for (File f : from.listFiles()) {
+            if (f.isDirectory()) copyTree(f, new File(to, f.getName()));
+            else Files.copy(f.toPath(), new File(to, f.getName()).toPath());
+        }
+    }
+
     static void run(String label, File dir, String[] pkgs, String expect, boolean update) throws Exception {
+        run(label, dir, pkgs, expect, update, false);
+    }
+
+    static void run(String label, File dir, String[] pkgs, String expect, boolean update, boolean overBase) throws Exception {
         SwitchPackage.Keys keys = SwitchPackage.Keys.parse(new FileReader(new File(dir, "prod.keys")));
         File dest = Files.createTempDirectory("dsr").toFile();
         List<SwitchPackage.FileSource> src = new ArrayList<>();
         for (String p : pkgs) src.add(open(new File(dir, p)));
-        SwitchPackage.Result r = SwitchPackage.install(src, keys, dest, null, -1);
+        File installed = null;
+        if (overBase) {  // the extracted base game in dest, then the update over it
+            copyTree(new File(dir, "expect_base"), dest);
+            installed = dest;
+        }
+        SwitchPackage.Result r = SwitchPackage.install(src, keys, dest, installed, null, -1);
         System.out.println(label + ": build " + r.buildId + " update=" + r.withUpdate + " supported=" + r.supportedBuild
-                + " bytes=" + r.bytes);
+                + " bytes=" + r.bytes + " verified=" + r.blocksVerified + " unverified=" + r.blocksUnverified);
         if (r.withUpdate != update) { System.out.println("  wrong update choice"); failures++; }
         compare(new File(dir, expect), dest, "");
         for (SwitchPackage.FileSource s : src) s.close();
@@ -48,6 +65,7 @@ public final class SwitchPackageTest {
         run("xci", dir, new String[] {"game.xci"}, "expect_base", false);
         run("nsp+update", dir, new String[] {"base.nsp", "update.nsp"}, "expect_update", true);
         run("xci+update", dir, new String[] {"update.nsp", "game.xci"}, "expect_update", true);
+        run("update over extracted base", dir, new String[] {"update.nsp"}, "expect_update", true, true);
         try {
             run("update only", dir, new String[] {"update.nsp"}, "expect_update", true);
             failures++;

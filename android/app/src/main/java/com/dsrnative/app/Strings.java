@@ -299,6 +299,23 @@ final class Strings {
                 "Anderen Spielordner wählen…", "Scegli un'altra cartella di gioco…", "Elegir otra carpeta del juego…",
                 "Escolher outra pasta do jogo…", "Выбрать другую папку игры…", "別のゲームフォルダーを選ぶ…",
                 "다른 게임 폴더 선택…", "选择其他游戏文件夹…", "選擇其他遊戲資料夾…");
+        put("install_pkg", "Install game or update from .nsp / .xci…", "Installer le jeu ou une mise à jour (.nsp / .xci)…",
+                "Spiel oder Update aus .nsp / .xci installieren…", "Installa gioco o aggiornamento da .nsp / .xci…",
+                "Instalar juego o actualización desde .nsp / .xci…", "Instalar jogo ou atualização de .nsp / .xci…",
+                "Установить игру или обновление из .nsp / .xci…", ".nsp / .xci からゲームまたは更新をインストール…",
+                ".nsp / .xci에서 게임 또는 업데이트 설치…", "从 .nsp / .xci 安装游戏或更新…", "從 .nsp / .xci 安裝遊戲或更新…");
+        put("install_n",
+                "Select the game's .nsp / .xci (and its update), or only the update (1.0.3) to update the game in this folder. Needs your Switch's prod.keys. Used from the next start.",
+                "Sélectionnez le .nsp / .xci du jeu (et sa mise à jour), ou seulement la mise à jour (1.0.3) pour mettre à jour le jeu de ce dossier. Nécessite le prod.keys de votre Switch. Utilisé au prochain lancement.",
+                "Wähle die .nsp / .xci des Spiels (und das Update) oder nur das Update (1.0.3), um das Spiel in diesem Ordner zu aktualisieren. Benötigt die prod.keys deiner Switch. Gilt ab dem nächsten Start.",
+                "Seleziona il .nsp / .xci del gioco (e l'aggiornamento), o solo l'aggiornamento (1.0.3) per aggiornare il gioco in questa cartella. Servono le prod.keys della tua Switch. Usato dal prossimo avvio.",
+                "Selecciona el .nsp / .xci del juego (y su actualización), o solo la actualización (1.0.3) para actualizar el juego de esta carpeta. Necesita el prod.keys de tu Switch. Se usa desde el próximo inicio.",
+                "Selecione o .nsp / .xci do jogo (e a atualização), ou só a atualização (1.0.3) para atualizar o jogo desta pasta. Precisa do prod.keys do seu Switch. Vale a partir do próximo início.",
+                "Выберите .nsp / .xci игры (и обновление) или только обновление (1.0.3), чтобы обновить игру в этой папке. Нужен prod.keys вашей Switch. Применяется со следующего запуска.",
+                "ゲームの .nsp / .xci（と更新データ）、またはこのフォルダーのゲームを更新する場合は更新データ（1.0.3）のみを選択します。Switch の prod.keys が必要です。次回起動時から使用されます。",
+                "게임의 .nsp / .xci(및 업데이트)를 선택하거나, 이 폴더의 게임을 업데이트하려면 업데이트(1.0.3)만 선택하세요. Switch의 prod.keys가 필요합니다. 다음 시작부터 사용됩니다.",
+                "选择游戏的 .nsp / .xci（及其更新），或仅选择更新（1.0.3）来更新此文件夹中的游戏。需要你的 Switch 的 prod.keys。下次启动时生效。",
+                "選擇遊戲的 .nsp / .xci（及其更新），或僅選擇更新（1.0.3）來更新此資料夾中的遊戲。需要你的 Switch 的 prod.keys。下次啟動時生效。");
         put("saved_in", "Settings are saved in %s", "Les paramètres sont enregistrés dans %s",
                 "Einstellungen werden in %s gespeichert", "Le impostazioni sono salvate in %s",
                 "Los ajustes se guardan en %s", "As configurações são salvas em %s", "Настройки сохраняются в %s",

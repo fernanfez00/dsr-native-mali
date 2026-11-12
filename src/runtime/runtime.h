@@ -84,6 +84,8 @@ int RunGame();
 
 // Patches engine functions of this game build (log/panic output, frame rate). Called by LoadGame.
 void InstallGameHooks();
+// The game version the hooks recognised ("1.0.0", "1.0.3"), or null for an unknown build.
+const char* GameVersion();
 // The game's current per-frame time step in seconds (1/30 unless the 60 fps patches are active).
 float GameFrameTime();
 // The game's movie player shows one video frame per game frame (30 fps on the Switch): while a video

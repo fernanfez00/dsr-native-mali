@@ -36,7 +36,8 @@ HLE_FUNC(_ZN2nn2oe18GetDesiredLanguageEv, uint64_t, oe_GetDesiredLanguage, ()) {
     return PackCode(dsr::GetRuntime().config.language.c_str());
 }
 HLE_FUNC(_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE, void, oe_GetDisplayVersion, (char* out)) {
-    strncpy(out, "1.0.3", 16);
+    const char* v = dsr::GameVersion();  // the version the program is (1.0.0 or the 1.0.3 update)
+    strncpy(out, v ? v : "1.0.0", 16);
 }
 HLE_FUNC(_ZN2nn2oe25TryPopNotificationMessageEPj, bool, oe_TryPopNotificationMessage, (uint32_t*)) { return false; }
 HLE_FUNC(_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE, void, oe_SetFocusHandlingMode, (int)) {}

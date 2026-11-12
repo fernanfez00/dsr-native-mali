@@ -547,6 +547,16 @@ public final class SettingsMenu {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(8);
         mBody.addView(pick, lp);
+        if (mA instanceof GameActivity) {
+            note(Strings.t("install_n"));
+            TextView inst = chip(Strings.t("install_pkg"), false);
+            inst.setGravity(Gravity.CENTER);
+            inst.setOnClickListener(v -> ((GameActivity) mA).installFromMenu(sGameDir));
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            ilp.topMargin = dp(8);
+            mBody.addView(inst, ilp);
+        }
         note(Strings.t("saved_in", sSettingsPath));
     }
 

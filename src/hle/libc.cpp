@@ -247,6 +247,9 @@ HLE_FUNC(__nnmusl_init_dso, int, libc_nnmusl_init_dso, ()) { return 0; }
 HLE_FUNC(__nnmusl_fini_dso, void, libc_nnmusl_fini_dso, ()) {}
 
 // ---- nn::Result C helpers ------------------------------------------------------------------------
+// finite(): used by the 1.0.3 update.
+HLE_FUNC(finite, int, libc_finite, (double x)) { return std::isfinite(x) ? 1 : 0; }
+
 HLE_FUNC(nnResultIsSuccess, bool, nnResultIsSuccess, (uint32_t r)) { return r == 0; }
 HLE_FUNC(nnResultIsFailure, bool, nnResultIsFailure, (uint32_t r)) { return r != 0; }
 HLE_FUNC(nnResultGetModule, int, nnResultGetModule, (uint32_t r)) { return int(r & 0x1FF); }

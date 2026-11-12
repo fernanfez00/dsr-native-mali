@@ -188,7 +188,8 @@ def main(out):
     }
     upd_files = dict(base_files)
     b = bytearray(upd_files['dvdbnd0.bdt']); b[100000:100100] = rbytes(100); upd_files['dvdbnd0.bdt'] = bytes(b)
-    upd_files['sd/menu/a.bin'] = rbytes(1234)  # same sizes: most of the image maps to the base
+    upd_files['sd/menu/a.bin'] = rbytes(1234)
+    upd_files['ShaderGitCommit.txt'] = b'SHADER=1\n'  # a new file, sorted first: everything after it moves
 
     base_key, upd_key, title_key = rbytes(16), rbytes(16), rbytes(16)
     rights = struct.pack('>Q', TITLE) + bytes(7) + bytes([KGEN])
@@ -208,20 +209,49 @@ def main(out):
     base_nca_k, _ = base_nca(base_key, None)  # XCI: key area
     # The key area of a rights-ID NCA is unused; the base image with a title key is encrypted with title_key.
 
-    # Update: the patched RomFS image, built from base chunks and new data.
-    v_img, v_hd = ivfc_image(romfs(upd_files))
+    # Update: the patched RomFS image. As real updates do, unchanged file data (and the unchanged parts of a
+    # changed file) is taken from the base game at byte granularity; everything else (hash levels, RomFS header
+    # and tables, new data) comes from the update.
+    v_level6 = romfs(upd_files)
+    v_img, v_hd = ivfc_image(v_level6)
     v_img = pad(v_img, 0x4000)
-    base_chunks = {}
-    for o in range(0, len(base_rom) - 0x3FFF, 0x4000): base_chunks.setdefault(base_rom[o:o + 0x4000], o)
-    reloc = []; patch_data = b''
-    for o in range(0, len(v_img), 0x4000):
-        c = v_img[o:o + 0x4000]
-        if c in base_chunks: e = (o, base_chunks[c], 0)
-        else: e = (o, len(patch_data), 1); patch_data += c
-        if reloc and reloc[-1][2] == e[2] and reloc[-1][1] + (o - reloc[-1][0]) == e[1]: continue
-        reloc.append(e)
-    assert any(e[2] == 0 for e in reloc) and any(e[2] == 1 for e in reloc), reloc
+    v_l6 = struct.unpack_from('<Q', v_hd, 0x10 + 5 * 0x18)[0]
+    b_hd = ivfc_image(romfs(base_files))[1]
+    b_l6 = struct.unpack_from('<Q', b_hd, 0x10 + 5 * 0x18)[0]
+    def file_offsets(level6):
+        h = struct.unpack_from('<10Q', level6, 0)
+        ft = level6[h[7]:h[7] + h[8]]; out = {}; o = 0
+        names = sorted(f for f in (upd_files if level6 is v_level6 else base_files))
+        while o < len(ft):
+            fo, fs = struct.unpack_from('<QQ', ft, o + 8); nl, = struct.unpack_from('<I', ft, o + 0x1C)
+            out[ft[o + 0x20:o + 0x20 + nl].decode()] = (h[9] + fo, fs); o += (0x20 + nl + 3) & ~3
+        return out
+    vo = file_offsets(v_level6); bo = file_offsets(romfs(base_files))
+    base_runs = []  # (virtual, base physical, length)
+    for p, d in upd_files.items():
+        n = p.split('/')[-1]
+        if n not in vo or n not in bo or p not in base_files: continue
+        bd = base_files[p]; v0 = v_l6 + vo[n][0]; b0 = b_l6 + bo[n][0]
+        if bd == d:
+            if d: base_runs.append((v0, b0, len(d)))
+        else:  # common prefix and suffix
+            k = 0
+            while k < min(len(d), len(bd)) and d[k] == bd[k]: k += 1
+            if k > 100: base_runs.append((v0, b0, k - 7))  # an odd length: entries end mid-block
+            j = 0
+            while j < min(len(d), len(bd)) - k and d[-1 - j] == bd[-1 - j]: j += 1
+            if j > 100: base_runs.append((v0 + len(d) - j + 3, b0 + len(bd) - j + 3, j - 3))
+    base_runs.sort()
+    reloc = []; patch_data = b''; pos = 0
+    for v, b, n in base_runs + [(len(v_img), 0, 0)]:
+        if v > pos:
+            reloc.append((pos, len(patch_data), 1)); patch_data += v_img[pos:v]
+        if n:
+            reloc.append((v, b, 0))
+        pos = v + n
+    assert sum(1 for e in reloc if e[2] == 0) >= 4, reloc
     reloc_entries = [struct.pack('<QQI', v, p, i) for v, p, i in reloc]
+    patch_data = pad(patch_data, 16)
     ex_img, ex_hd = pfs_hash_data(upd_exefs)
     ex_size = len(pad(ex_img, 0x200))
     sec1_start = 0xC00 + ex_size

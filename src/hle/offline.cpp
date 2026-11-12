@@ -180,6 +180,10 @@ HLE_FUNC(_ZNK2nn4bcat21DeliveryCacheProgress13GetWholeTotalEv, int64_t, bcat_Pro
     return 0;
 }
 HLE_ALIAS(_ZNK2nn4bcat21DeliveryCacheProgress18GetWholeDownloadedEv, bcat_ProgressGetWholeTotal);
+// GetResult (1.0.3): the sync "finished" with the service unavailable, as the other bcat calls report.
+HLE_FUNC(_ZNK2nn4bcat21DeliveryCacheProgress9GetResultEv, uint32_t, bcat_ProgressGetResult, (const void*)) {
+    return kBcatUnavailable;
+}
 
 // ===== friends / nsd / ec ==============================================================================
 HLE_FUNC(_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAccountIdEii, uint32_t,
@@ -334,6 +338,8 @@ HLE_FUNC(_ZN2nn5swkbd14InlineKeyboard6AppearERKNS0_9AppearArgE, void, swkbd_IK_A
     g_ik.waiting_for_text = true;
     if (!shown) dsr::platform::DeliverText(false, u"");  // no dialog: report a cancel
 }
+// Disappear (1.0.3): the keyboard is hidden; a dialog already up still reports its result.
+HLE_ALIAS(_ZN2nn5swkbd14InlineKeyboard9DisappearEv, swkbd_Nop);
 HLE_FUNC(_ZN2nn5swkbd14InlineKeyboard4CalcEv, uint32_t, swkbd_IK_Calc, (void*)) {
     const void* init_cb = nullptr;
     const void* enter_cb = nullptr;

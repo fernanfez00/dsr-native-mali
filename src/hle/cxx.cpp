@@ -97,6 +97,16 @@ HLE_FUNC(_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initE
          (void* self, const char* s, size_t n)) {
     new (self) Str(s, n);
 }
+// __init(const char*, size, reserve) and __init(count, char): used by the 1.0.3 update.
+HLE_FUNC(_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcmm, void, str_init_reserve,
+         (void* self, const char* s, size_t n, size_t reserve)) {
+    Str* p = new (self) Str(s, n);
+    if (reserve > n) p->reserve(reserve);
+}
+HLE_FUNC(_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEmc, void, str_init_fill,
+         (void* self, size_t n, char c)) {
+    new (self) Str(n, c);
+}
 HLE_FUNC(_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1ERKS5_, void, str_copy_ctor,
          (void* self, const void* other)) {
     new (self) Str(*static_cast<const Str*>(other));

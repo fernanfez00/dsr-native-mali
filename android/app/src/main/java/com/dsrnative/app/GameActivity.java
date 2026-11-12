@@ -92,6 +92,29 @@ public class GameActivity extends NativeActivity {
     static final int REQ_GAME_PACKAGE = 4104, REQ_KEYS = 4105;
     private final List<Uri> mPackages = new ArrayList<>();
     private volatile boolean mCancel;
+    /** Set when installing from the settings menu (the game runs): the game folder in use. */
+    private File mMenuDest;
+
+    /** Settings menu: install the game, or an update over it, from .nsp / .xci files into the game folder. */
+    void installFromMenu(String gameDir) {
+        mMenuDest = new File(gameDir);
+        pickPackages();
+    }
+
+    /** A problem: from the menu a plain message, at start-up the game folder dialog (choose folder / nsp / exit). */
+    private void fail(String title, String message) {
+        if (mMenuDest == null) {
+            showFolderDialog(title, message);
+            return;
+        }
+        mMenuDest = null;
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .create();
+        showImmersive(d);
+    }
 
     /** Download/DSRNative (or the app's own folder without storage access), as native code chooses it. */
     private File appDir() {
@@ -109,7 +132,7 @@ public class GameActivity extends NativeActivity {
         try {
             startActivityForResult(i, REQ_GAME_PACKAGE);
         } catch (Exception e) {
-            showFolderDialog("No file picker", "No app is available to choose files. Copy the extracted game to "
+            fail("No file picker", "No app is available to choose files. Copy the extracted game to "
                     + "Download/DSRNative/game instead, then start the app again.");
         }
     }
@@ -135,11 +158,16 @@ public class GameActivity extends NativeActivity {
                     try {
                         startActivityForResult(i, REQ_KEYS);
                     } catch (Exception e) {
-                        showFolderDialog("No file picker", "Copy prod.keys to " + appDir() + " instead, then try again.");
+                        fail("No file picker", "Copy prod.keys to " + appDir() + " instead, then try again.");
                     }
                 })
-                .setNegativeButton("Back", (dlg, which) -> showFolderDialog("Game files not found",
-                        "Choose the folder that holds the game files, or select the game's .nsp / .xci file."))
+                .setNegativeButton("Back", (dlg, which) -> {
+                    if (mMenuDest != null)
+                        mMenuDest = null;
+                    else
+                        showFolderDialog("Game files not found",
+                                "Choose the folder that holds the game files, or select the game's .nsp / .xci file.");
+                })
                 .create();
         showImmersive(d);
     }
@@ -191,7 +219,7 @@ public class GameActivity extends NativeActivity {
             askKeys("No prod.keys was found in " + appDir() + ".");
             return;
         }
-        final File dest = new File(appDir(), "game");
+        final File dest = mMenuDest != null ? mMenuDest : new File(appDir(), "game");
         final List<Uri> uris = new ArrayList<>(mPackages);
         final float dp = getResources().getDisplayMetrics().density;
         LinearLayout box = new LinearLayout(this);
@@ -242,7 +270,7 @@ public class GameActivity extends NativeActivity {
                 if (!dest.isDirectory()) dest.mkdirs();
                 long free = new StatFs(dest.getPath()).getAvailableBytes();
                 final long[] last = {0};
-                res = SwitchPackage.install(sources, keys, dest, new SwitchPackage.Progress() {
+                res = SwitchPackage.install(sources, keys, dest, dest, new SwitchPackage.Progress() {
                     @Override
                     public void update(long done, long total, String name) {
                         long now = android.os.SystemClock.uptimeMillis();
@@ -286,12 +314,13 @@ public class GameActivity extends NativeActivity {
                 dlg.dismiss();
                 if (fr == null) {
                     if ("Cancelled".equals(ft))
-                        showFolderDialog("Game files not found", "The installation was cancelled. Choose the game "
-                                + "folder, or select the .nsp / .xci file again.");
+                        fail(mMenuDest != null ? "Cancelled" : "Game files not found", "The installation was "
+                                + "cancelled." + (mMenuDest != null ? " Nothing was changed." : " Choose the game "
+                                + "folder, or select the .nsp / .xci file again."));
                     else if ("Wrong keys".equals(ft) || "Key missing".equals(ft))
                         askKeys(fe);
                     else
-                        showFolderDialog(ft, fe);
+                        fail(ft, fe);
                     return;
                 }
                 installed(dest, fr);
@@ -300,20 +329,28 @@ public class GameActivity extends NativeActivity {
     }
 
     private void installed(File dest, SwitchPackage.Result r) {
-        android.util.Log.i("DSRNative", "installed the game to " + dest + " (build " + r.buildId + ", update "
-                + r.withUpdate + ", " + r.bytes + " bytes)");
-        StringBuilder m = new StringBuilder("The game was unpacked to " + dest + (r.withUpdate ? " (with its update)." : ".")
-                + " The .nsp / .xci files are no longer needed by the app.");
+        android.util.Log.i("DSRNative", "installed the game to " + dest + " (build " + r.buildId + ", version "
+                + r.version + ", update " + r.withUpdate + ", over the installed game " + r.overInstalled + ", "
+                + r.bytes + " bytes, " + r.blocksVerified + " blocks checked, " + r.blocksUnverified + " not)");
+        final boolean menu = mMenuDest != null;
+        mMenuDest = null;
+        String what = "Dark Souls Remastered" + (r.version != null ? " " + r.version : "");
+        StringBuilder m = new StringBuilder(r.overInstalled
+                ? "The game in " + dest + " was updated to " + what + "."
+                : what + " was unpacked to " + dest + (r.withUpdate ? " (with its update)." : "."));
+        m.append(" The .nsp / .xci files are no longer needed by the app.");
+        if (menu) m.append("\n\nClose the app completely and open it again to play this version.");
         if (r.updateIgnored)
-            m.append("\n\nThe update was not used: this version of the app is made for the base game's version.");
+            m.append("\n\nThe update was not used: its version is not supported by this app (the base game's is).");
         if (!r.supportedBuild)
             m.append("\n\nThis version of the game (build ").append(r.buildId.substring(0, 16)).append("…) is not "
                     + "the one this app is made for. It may not run correctly.");
         AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Game installed")
+                .setTitle(r.overInstalled ? "Game updated" : "Game installed")
                 .setMessage(m.toString())
                 .setCancelable(false)
-                .setPositiveButton("Start", (dlg, which) -> {
+                .setPositiveButton(menu ? "OK" : "Start", (dlg, which) -> {
+                    if (menu) return;
                     sFolder = dest.getPath();
                     sFolderState = 2;  // native code starts the game
                 })
@@ -343,9 +380,13 @@ public class GameActivity extends NativeActivity {
                 else if (data.getData() != null)
                     mPackages.add(data.getData());
             }
-            if (mPackages.isEmpty())
-                showFolderDialog("Game files not found", "No file was selected. Select the game's .nsp or .xci file "
-                        + "(and its update, if you have one: select both at once), or choose the game folder.");
+            if (mPackages.isEmpty()) {
+                if (mMenuDest != null)
+                    mMenuDest = null;
+                else
+                    showFolderDialog("Game files not found", "No file was selected. Select the game's .nsp or .xci "
+                            + "file (and its update, if you have one: select both at once), or choose the game folder.");
+            }
             else
                 startInstall();
             return;

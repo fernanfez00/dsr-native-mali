@@ -1,5 +1,7 @@
-// Hooks on specific functions inside the game's main module (this build only, matched by build id).
-// They replace engine functions whose output is useful to us but goes nowhere in a retail build.
+// Hooks on specific functions inside the game's main module, for the game builds listed in kBuilds (matched by
+// build id): 1.0.0 and the 1.0.3 update. They replace engine functions whose output is useful to us but goes
+// nowhere in a retail build, and patch the frame rate and resolution. The places were found in 1.0.0 and matched
+// in 1.0.3 by their code (the same instructions around them, with addresses masked).
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -26,13 +28,49 @@ namespace dsr {
 namespace {
 float* g_game_step = nullptr;  // the game's per-frame time step (scratch page), when patched
 
-// Replacement for the game's frame limiter, main+0x70bd90 (this, fps): called once per game update on the
-// render thread. Same contract as the original: skip when the engine's global flag says so; sleep until a
-// frame period has passed since the last call; remember the tick at this+0x310. Then the game's time step is
-// set to the period that actually passed, and the frame-skip state (this+0x31d/0x31e/0x320) is kept clear.
+// Where things are in one game build (offsets in main).
+struct GameBuild {
+    const char* build_id;  // first 16 bytes, hex
+    const char* version;
+    const char* data_version;  // DataVersion.txt of the RomFS that goes with it
+    // Per-frame update: adrp x8 / ldr s8, [x8, #...] loading the constant 1/30 s time step.
+    uint64_t step_adrp;
+    uint32_t step_adrp_insn, step_ldr_insn;
+    // Render thread frame limiter (this, fps) and its state in `this`.
+    uint64_t limiter;
+    uint64_t limiter_global;  // 1.0.0: skipped while this int (main+) is non-zero; 0 = see limiter_enabled
+    uint32_t limiter_enabled;  // 1.0.3: skipped while this byte of `this` is zero
+    uint32_t last_tick, skip_active, skip_toggle, skip_time;
+    // Resolution defaults (mov w2/w1, #1280 / #720).
+    uint64_t width_cfg, width_get, display_width, height_cfg, height_get, display_height;
+    // Engine log, log with va_list, DL_PANIC.
+    uint64_t log, vlog, panic;
+};
+const GameBuild kBuilds[] = {
+    {"5a797a3a5da6c4f3468cb7c84e4dde63", "1.0.0", "20180818_462",
+     0x66c9c8, 0xB00080A8, 0xBD497108,
+     0x70bd90, 0x251fb4c, 0, 0x310, 0x31d, 0x31e, 0x320,
+     0x6a170c, 0x6a18f8, 0x716170, 0x6a1758, 0x6a1968, 0x716178,
+     0x7fea18, 0x7feb30, 0x7892d8},
+    {"6569410c91c398e78ec76b418ee4cca8", "1.0.3", "20181026_101",
+     0x667930, 0xB0008068, 0xBD455908,
+     0x706d28, 0, 0x2f7, 0x2e8, 0x2f5, 0x2f6, 0x2f8,
+     0x69c638, 0x69c824, 0x711ff0, 0x69c684, 0x69c894, 0x711ff8,
+     0x7f71d4, 0x7f72ec, 0x782dac},
+};
+const GameBuild* g_build = nullptr;
+
+// Replacement for the game's frame limiter (1.0.0: main+0x70bd90, 1.0.3: main+0x706d28; this, fps): called once
+// per game update on the render thread. Same contract as the original: skip when the engine says so (1.0.0: a
+// global flag; 1.0.3: a flag in `this`); sleep until a frame period has passed since the last call; remember the
+// tick (1.0.0: this+0x310). Then the game's time step is set to the period that actually passed, and the
+// frame-skip state (1.0.0: this+0x31d/0x31e/0x320) is kept clear.
 void FrameLimiter(uint8_t* self, int /*fps*/) {
     const Runtime& rt = GetRuntime();
-    if (*reinterpret_cast<const int32_t*>(rt.main.base() + 0x251fb4c) != 0) return;
+    const GameBuild& b = *g_build;
+    if (b.limiter_global ? *reinterpret_cast<const int32_t*>(rt.main.base() + b.limiter_global) != 0
+                         : self[b.limiter_enabled] == 0)
+        return;
     using clock = std::chrono::steady_clock;
     static clock::time_point last;
     const int fps = FrameRateNow();
@@ -46,14 +84,11 @@ void FrameLimiter(uint8_t* self, int /*fps*/) {
     last = now;
     // Up to 1/20 s per step: slower devices (20-30 fps) keep the game at normal speed instead of slow motion.
     if (g_game_step) *g_game_step = float(std::clamp(seconds, 1.0 / 60.0, 1.0 / 20.0));
-    *reinterpret_cast<int64_t*>(self + 0x310) = hle::os::NowTicks();
-    self[0x31d] = 0;
-    self[0x31e] = 0;
-    *reinterpret_cast<double*>(self + 0x320) = 0;
+    *reinterpret_cast<int64_t*>(self + b.last_tick) = hle::os::NowTicks();
+    self[b.skip_active] = 0;
+    self[b.skip_toggle] = 0;
+    *reinterpret_cast<double*>(self + b.skip_time) = 0;
 }
-
-// Dark Souls Remastered (Switch) 1.0.3, main build id 5a797a3a5da6c4f3468cb7c84e4dde63...
-constexpr const char* kBuildId = "5a797a3a5da6c4f3468cb7c84e4dde63";
 
 void Trim(char* s) {
     size_t n = strlen(s);
@@ -66,7 +101,7 @@ uintptr_t GuestOffset(const void* p) {
     return m.Contains(a) ? a - m.base() : 0;
 }
 
-// main+0x7fea18: engine debug print, (int level, const char* fmt, ...)
+// Engine debug print (1.0.0: main+0x7fea18), (int level, const char* fmt, ...)
 void EngineLog(int level, const char* fmt, ...) {
     char msg[2048];
     va_list ap;
@@ -77,7 +112,7 @@ void EngineLog(int level, const char* fmt, ...) {
     if (msg[0]) LOGI("engine", "[%d] %s", level, msg);
 }
 
-// main+0x7feb30: same with a va_list
+// The same with a va_list (1.0.0: main+0x7feb30)
 void EngineLogV(int level, const char* fmt, va_list ap) {
     char msg[2048];
     vsnprintf(msg, sizeof(msg), fmt ? fmt : "", ap);
@@ -85,7 +120,7 @@ void EngineLogV(int level, const char* fmt, va_list ap) {
     if (msg[0]) LOGI("engine", "[%d] %s", level, msg);
 }
 
-// main+0x7892d8: DL_PANIC(const char* file, int line, const char* fmt, ...)
+// DL_PANIC(const char* file, int line, const char* fmt, ...) (1.0.0: main+0x7892d8)
 void EnginePanic(const char* file, int line, const char* fmt, ...) {
     char msg[2048];
     va_list ap;
@@ -122,8 +157,9 @@ void CameraAspectThread() {
         hle::os::GuestHeapRange(&hb, &hs);
         std::vector<std::pair<uintptr_t, size_t>> ranges;
         if (hb && hs) ranges.push_back({hb, hs});
-        if (m.size() > 0x1ae2000)
-            ranges.push_back({m.base() + 0x1ae2000, std::min<size_t>(m.size() - 0x1ae2000, 0x7d65f8 + 0x3339a08)});  // .data + .bss
+        const loader::NsoImage& nso = GetRuntime().main_nso;  // .data + .bss
+        const size_t data = nso.data.mem_offset, data_size = size_t(nso.data.size) + nso.bss_size;
+        if (data && m.size() > data) ranges.push_back({m.base() + data, std::min<size_t>(m.size() - data, data_size)});
         int new_found = 0;
         for (const auto& [base, size] : ranges) {
             const uint32_t* p = reinterpret_cast<const uint32_t*>(base + 4);
@@ -163,11 +199,6 @@ struct Hook {
     void* fn;
     const char* name;
 };
-const Hook kHooks[] = {
-    {0x7fea18, reinterpret_cast<void*>(&EngineLog), "engine log"},
-    {0x7feb30, reinterpret_cast<void*>(&EngineLogV), "engine vlog"},
-    {0x7892d8, reinterpret_cast<void*>(&EnginePanic), "DL_PANIC"},
-};
 
 }  // namespace
 
@@ -184,13 +215,36 @@ int FrameRateNow() {
     return g_movies.load(std::memory_order_relaxed) > 0 ? 30 : std::clamp(GetRuntime().config.target_fps, 30, 60);
 }
 
+const char* GameVersion() { return g_build ? g_build->version : nullptr; }
+
 void InstallGameHooks() {
     Runtime& rt = GetRuntime();
-    if (rt.main_nso.build_id_hex.rfind(kBuildId, 0) != 0) {
-        LOGW("hooks", "unknown game build %.32s: engine hooks disabled", rt.main_nso.build_id_hex.c_str());
+    for (const GameBuild& b : kBuilds)
+        if (rt.main_nso.build_id_hex.rfind(b.build_id, 0) == 0) g_build = &b;
+    if (!g_build) {
+        LOGW("hooks", "unknown game build %.32s: engine hooks disabled (supported: 1.0.0, 1.0.3)",
+             rt.main_nso.build_id_hex.c_str());
         return;
     }
-    // Frame rate (fps = 60). The same two places a well-known Switch 60 fps mod changes, done differently:
+    const GameBuild& b = *g_build;
+    LOGI("hooks", "game version %s (build %.16s...)", b.version, rt.main_nso.build_id_hex.c_str());
+    // The program and the data files must be the same version (e.g. the 1.0.3 exefs over 1.0.0 data is not).
+    if (FILE* f = fopen((rt.config.game_dir + "/DataVersion.txt").c_str(), "r")) {
+        char data[64] = {};
+        if (fgets(data, sizeof(data), f)) {
+            Trim(data);
+            for (char* e = data + strlen(data); e > data && e[-1] == ' '; *--e = 0) {}
+            for (const GameBuild& o : kBuilds)
+                if (&o != &b && strcmp(data, o.data_version) == 0)
+                    LOGW("hooks", "the game's data files are version %s (DataVersion %s) but the program is %s: "
+                         "install the matching data (the update's RomFS) or the game may misbehave", o.version, data,
+                         b.version);
+            if (strcmp(data, b.data_version) == 0) LOGI("hooks", "data files: version %s (%s)", b.version, data);
+        }
+        fclose(f);
+    }
+    // Frame rate (fps = 60; offsets below are 1.0.0's). The same two places a well-known Switch 60 fps mod changes,
+    // done differently:
     // 1. The game's per-frame update (main+0x66c99c) steps every system by a constant 1/30 s loaded from
     //    read-only data (main+0x66c9c8 adrp x8, page; +0x66c9cc ldr s8, [x8, #0x970]). It now loads a float in
     //    the scratch page instead.
@@ -204,23 +258,23 @@ void InstallGameHooks() {
         std::string err;
         float* step = reinterpret_cast<float*>(rt.main.ScratchPage());
         *step = 1.0f / 30.0f;
-        const uint32_t adrp = rt.main.EncodeAdrp(0x66c9c8, 8, reinterpret_cast<uintptr_t>(step));
-        bool ok = rt.main.PatchInstruction(0x66c9c8, 0xB00080A8, adrp, &err) &&
-                  rt.main.PatchInstruction(0x66c9cc, 0xBD497108, 0xBD400108, &err);  // ldr s8, [x8]
-        if (ok) ok = rt.main.HookFunction(0x70bd90, reinterpret_cast<void*>(&FrameLimiter), &err);
+        const uint32_t adrp = rt.main.EncodeAdrp(b.step_adrp, 8, reinterpret_cast<uintptr_t>(step));
+        const bool adrp_ok = rt.main.PatchInstruction(b.step_adrp, b.step_adrp_insn, adrp, &err);
+        bool ok = adrp_ok && rt.main.PatchInstruction(b.step_adrp + 4, b.step_ldr_insn, 0xBD400108, &err);  // ldr s8, [x8]
+        if (ok) ok = rt.main.HookFunction(b.limiter, reinterpret_cast<void*>(&FrameLimiter), &err);
         if (ok) {
             g_game_step = step;
             LOGI("hooks", "frame rate: own frame limiter at %d fps (changeable in game), game time step follows the frame time",
                  std::clamp(rt.config.target_fps, 30, 60));
         } else {
             LOGW("hooks", "60 fps patches failed (%s): staying at 30 fps", err.c_str());
-            rt.main.PatchInstruction(0x66c9cc, 0xBD400108, 0xBD497108, &err);  // undo, if the first ones applied
-            rt.main.PatchInstruction(0x66c9c8, rt.main.EncodeAdrp(0x66c9c8, 8, reinterpret_cast<uintptr_t>(step)),
-                                     0xB00080A8, &err);
+            rt.main.PatchInstruction(b.step_adrp + 4, 0xBD400108, b.step_ldr_insn, &err);  // undo what applied
+            if (adrp_ok) rt.main.PatchInstruction(b.step_adrp, adrp, b.step_adrp_insn, &err);
             rt.config.target_fps = 30;
         }
     }
-    // Aspect ratio. Two places set the game's resolution, both with built-in defaults:
+    // Aspect ratio (offsets below are 1.0.0's; kBuilds has each build's). Two places set the game's resolution, both
+    // with built-in defaults:
     // - the render resolution, read from the game's settings with defaults 1280 / 720 (main+0x6a16b0:
     //   "Normal.Resolution.Width" main+0x6a170c mov w2, #1280; "...Height" main+0x6a1758 mov w2, #720), and
     //   again by the width getter main+0x6a18cc (main+0x6a18f8 mov w2, #1280) whose callers (main+0x101d80,
@@ -260,13 +314,13 @@ void InstallGameHooks() {
             auto mov = [](int rd, int v) { return 0x52800000u | (uint32_t(v) << 5) | uint32_t(rd); };
             bool ok = true;
             if (width != 1280)
-                ok = ok && rt.main.PatchInstruction(0x6a170c, 0x5280A002, mov(2, width), &err) &&
-                     rt.main.PatchInstruction(0x6a18f8, 0x5280A002, mov(2, width), &err) &&
-                     rt.main.PatchInstruction(0x716170, 0x5280A001, mov(1, width), &err);
+                ok = ok && rt.main.PatchInstruction(b.width_cfg, 0x5280A002, mov(2, width), &err) &&
+                     rt.main.PatchInstruction(b.width_get, 0x5280A002, mov(2, width), &err) &&
+                     rt.main.PatchInstruction(b.display_width, 0x5280A001, mov(1, width), &err);
             if (height != 720)
-                ok = ok && rt.main.PatchInstruction(0x6a1758, 0x52805A02, mov(2, height), &err) &&
-                     rt.main.PatchInstruction(0x6a1968, 0x52805A02, mov(2, height), &err) &&
-                     rt.main.PatchInstruction(0x716178, 0x52805A02, mov(2, height), &err);
+                ok = ok && rt.main.PatchInstruction(b.height_cfg, 0x52805A02, mov(2, height), &err) &&
+                     rt.main.PatchInstruction(b.height_get, 0x52805A02, mov(2, height), &err) &&
+                     rt.main.PatchInstruction(b.display_height, 0x52805A02, mov(2, height), &err);
             if (ok) {
                 LOGI("hooks", "aspect ratio %s (%.3f), render scale %.2f: the game renders at %dx%d (was 1280x720)",
                      ar_ok ? rt.config.aspect_ratio.c_str() : "16:9", ar, scale, width, height);
@@ -279,7 +333,12 @@ void InstallGameHooks() {
             }
         }
     }
-    for (const Hook& h : kHooks) {
+    const Hook hooks[] = {
+        {b.log, reinterpret_cast<void*>(&EngineLog), "engine log"},
+        {b.vlog, reinterpret_cast<void*>(&EngineLogV), "engine vlog"},
+        {b.panic, reinterpret_cast<void*>(&EnginePanic), "DL_PANIC"},
+    };
+    for (const Hook& h : hooks) {
         std::string err;
         if (rt.main.HookFunction(h.offset, h.fn, &err))
             LOGI("hooks", "hooked %s at main+0x%lx", h.name, (unsigned long)h.offset);
