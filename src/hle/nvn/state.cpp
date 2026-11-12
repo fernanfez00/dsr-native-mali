@@ -26,7 +26,6 @@ Table<ChannelMaskStateObj> g_channel;
 Table<DepthStencilStateObj> g_depth;
 Table<PolygonStateObj> g_polygon;
 Table<MultisampleStateObj> g_ms;
-Table<SamplerObj> g_sampler_builders, g_samplers;
 
 std::mutex g_pool_mutex;
 std::unordered_map<int, TexRef> g_texture_ids;
@@ -179,38 +178,78 @@ void StreamSetDivisor(void* s, int d) { StoreWord(static_cast<uint8_t*>(s) + 4, 
 int64_t StreamGetStride(const void* s) { return int32_t(LoadWord(s)); }
 int StreamGetDivisor(const void* s) { return int32_t(LoadWord(static_cast<const uint8_t*>(s) + 4)); }
 // ---- samplers ------------------------------------------------------------------------------------------
-void SamplerBuilderSetDefaults(void* b) { g_sampler_builders.Reset(b); }
+// Sampler builders and samplers keep their state in the game's own structs (NVNsamplerBuilder / NVNsampler are
+// opaque 96-byte blocks; ours takes 48), not in tables keyed by address: the game also copies these structs
+// (a prepared builder copied, then changed), and a table entry does not follow a copy. 1.0.3 builds its
+// samplers so: looked up by address, samplers got the state of whatever builder had been at that stack address
+// before, run by run (shadow maps sampled with a cube map's wrap modes, ground textures clamped: stretched or
+// black ground).
+namespace {
+constexpr uint32_t kSamplerMagic = 0x53534E44;  // "DNSS"
+struct StoredSampler {
+    uint32_t magic;
+    SamplerObj s;
+};
+static_assert(sizeof(StoredSampler) <= 96, "must fit in NVNsampler(Builder)");
+SamplerObj LoadSampler(const void* p, const char* what) {
+    StoredSampler st;
+    memcpy(&st, p, sizeof(st));
+    if (st.magic == kSamplerMagic) return st.s;
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 4) LOGW(kTag, "%s %p was never set up (no SetDefaults / Initialize): defaults used", what, p);
+    return SamplerObj{};
+}
+void StoreSampler(void* p, const SamplerObj& s) {
+    StoredSampler st{kSamplerMagic, s};
+    memcpy(p, &st, sizeof(st));
+}
+template <typename F>
+void EditSampler(void* b, F f) {
+    SamplerObj s = LoadSampler(b, "sampler builder");
+    f(s);
+    StoreSampler(b, s);
+}
+}  // namespace
+void SamplerBuilderSetDefaults(void* b) { StoreSampler(b, SamplerObj{}); }
 void SamplerBuilderSetMinMag(void* b, int min, int mag) {
-    auto& s = g_sampler_builders.Get(b);
-    s.min_filter = min;
-    s.mag_filter = mag;
+    EditSampler(b, [&](SamplerObj& s) {
+        s.min_filter = min;
+        s.mag_filter = mag;
+    });
     Seen("sampler filter", min, mag);
 }
 void SamplerBuilderSetWrap(void* b, int s_, int t, int r) {
-    auto& s = g_sampler_builders.Get(b);
-    s.wrap[0] = s_;
-    s.wrap[1] = t;
-    s.wrap[2] = r;
+    EditSampler(b, [&](SamplerObj& s) {
+        s.wrap[0] = s_;
+        s.wrap[1] = t;
+        s.wrap[2] = r;
+    });
     Seen("sampler wrap", s_, t, r);
 }
 void SamplerBuilderSetLodClamp(void* b, float mn, float mx) {
-    auto& s = g_sampler_builders.Get(b);
-    s.lod_min = mn;
-    s.lod_max = mx;
+    EditSampler(b, [&](SamplerObj& s) {
+        s.lod_min = mn;
+        s.lod_max = mx;
+    });
 }
-void SamplerBuilderSetLodBias(void* b, float bias) { g_sampler_builders.Get(b).lod_bias = bias; }
+void SamplerBuilderSetLodBias(void* b, float bias) {
+    EditSampler(b, [&](SamplerObj& s) { s.lod_bias = bias; });
+}
 void SamplerBuilderSetCompare(void* b, int mode, int func) {
-    auto& s = g_sampler_builders.Get(b);
-    s.compare_mode = mode;
-    s.compare_func = func;
+    EditSampler(b, [&](SamplerObj& s) {
+        s.compare_mode = mode;
+        s.compare_func = func;
+    });
     Seen("sampler compare", mode, func);
 }
-void SamplerBuilderSetAniso(void* b, float a) { g_sampler_builders.Get(b).max_anisotropy = a; }
+void SamplerBuilderSetAniso(void* b, float a) {
+    EditSampler(b, [&](SamplerObj& s) { s.max_anisotropy = a; });
+}
 bool SamplerInitialize(void* sampler, const void* builder) {
-    g_samplers.Get(sampler) = g_sampler_builders.Copy(builder);
+    StoreSampler(sampler, LoadSampler(builder, "sampler builder"));
     return true;
 }
-void SamplerFinalize(void* sampler) { g_samplers.Erase(sampler); }
+void SamplerFinalize(void*) {}
 // ---- pools ---------------------------------------------------------------------------------------------
 void TexturePoolRegisterTexture(void* pool, int id, const void* texture, const void* view) {
     TexRef r = MakeTexRef(texture);
@@ -262,12 +301,12 @@ void TexturePoolRegisterImage(void* pool, int id, const void* texture, const voi
     g_image_ids[id] = r;
 }
 void SamplerPoolRegisterSampler(void* pool, int id, const void* sampler) {
-    SamplerObj s = g_samplers.Copy(sampler);
+    SamplerObj s = LoadSampler(sampler, "sampler");
     std::lock_guard<std::mutex> lk(g_pool_mutex);
     g_sampler_ids[id] = s;
 }
 void SamplerPoolRegisterBuilder(void* pool, int id, const void* builder) {
-    SamplerObj s = g_sampler_builders.Copy(builder);
+    SamplerObj s = LoadSampler(builder, "sampler builder");
     std::lock_guard<std::mutex> lk(g_pool_mutex);
     g_sampler_ids[id] = s;
 }
