@@ -49,14 +49,13 @@ struct GameBuild {
     // Game frame rate while a video plays. The movie player is frame-based: 1.0.0 shows one video frame per game
     // frame (30 fps videos: 30), 1.0.3 one per two game frames (60; at 30 its videos ran at half speed).
     int movie_fps;
-    // Performance mode (settings performance_mode): the engine's own quality variables, from its debug menu.
-    //   lod_read:      ldrb w8, [x19, #0x530] reading the LOD level bias (debug menu "LOD level bias", -2..2; the
-    //                  Switch build sets 1) into the frame's draw parameters: becomes mov w8, #2 (coarser LODs).
+    // Performance mode (settings performance_mode): the engine's own quality variables, from its debug menu. (The
+    // LOD level bias, 1 on the Switch, is left alone: at 2 nearby walls switched to low-detail models with gaps.)
     //   lowvfx_read:   ldrb w10, [x20, #0x599] reading "Enable Low Quality Vfx" (0) into the effect setup: becomes
     //                  mov w10, #1 (effects through the engine's low-quality resolve).
     //   shadow_size:   the shadow map size global (debug menu "ShadwoMap Size", 512..2048, 2048): set to 1024
     //                  before the game starts; the engine sizes the shadow target and its texel offsets from it.
-    uint64_t lod_read, lowvfx_read, shadow_size;
+    uint64_t lowvfx_read, shadow_size;
 };
 const GameBuild kBuilds[] = {
     {"5a797a3a5da6c4f3468cb7c84e4dde63", "1.0.0", "20180818_462",
@@ -64,13 +63,13 @@ const GameBuild kBuilds[] = {
      0x70bd90, 0x251fb4c, 0, 0x310, 0x31d, 0x31e, 0x320,
      0x6a170c, 0x6a18f8, 0x716170, 0x6a1758, 0x6a1968, 0x716178,
      0x7fea18, 0x7feb30, 0x7892d8, 30,
-     0x370660, 0x3620f4, 0x1aeb890},
+     0x3620f4, 0x1aeb890},
     {"6569410c91c398e78ec76b418ee4cca8", "1.0.3", "20181026_101",
      0x667930, 0xB0008068, 0xBD455908,
      0x706d28, 0, 0x2f7, 0x2e8, 0x2f5, 0x2f6, 0x2f8,
      0x69c638, 0x69c824, 0x711ff0, 0x69c684, 0x69c894, 0x711ff8,
      0x7f71d4, 0x7f72ec, 0x782dac, 60,
-     0x364ae0, 0x356790, 0x1adf890},
+     0x356790, 0x1adf890},
 };
 const GameBuild* g_build = nullptr;
 
@@ -93,19 +92,13 @@ const LogoSkip kLogoSkips[] = {
 };
 constexpr uint32_t kNop = 0xD503201F, kLdrS1Timer = 0xBD40E261;
 
-// Performance mode: coarser LODs, low-quality effects, 1024x1024 shadow maps (see GameBuild). Each part is checked
-// before it is changed and is skipped (logged) if the game's code or data there is not what is expected.
+// Performance mode: low-quality effects, 1024x1024 shadow maps (see GameBuild); the menu also sets render scale 0.75.
+// Each part is checked before it is changed and is skipped (logged) if the game's code or data is not as expected.
 void ApplyPerformanceMode(Runtime& rt, const GameBuild& b) {
-    constexpr uint32_t kLdrbLodBias = 0x3954C268;   // ldrb w8, [x19, #0x530]
-    constexpr uint32_t kMovLodBias2 = 0x52800048;   // mov w8, #2
     constexpr uint32_t kLdrbLowVfx = 0x3956668A;    // ldrb w10, [x20, #0x599]
     constexpr uint32_t kMovLowVfxOn = 0x5280002A;   // mov w10, #1
     std::string err;
     std::string done;
-    if (rt.main.PatchInstruction(b.lod_read, kLdrbLodBias, kMovLodBias2, &err))
-        done += "LOD bias 2";
-    else
-        LOGW("hooks", "performance mode: LOD bias not changed (%s)", err.c_str());
     if (rt.main.PatchInstruction(b.lowvfx_read, kLdrbLowVfx, kMovLowVfxOn, &err))
         done += done.empty() ? "low-quality effects" : ", low-quality effects";
     else

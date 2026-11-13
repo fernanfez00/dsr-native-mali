@@ -70,8 +70,8 @@ struct RuntimeConfig {
     // mali_barriers = 1 (PR #13): narrow layout-transition barriers (destination = the stages that use the image) and
     // render targets made readable when their pass ends, so a tile-based GPU (Mali) can overlap passes. Off by default.
     bool mali_barriers = false;
-    // performance_mode = 1: the engine's own lower-quality options: coarser LODs (LOD bias 2 instead of the Switch's 1),
-    // low-quality effects, 1024x1024 shadow maps instead of 2048x2048. Read at start-up.
+    // performance_mode = 1: the engine's own lower-quality options: low-quality effects, 1024x1024 shadow maps instead
+    // of 2048x2048 (read at start-up). The menu also sets render_scale 0.75 when it is turned on.
     bool performance_mode = false;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;

@@ -23,6 +23,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -41,9 +42,11 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.json.JSONObject;
 
 /**
  * The in-game settings menu, opened by holding - and + for a second (controller or on-screen buttons). Tabs:
@@ -415,7 +418,6 @@ public final class SettingsMenu {
                 new String[] {"fifo", "mailbox"},
                 new String[] {Strings.t("present_vsync") + " " + Strings.t("default_mark"), Strings.t("present_mailbox")},
                 "fifo");
-        renderScale();
         choice("aspect_ratio", Strings.t("aspect_t"), Strings.t("aspect_n"),
                 new String[] {"16:9", "auto", "4:3", "21:9"},
                 new String[] {"16:9 " + Strings.t("default_mark"), Strings.t("aspect_fill"), "4:3", "21:9"}, "16:9");
@@ -427,6 +429,7 @@ public final class SettingsMenu {
         section(Strings.t("sec_quality"));
         toggle("performance_mode", Strings.t("perf_t"), Strings.t("perf_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        renderScale();  // performance mode sets 75%; it can be moved freely afterwards
 
         section(Strings.t("sec_gpu"));
         note(Strings.t("gpu_n"));
@@ -725,6 +728,105 @@ public final class SettingsMenu {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lp2.topMargin = dp(8);
         mBody.addView(reset, lp2);
+
+        section(Strings.t("sec_presets"));
+        note(Strings.t("presets_n"));
+        TextView savePreset = chip(Strings.t("preset_save"), false);
+        savePreset.setGravity(Gravity.CENTER);
+        savePreset.setOnClickListener(v -> savePresetDialog());
+        LinearLayout.LayoutParams lp3 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp3.topMargin = dp(8);
+        mBody.addView(savePreset, lp3);
+        JSONObject presets = loadPresets(mA);
+        List<String> names = new ArrayList<>();
+        for (Iterator<String> it = presets.keys(); it.hasNext();) names.add(it.next());
+        java.util.Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
+        String current = mValues.containsKey("touch_layout") ? mValues.get("touch_layout") : "";
+        for (final String name : names) {
+            final String layout = presets.optString(name, "");
+            TextView row = chip(name, false);
+            row.setGravity(Gravity.CENTER);
+            row.setSelected(same(layout, current) || (layout.isEmpty() && (current == null || current.isEmpty())));
+            row.setOnClickListener(v -> presetDialog(name, layout));
+            LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            rl.topMargin = dp(6);
+            mBody.addView(row, rl);
+        }
+    }
+
+    // ---- touch layout presets (app preferences, "touch_presets": a JSON object of name -> touch_layout) -------------
+
+    static JSONObject loadPresets(Context c) {
+        try {
+            return new JSONObject(c.getSharedPreferences("dsrnative", Context.MODE_PRIVATE).getString("touch_presets", "{}"));
+        } catch (Exception e) {
+            return new JSONObject();
+        }
+    }
+
+    static void storePresets(Context c, JSONObject presets) {
+        c.getSharedPreferences("dsrnative", Context.MODE_PRIVATE).edit().putString("touch_presets", presets.toString())
+                .apply();
+    }
+
+    private void savePresetDialog() {
+        final EditText name = new EditText(mA);
+        name.setSingleLine(true);
+        name.setHint(Strings.t("preset_name"));
+        name.setTextColor(TEXT);
+        name.setHintTextColor(DIM);
+        LinearLayout box = new LinearLayout(mA);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(Strings.t("preset_save"))
+                .setView(box)
+                .setPositiveButton(Strings.t("save"), (dlg, w) -> {
+                    String n = name.getText().toString().trim();
+                    if (n.isEmpty()) n = Strings.t("sec_presets") + " " + (loadPresets(mA).length() + 1);
+                    if (n.length() > 40) n = n.substring(0, 40);
+                    String layout = mValues.containsKey("touch_layout") ? mValues.get("touch_layout") : "";
+                    JSONObject presets = loadPresets(mA);
+                    try {
+                        presets.put(n, layout == null ? "" : layout);
+                    } catch (Exception e) {
+                        return;
+                    }
+                    storePresets(mA, presets);
+                    Toast.makeText(mA, Strings.t("preset_saved", n), Toast.LENGTH_SHORT).show();
+                    if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
+                })
+                .setNegativeButton(Strings.t("cancel"), null)
+                .create();
+        GameActivity.showImmersive(d);
+    }
+
+    private void presetDialog(final String name, final String layout) {
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(name)
+                .setPositiveButton(Strings.t("preset_use"), (dlg, w) -> {
+                    if (!writeSetting("touch_layout", layout)) {
+                        cantSave();
+                        return;
+                    }
+                    mValues.put("touch_layout", layout);
+                    TouchControls.setLayout(layout);
+                    Toast.makeText(mA, Strings.t("preset_loaded", name), Toast.LENGTH_SHORT).show();
+                    if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
+                })
+                .setNeutralButton(Strings.t("preset_delete"), (dlg, w) -> {
+                    JSONObject presets = loadPresets(mA);
+                    presets.remove(name);
+                    storePresets(mA, presets);
+                    Toast.makeText(mA, Strings.t("preset_deleted", name), Toast.LENGTH_SHORT).show();
+                    if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
+                })
+                .setNegativeButton(Strings.t("cancel"), null)
+                .create();
+        GameActivity.showImmersive(d);
     }
 
     /** Closes the menu (the game stays held), lets the player move the controls, then opens the menu again. */
@@ -911,7 +1013,33 @@ public final class SettingsMenu {
         mBody.addView(row, lp);
     }
 
+    /** Render scale performance mode sets (the player can move it afterwards; turning the mode off restores theirs). */
+    private static final String PERF_SCALE = "0.75";
+
+    /** Performance mode on: remembers the render scale and sets 75%; off: puts the remembered one back. */
+    private void performanceScale(boolean on) {
+        String cur = mValues.containsKey("render_scale") ? mValues.get("render_scale") : "1.00";
+        String scale;
+        if (on) {
+            writeSetting("render_scale_before_perf", cur);
+            mValues.put("render_scale_before_perf", cur);
+            scale = PERF_SCALE;
+        } else {
+            String before = mValues.get("render_scale_before_perf");
+            scale = before == null || before.isEmpty() ? "1.00" : before;
+            writeSetting("render_scale_before_perf", "");
+            mValues.put("render_scale_before_perf", "");
+        }
+        if (!writeSetting("render_scale", scale)) {
+            cantSave();
+            return;
+        }
+        mValues.put("render_scale", scale);
+        showTab(TAB_GRAPHICS);  // the slider shows the new scale
+    }
+
     private void applyChoice(String key, String title, String value) {
+        if (key.equals("performance_mode")) performanceScale("1".equals(value));
         boolean now = false;
         try {
             now = nativeApply(key, value);

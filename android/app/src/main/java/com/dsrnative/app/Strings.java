@@ -214,17 +214,17 @@ final class Strings {
                 "Modo rendimiento", "Modo desempenho", "Режим производительности", "パフォーマンスモード", "성능 모드",
                 "性能模式", "效能模式");
         put("perf_n",
-                "Uses the game's own lower-quality options: simpler distant models, lighter effects and lower-resolution shadows.",
-                "Utilise les options de qualité réduite du jeu : modèles lointains simplifiés, effets plus légers et ombres en basse résolution.",
-                "Nutzt die eigenen Optionen des Spiels für geringere Qualität: einfachere Modelle in der Ferne, leichtere Effekte und Schatten in niedrigerer Auflösung.",
-                "Usa le opzioni di qualità ridotta del gioco: modelli lontani più semplici, effetti più leggeri e ombre a risoluzione inferiore.",
-                "Usa las opciones de menor calidad del propio juego: modelos lejanos más simples, efectos más ligeros y sombras de menor resolución.",
-                "Usa as opções de menor qualidade do próprio jogo: modelos distantes mais simples, efeitos mais leves e sombras em resolução menor.",
-                "Использует собственные упрощённые настройки игры: более простые дальние модели, облегчённые эффекты и тени в низком разрешении.",
-                "ゲーム自体の低画質設定を使います：遠くのモデルを簡略化し、エフェクトを軽くし、影の解像度を下げます。",
-                "게임 자체의 저품질 옵션을 사용합니다: 먼 모델 단순화, 가벼운 효과, 낮은 해상도의 그림자.",
-                "使用游戏自带的低画质选项：远处模型更简单、特效更轻、阴影分辨率更低。",
-                "使用遊戲內建的低畫質選項：遠處模型更簡單、特效更輕、陰影解析度更低。");
+                "Lighter effects, lower-resolution shadows and a 75% render scale (the slider below can still be moved).",
+                "Effets plus légers, ombres en basse résolution et échelle de rendu à 75 % (le curseur ci-dessous reste réglable).",
+                "Leichtere Effekte, Schatten in niedrigerer Auflösung und 75 % Renderskalierung (der Regler unten bleibt einstellbar).",
+                "Effetti più leggeri, ombre a risoluzione inferiore e scala di rendering al 75% (il cursore qui sotto resta regolabile).",
+                "Efectos más ligeros, sombras de menor resolución y escala de renderizado al 75 % (el control de abajo se puede seguir moviendo).",
+                "Efeitos mais leves, sombras em resolução menor e escala de renderização em 75% (o controle abaixo ainda pode ser ajustado).",
+                "Облегчённые эффекты, тени в низком разрешении и масштаб рендеринга 75% (ползунок ниже можно менять).",
+                "エフェクトを軽くし、影の解像度を下げ、レンダリング倍率を 75% にします（下のスライダーは自由に調整できます）。",
+                "가벼운 효과, 낮은 해상도의 그림자, 75% 렌더링 배율을 사용합니다 (아래 슬라이더는 계속 조절할 수 있습니다).",
+                "更轻的特效、更低分辨率的阴影和 75% 的渲染比例（下方滑块仍可调节）。",
+                "更輕的特效、更低解析度的陰影和 75% 的繪製比例（下方滑桿仍可調整）。");
         put("sec_gpu", "GPU options", "Options GPU", "GPU-Optionen", "Opzioni GPU", "Opciones de GPU", "Opções de GPU",
                 "Параметры GPU", "GPU オプション", "GPU 옵션", "GPU 选项", "GPU 選項");
         put("gpu_n", "For GPUs such as Mali that lack the game's texture formats or draw in tiles. Off unless you are testing.",
@@ -519,11 +519,51 @@ final class Strings {
         put("layout_reset_done", "Layout reset", "Disposition réinitialisée", "Anordnung zurückgesetzt",
                 "Disposizione ripristinata", "Disposición restablecida", "Layout redefinido", "Расположение сброшено",
                 "配置をリセットしました", "배치를 초기화했습니다", "布局已重置", "配置已重設");
-        put("edit_help", "Drag the controls to move them", "Faites glisser les commandes pour les déplacer",
-                "Ziehe die Steuerelemente, um sie zu verschieben", "Trascina i controlli per spostarli",
-                "Arrastra los controles para moverlos", "Arraste os controles para movê-los",
-                "Перетаскивайте элементы управления", "操作ボタンをドラッグして移動", "조작 버튼을 끌어서 이동하세요", "拖动控件即可移动",
-                "拖曳控制項即可移動");
+        put("edit_help", "Drag to move \u00b7 pinch or \u2212 / + to resize", "Glissez pour déplacer \u00b7 pincez ou \u2212 / + pour redimensionner",
+                "Ziehen zum Verschieben \u00b7 Zwei Finger oder \u2212 / + für die Größe", "Trascina per spostare \u00b7 pizzica o \u2212 / + per ridimensionare",
+                "Arrastra para mover \u00b7 pellizca o \u2212 / + para cambiar el tamaño", "Arraste para mover \u00b7 pinça ou \u2212 / + para redimensionar",
+                "Перетаскивайте для перемещения \u00b7 щипок или \u2212 / + для размера", "ドラッグで移動 \u00b7 ピンチか \u2212 / + でサイズ変更",
+                "끌어서 이동 \u00b7 핀치 또는 \u2212 / + 로 크기 조절", "拖动以移动 \u00b7 双指缩放或 \u2212 / + 调整大小",
+                "拖曳以移動 \u00b7 雙指縮放或 \u2212 / + 調整大小");
+        put("size_pick", "Tap a control to resize it", "Touchez une commande pour la redimensionner",
+                "Tippe ein Steuerelement an, um seine Größe zu ändern", "Tocca un controllo per ridimensionarlo",
+                "Toca un control para cambiar su tamaño", "Toque um controle para redimensioná-lo",
+                "Коснитесь элемента, чтобы изменить размер", "サイズを変える操作ボタンをタップ", "크기를 바꿀 버튼을 누르세요",
+                "点击控件以调整大小", "點選控制項以調整大小");
+        put("size_of", "Size: %d%%", "Taille : %d %%", "Größe: %d %%", "Dimensione: %d%%", "Tamaño: %d %%", "Tamanho: %d%%",
+                "Размер: %d%%", "サイズ：%d%%", "크기: %d%%", "大小：%d%%", "大小：%d%%");
+        put("sec_presets", "Layout presets", "Dispositions enregistrées", "Layout-Vorlagen", "Preset di layout",
+                "Diseños guardados", "Predefinições de layout", "Пресеты раскладки", "レイアウトプリセット", "레이아웃 프리셋",
+                "布局预设", "版面預設");
+        put("presets_n", "Save the current layout under a name and switch between saved ones.",
+                "Enregistrez la disposition actuelle sous un nom et passez d'une disposition enregistrée à l'autre.",
+                "Speichere die aktuelle Anordnung unter einem Namen und wechsle zwischen gespeicherten.",
+                "Salva il layout attuale con un nome e passa da uno salvato all'altro.",
+                "Guarda el diseño actual con un nombre y cambia entre los guardados.",
+                "Salve o layout atual com um nome e alterne entre os salvos.",
+                "Сохраните текущую раскладку под именем и переключайтесь между сохранёнными.",
+                "現在のレイアウトに名前を付けて保存し、保存したものに切り替えられます。",
+                "현재 레이아웃을 이름으로 저장하고 저장된 레이아웃으로 전환할 수 있습니다.",
+                "以名称保存当前布局，并在已保存的布局之间切换。", "以名稱儲存目前版面，並在已儲存的版面之間切換。");
+        put("preset_save", "Save current layout as preset\u2026", "Enregistrer la disposition actuelle\u2026",
+                "Aktuelle Anordnung als Vorlage speichern\u2026", "Salva il layout attuale come preset\u2026",
+                "Guardar el diseño actual\u2026", "Salvar o layout atual como predefinição\u2026",
+                "Сохранить текущую раскладку\u2026", "現在のレイアウトを保存\u2026", "현재 레이아웃을 프리셋으로 저장\u2026",
+                "将当前布局保存为预设\u2026", "將目前版面儲存為預設\u2026");
+        put("preset_name", "Preset name", "Nom", "Name der Vorlage", "Nome del preset", "Nombre", "Nome da predefinição",
+                "Имя пресета", "プリセット名", "프리셋 이름", "预设名称", "預設名稱");
+        put("preset_saved", "Saved \"%s\"", "\u00ab %s \u00bb enregistrée", "\u201e%s\u201c gespeichert", "\"%s\" salvato",
+                "\"%s\" guardado", "\"%s\" salvo", "\u00ab%s\u00bb сохранён", "\u300c%s\u300dを保存しました", "\"%s\" 저장됨",
+                "已保存\u201c%s\u201d", "已儲存\u300c%s\u300d");
+        put("preset_loaded", "Layout \"%s\" in use", "Disposition \u00ab %s \u00bb utilisée", "Anordnung \u201e%s\u201c aktiv",
+                "Layout \"%s\" in uso", "Diseño \"%s\" en uso", "Layout \"%s\" em uso", "Раскладка \u00ab%s\u00bb применена",
+                "\u300c%s\u300dを使用中", "\"%s\" 레이아웃 사용 중", "正在使用\u201c%s\u201d", "正在使用\u300c%s\u300d");
+        put("preset_deleted", "Deleted \"%s\"", "\u00ab %s \u00bb supprimée", "\u201e%s\u201c gelöscht", "\"%s\" eliminato",
+                "\"%s\" eliminado", "\"%s\" excluído", "\u00ab%s\u00bb удалён", "\u300c%s\u300dを削除しました", "\"%s\" 삭제됨",
+                "已删除\u201c%s\u201d", "已刪除\u300c%s\u300d");
+        put("preset_use", "Use", "Utiliser", "Verwenden", "Usa", "Usar", "Usar", "Применить", "使用", "사용", "使用", "使用");
+        put("preset_delete", "Delete", "Supprimer", "Löschen", "Elimina", "Eliminar", "Excluir", "Удалить", "削除", "삭제",
+                "删除", "刪除");
         put("save", "Save", "Enregistrer", "Speichern", "Salva", "Guardar", "Salvar", "Сохранить", "保存", "저장", "保存",
                 "儲存");
         put("reset", "Reset", "Réinitialiser", "Zurücksetzen", "Ripristina", "Restablecer", "Redefinir", "Сбросить",
