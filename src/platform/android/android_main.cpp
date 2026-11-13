@@ -458,6 +458,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "max_anisotropy")) cfg->max_anisotropy = v;
             else if (!strcmp(key, "shadow_compare")) cfg->shadow_compare = std::clamp(v, 0, 3);
             else if (!strcmp(key, "game_hooks")) cfg->game_hooks = v != 0;
+            else if (!strcmp(key, "skip_intro")) cfg->skip_intro = v != 0;
             else if (!strcmp(key, "render_scale")) cfg->render_scale = std::clamp(float(atof(value)), 0.5f, 1.0f);
             else if (!strcmp(key, "language")) {
                 // The game's languages (nn::settings codes it recognises); the settings menu lists the same.
@@ -562,9 +563,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          path.c_str(), cfg->target_fps, cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
-    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d", cfg->gpu_driver.c_str(),
+    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d", cfg->gpu_driver.c_str(),
          int(cfg->bc_enabler), cfg->language.c_str(), cfg->render_scale, cfg->shadow_compare,
-         int(cfg->game_hooks));
+         int(cfg->game_hooks), int(cfg->skip_intro));
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");

@@ -60,6 +60,8 @@ struct RuntimeConfig {
     int shadow_compare = 0;
     // game_hooks = 0: none of the engine patches (frame rate, resolution, log hooks) are installed.
     bool game_hooks = true;
+    // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
+    bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)

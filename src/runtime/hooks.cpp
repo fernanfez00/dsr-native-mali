@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <pthread.h>
 #include <unistd.h>
 #include <vector>
@@ -59,6 +60,49 @@ const GameBuild kBuilds[] = {
      0x7f71d4, 0x7f72ec, 0x782dac},
 };
 const GameBuild* g_build = nullptr;
+
+// Skip intro logos (settings skip_intro). The title screen's step machine (TitleStep / TitleStep_forNS, step
+// number at this+0xc) opens the company logo dialog (menu dialog 60, FrpgMenuDlgLogo) by setting its request word
+// to 1 (`bl` to set(60, 1)) and then waits until the dialog has cleared it again after its last logo. Both classes'
+// open calls become `nop`, so the wait passes at once, as if the logos had finished. TitleStep_forNS also counts
+// down a timer (this+0xe0) before closing the dialog: that step branches straight to its close path. Everything
+// else (loading, the title movie, press start) runs as before.
+struct LogoSkip {
+    const char* version;
+    uint64_t open[2];
+    uint32_t open_insn[2];  // bl set_dialog_request (60, 1)
+    uint64_t timer;         // ldr s1, [x19, #0xe0]
+    uint64_t timer_done;    // the timer-expired path
+};
+const LogoSkip kLogoSkips[] = {
+    {"1.0.0", {0x6f1c30, 0x6f73e8}, {0x97fa3d6c, 0x97fa277e}, 0x6f7450, 0x6f746c},
+    {"1.0.3", {0x6ed0e4, 0x6f27fc}, {0x97fa3510, 0x97fa1f4a}, 0x6f2864, 0x6f2880},
+};
+constexpr uint32_t kNop = 0xD503201F, kLdrS1Timer = 0xBD40E261;
+
+void SkipIntroLogos(Runtime& rt, const GameBuild& b) {
+    const LogoSkip* p = nullptr;
+    for (const LogoSkip& l : kLogoSkips)
+        if (!strcmp(l.version, b.version)) p = &l;
+    if (!p) return;
+    struct Edit { uint64_t at; uint32_t from, to; };
+    const Edit edits[] = {
+        {p->open[0], p->open_insn[0], kNop},
+        {p->open[1], p->open_insn[1], kNop},
+        {p->timer, kLdrS1Timer, 0x14000000u | uint32_t(((p->timer_done - p->timer) / 4) & 0x3FFFFFF)},  // b
+    };
+    std::string err;
+    size_t done = 0;
+    while (done < std::size(edits) && rt.main.PatchInstruction(edits[done].at, edits[done].from, edits[done].to, &err))
+        done++;
+    if (done == std::size(edits)) {
+        LOGI("hooks", "skip_intro: the intro logos are skipped");
+        return;
+    }
+    LOGW("hooks", "skip_intro: patch failed (%s): the logos are shown", err.c_str());
+    std::string undo_err;
+    while (done-- > 0) rt.main.PatchInstruction(edits[done].at, edits[done].to, edits[done].from, &undo_err);
+}
 
 // Replacement for the game's frame limiter (1.0.0: main+0x70bd90, 1.0.3: main+0x706d28; this, fps): called once
 // per game update on the render thread. Same contract as the original: skip when the engine says so (1.0.0: a
@@ -339,6 +383,7 @@ void InstallGameHooks() {
             }
         }
     }
+    if (rt.config.skip_intro) SkipIntroLogos(rt, b);
     const Hook hooks[] = {
         {b.log, reinterpret_cast<void*>(&EngineLog), "engine log"},
         {b.vlog, reinterpret_cast<void*>(&EngineLogV), "engine vlog"},

@@ -525,6 +525,8 @@ public final class SettingsMenu {
                 new String[] {Strings.t("present_mailbox") + " " + Strings.t("default_mark"), Strings.t("present_vsync")},
                 "mailbox");
 
+        toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
+
         section(Strings.t("sec_controls"));
         toggle("face_buttons", Strings.t("swap_t"), Strings.t("swap_n") + " " + Strings.t("changes_now"),
                 "position", "label", "label");

@@ -231,6 +231,21 @@ final class Strings {
                 "Risoluzione di rendering: %d × %d", "Resolución de renderizado: %d × %d",
                 "Resolução de renderização: %d × %d", "Разрешение рендеринга: %d × %d", "レンダリング解像度：%d × %d",
                 "렌더링 해상도: %d × %d", "渲染分辨率：%d × %d", "渲染解析度：%d × %d");
+        put("skip_t", "Skip intro logos", "Passer les logos d'introduction", "Intro-Logos überspringen",
+                "Salta i loghi iniziali", "Omitir logotipos de inicio", "Pular logotipos de abertura",
+                "Пропускать заставки с логотипами", "起動時のロゴをスキップ", "시작 로고 건너뛰기", "跳过开场标志",
+                "略過開場標誌");
+        put("skip_n", "Goes straight to the title screen without the company logos. Changes at the next start.",
+                "Passe directement à l'écran titre, sans les logos des studios. S'applique au prochain lancement.",
+                "Direkt zum Titelbildschirm, ohne die Firmenlogos. Gilt ab dem nächsten Start.",
+                "Va direttamente alla schermata del titolo senza i loghi delle aziende. Si applica al prossimo avvio.",
+                "Va directamente a la pantalla de título sin los logotipos de las compañías. Se aplica en el próximo inicio.",
+                "Vai direto para a tela de título sem os logotipos das empresas. Vale a partir da próxima abertura.",
+                "Сразу переходит к титульному экрану без логотипов компаний. Применяется при следующем запуске.",
+                "会社ロゴを表示せずにタイトル画面へ進みます。次回の起動時に反映されます。",
+                "회사 로고 없이 바로 타이틀 화면으로 넘어갑니다. 다음 실행 시 적용됩니다.",
+                "不显示公司标志，直接进入标题画面。下次启动时生效。",
+                "不顯示公司標誌，直接進入標題畫面。下次啟動時生效。");
         put("fpscounter_t", "FPS counter", "Compteur d'IPS", "FPS-Anzeige", "Contatore FPS", "Contador de FPS",
                 "Contador de FPS", "Счётчик FPS", "FPS カウンター", "FPS 표시", "FPS 计数器", "FPS 計數器");
         put("fpscounter_n",
