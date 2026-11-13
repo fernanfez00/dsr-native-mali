@@ -3933,6 +3933,7 @@ private:
     }
     std::unordered_set<uint64_t> skip_fs_;
     bool skip_postfx_ = false, no_depth_snapshot_ = false;
+    int main_rt_w_ = 0, main_rt_h_ = 0;  // the main picture's size (see skip_postfx)
 
     Shader* GetShader(const ShaderCode& code, const shader::TranslateOptions& opt) {
         const uint32_t parts[6] = {uint32_t(code.hash), uint32_t(code.hash >> 32), opt.int_attrib_mask,
@@ -4256,9 +4257,21 @@ private:
         if (p.count <= 0 || p.instances <= 0) return;
         if (!begin_rendering_ && !rp_fallback_) return Skip("no dynamic rendering");
         if (!st_.program[0]) return Skip("no vertex program bound");
-        if (skip_postfx_ && st_.num_rt > 0) {  // speed hack (settings skip_postfx)
+        if (st_.num_rt > 0) {
             const int tw = st_.rts[0].tex.width, th = st_.rts[0].tex.height;
-            if ((tw == 320 && th == 180) || (tw == 160 && th == 90)) return Skip("post-process target (skip_postfx)");
+            // The main picture's size: the largest 16:9 colour target seen (1280x720, or 824x464 at render_scale 0.65).
+            if (tw >= 512 && th > 0 && tw > main_rt_w_ && std::fabs(float(tw) / float(th) - 16.0f / 9.0f) < 0.12f) {
+                main_rt_w_ = tw;
+                main_rt_h_ = th;
+            }
+            // speed hack (settings skip_postfx): the quarter and eighth size post-process targets (320x180 and 160x90 at
+            // 720p; 206x116 and 103x58 at 824x464). Nothing is skipped before the main size is known.
+            if (skip_postfx_ && main_rt_w_ > 0) {
+                auto near = [](int a, int b) { return std::abs(a - b) <= 1; };
+                const bool quarter = near(tw, (main_rt_w_ + 3) / 4) && near(th, (main_rt_h_ + 3) / 4);
+                const bool eighth = near(tw, (main_rt_w_ + 7) / 8) && near(th, (main_rt_h_ + 7) / 8);
+                if (quarter || eighth) return Skip("post-process target (skip_postfx)");
+            }
         }
         const DeviceModes modes = GetDeviceModes();
 
