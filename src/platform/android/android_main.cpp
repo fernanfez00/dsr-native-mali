@@ -873,9 +873,24 @@ void PrepareGpuDriver(android_app* app, const std::string& base, dsr::RuntimeCon
     cfg->gpu_driver_lib = lib;
 }
 
+// Diagnostics: both sticks pressed in (L3 + R3: a controller's stick clicks, the touch controls' L3 and LOCK, or one of
+// each) saves a frame capture (dsr_frame_*.bin) of the next frame. Called whenever either source changes.
+std::atomic<bool> g_capture_combo{false};
+void CheckCaptureCombo(const char* source) {
+    const uint64_t both = dsr::input::kStickL | dsr::input::kStickR;
+    const bool held = ((g_pad_buttons.load() | g_touch_buttons.load()) & both) == both;
+    if (!held) {
+        g_capture_combo = false;
+    } else if (!g_capture_combo.exchange(true)) {
+        LOGI(kTag, "L3 + R3 (%s): frame capture requested", source);
+        dsr::hle::nvn::GetBackend().RequestCapture(0);
+    }
+}
+
 // ---- touch controls (com.dsrnative.app.TouchControls) -------------------------------------------------------
 void JNICALL TouchNativeState(JNIEnv*, jclass, jint buttons, jfloat lx, jfloat ly, jfloat rx, jfloat ry) {
     g_touch_buttons = uint64_t(uint32_t(buttons));
+    CheckCaptureCombo("touch");
     dsr::input::SetTouch(uint64_t(uint32_t(buttons)), lx, ly, rx, g_touch.camera_invert ? -ry : ry);
 }
 void JNICALL TouchNativeVisible(JNIEnv*, jclass, jboolean visible) {
@@ -1354,22 +1369,13 @@ int32_t OnInput(android_app* app, AInputEvent* ev) {
                  b ? "mapped" : "not mapped");
         }
         if (!b) return 0;
-        const uint64_t before = g_pad.buttons;
         if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN)
             g_pad.buttons |= b;
         else if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP)
             g_pad.buttons &= ~b;
-        // Diagnostics: pressing both sticks in (L3 + R3) saves a frame capture (dsr_frame_*.bin) of the next frame.
-        {
-            using namespace dsr::input;
-            const uint64_t both = kStickL | kStickR;
-            if ((g_pad.buttons & both) == both && (before & both) != both) {
-                LOGI(kTag, "L3 + R3: frame capture requested");
-                dsr::hle::nvn::GetBackend().RequestCapture(0);
-            }
-        }
         SetPad(g_pad);
         g_pad_buttons = g_pad.buttons;
+        CheckCaptureCombo("controller");
         return 1;
     }
     if (type == AINPUT_EVENT_TYPE_MOTION && (AInputEvent_getSource(ev) & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
