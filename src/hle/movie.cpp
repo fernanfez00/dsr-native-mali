@@ -377,6 +377,11 @@ struct Decoder {
     std::deque<OutputItem> outputs;
     std::unordered_map<int, OutputItem> held;  // output buffers handed to the game
     uint64_t produced = 0, acquired = 0, released = 0, polls_empty = 0;  // statistics (logged)
+    // Video kept at real speed (see DecAcquireOutputBufferIndex): the playback clock's origin and frames dropped.
+    bool clock_set = false;
+    std::chrono::steady_clock::time_point clock_t0;
+    int64_t clock_pts0 = 0, clock_last_pts = 0;
+    uint64_t dropped = 0, reanchored = 0;
     uint64_t inputs_missing = 0;  // input index asked for while none was free
     int64_t last_pts = 0;
     // Decoded picture geometry (from the codec's output format).
@@ -695,16 +700,40 @@ int DecSendInputBufferForDecode(void* self, int index, int offset, int size, int
     return kFail;
 #endif
 }
+// Video frames the game falls behind on are dropped, so a video plays at real speed when the device cannot keep up.
+// The game shows video frames per game frame (1.0.0: one per frame at 30 fps, 1.0.3: one per two at 60 fps) and its
+// sound follows the video, so a device that renders fewer frames played the video and its sound slower. The game asks
+// for the next frame (here) when it is about to need one; a frame whose timestamp is behind the time since the first
+// frame by more than kLate is given back to the decoder unshown and the next one taken. Not the end-of-stream frame;
+// a gap of more than kPause (the game held, e.g. by the settings menu, or a loading stall) moves the clock instead.
+constexpr auto kLate = std::chrono::milliseconds(70);
+constexpr auto kPause = std::chrono::milliseconds(500);
+constexpr uint32_t kFlagEndOfStream = 4;
+
 int DecAcquireOutputBufferIndex(void* self, int* index, int64_t* time_us, uint32_t* flags, int* size) {
     Decoder* d = Dec(self);
+    std::vector<int> drop;  // released after the lock (codec_use before d->m elsewhere)
+    struct ReleaseDropped {
+        Decoder* d;
+        std::vector<int>& v;
+        ~ReleaseDropped() {
+#if defined(__ANDROID__)
+            if (v.empty()) return;
+            std::shared_lock<std::shared_mutex> use(d->codec_use);
+            if (d->codec && !d->stopped)
+                for (int i : v) AMediaCodec_releaseOutputBuffer(d->codec, size_t(i), false);
+#endif
+        }
+    } release_dropped{d, drop};
     std::lock_guard<std::mutex> lk(d->m);
     const auto now = std::chrono::steady_clock::now();
     if (now - d->last_report > std::chrono::seconds(3)) {
         d->last_report = now;
         LOGI(kTag, "decoder type %d: %llu decoded, %llu taken by the game, %llu released, %zu waiting, %zu held, "
-             "%llu empty polls, last pts %.2f s", d->type, (unsigned long long)d->produced,
-             (unsigned long long)d->acquired, (unsigned long long)d->released, d->outputs.size(), d->held.size(),
-             (unsigned long long)d->polls_empty, d->last_pts / 1e6);
+             "%llu empty polls, last pts %.2f s; %llu late frames dropped, clock moved %llu times", d->type,
+             (unsigned long long)d->produced, (unsigned long long)d->acquired, (unsigned long long)d->released,
+             d->outputs.size(), d->held.size(), (unsigned long long)d->polls_empty, d->last_pts / 1e6,
+             (unsigned long long)d->dropped, (unsigned long long)d->reanchored);
         std::lock_guard<std::mutex> lk2(g_input_mutex);
         if (d->type == 1)
             LOGI(kTag, "decoder inputs: %llu checked, %llu given to the wrong decoder, %llu reads failed, "
@@ -713,6 +742,27 @@ int DecAcquireOutputBufferIndex(void* self, int* index, int64_t* time_us, uint32
                  (unsigned long long)g_reads_failed, (unsigned long long)g_reads_kept,
                  (unsigned long long)d->inputs_missing);
     }
+    while (d->type == 1 && !d->outputs.empty()) {
+        const OutputItem& f = d->outputs.front();
+        if (!d->clock_set || f.time_us < d->clock_last_pts) {  // the first frame, or the video started over
+            d->clock_set = true;
+            d->clock_t0 = now;
+            d->clock_pts0 = d->clock_last_pts = f.time_us;
+            break;
+        }
+        const auto due = d->clock_t0 + std::chrono::microseconds(f.time_us - d->clock_pts0);
+        if (now - due > kPause) {  // the game was held: playback goes on from here
+            d->clock_t0 += (now - due);
+            d->reanchored++;
+            break;
+        }
+        if (now - due <= kLate || (f.flags & kFlagEndOfStream) || f.size <= 0) break;
+        d->clock_last_pts = f.time_us;
+        drop.push_back(f.index);
+        d->dropped++;
+        d->released++;
+        d->outputs.pop_front();
+    }
     if (d->outputs.empty()) {
         d->polls_empty++;
         *index = -1;
@@ -720,6 +770,7 @@ int DecAcquireOutputBufferIndex(void* self, int* index, int64_t* time_us, uint32
     }
     OutputItem o = d->outputs.front();
     d->outputs.pop_front();
+    if (d->type == 1) d->clock_last_pts = o.time_us;
     d->held[o.index] = o;
     d->acquired++;
     d->last_pts = o.time_us;
