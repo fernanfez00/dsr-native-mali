@@ -387,7 +387,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         if (FILE* w = fopen(path.c_str(), "w")) {
             fprintf(w,
                     "# DSR Native settings (read at start-up)\n"
-                    "# fps: frame rate cap, 30 (as on Switch) to 60; e.g. 45 for a steady rate in heavy areas\n"
+                    "# fps: frame rate cap, 30 (as on Switch) to 60; e.g. 45 for a steady rate in heavy areas; auto = the\n"
+                    "# cap follows what the device sustains (60, 30 or 20 fps; min_fps = 15 also allows 15)\n"
                     "fps = %d\n"
                     "# async_pipelines: 1 = compile new GPU pipelines in the background (no hitch; a new object may\n"
                     "# appear a frame late), 0 = compile on the spot (can hitch the first time something is seen)\n"
@@ -441,7 +442,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             char key[64], value[64];
             if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %63s", key, value) != 2) continue;
             const int v = atoi(value);
-            if (!strcmp(key, "fps")) cfg->target_fps = std::clamp(v, 30, 60);  // e.g. 45: a steady cap below 60
+            if (!strcmp(key, "fps")) {  // e.g. 45: a steady cap below 60; auto: dynamic (60 / 30 / 20)
+                cfg->dynamic_fps = !strcmp(value, "auto");
+                cfg->target_fps = cfg->dynamic_fps ? 60 : std::clamp(v, 30, 60);
+            } else if (!strcmp(key, "min_fps")) cfg->min_fps = std::clamp(v, 15, 30);
             else if (!strcmp(key, "async_pipelines")) cfg->async_pipelines = v != 0;
             else if (!strcmp(key, "auto_capture")) cfg->auto_capture = v != 0;
             else if (!strcmp(key, "profile")) cfg->profile = v != 0;
@@ -559,9 +563,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 LOGI(kTag, "settings: added bc_enabler to %s", path.c_str());
             }
     }
-    LOGI(kTag, "settings (%s): fps %d, async pipelines %s, auto capture %s, profile %s, gamma %.2f, exposure %.2f, "
+    LOGI(kTag, "settings (%s): fps %d%s, async pipelines %s, auto capture %s, profile %s, gamma %.2f, exposure %.2f, "
          "present mode %s, face buttons by %s",
-         path.c_str(), cfg->target_fps, cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
+         path.c_str(), cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "", cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
     LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
@@ -920,7 +924,8 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
     bool now = false;
     if (key == "fps") {
         if (dsr::FrameRateAdjustable()) {
-            c.target_fps = std::clamp(atoi(value.c_str()), 30, 60);
+            c.dynamic_fps = value == "auto";
+            c.target_fps = c.dynamic_fps ? 60 : std::clamp(atoi(value.c_str()), 30, 60);
             now = true;
         }
     } else if (key == "face_buttons") {

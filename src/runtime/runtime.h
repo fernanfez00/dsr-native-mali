@@ -19,7 +19,11 @@ struct RuntimeConfig {
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
     std::string language = "en-US";
     // User settings (settings.txt next to the game folder on Android).
-    int target_fps = 60;          // presentation pace: 30 (the Switch rate) or 60
+    int target_fps = 60;          // presentation pace: 30 (the Switch rate) .. 60; with dynamic_fps the highest rate
+    // fps = auto: the cap follows what the device sustains (60, 30, 20 fps, not below min_fps), the game's time step
+    // follows the frame time, so the game keeps its speed (dynamic fps, after PR #13).
+    bool dynamic_fps = false;
+    int min_fps = 20;             // lowest rate fps = auto may use (15..30); also the longest game time step
     bool async_pipelines = true;  // compile new GPU pipelines off the render thread (no hitch; the draw waits a frame)
     bool auto_capture = false;    // diagnostics: save a few frame captures automatically during play
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
@@ -102,7 +106,10 @@ float GameFrameTime();
 // plays, frames are paced at 30 instead of the configured rate (at 60 the video ran at double speed and
 // stopped every few frames to wait for its sound).
 void SetMoviePlaying(bool playing);
-int FrameRateNow();  // the configured rate (30..60), or 30 while a movie plays
+int FrameRateNow();  // the rate the frame limiter paces to now (the cap, or the game version's video rate)
+// Smoothed GPU time of one submission in ms (0 = not known yet), from the Vulkan backend's GPU timestamps: what the
+// dynamic frame rate (fps = auto) weighs against the frame period.
+void ReportGpuFrameTime(double ms);
 bool FrameRateAdjustable();  // the frame rate patches are in: config.target_fps may change while the game runs
 
 // Prints an import binding summary (implemented / unimplemented / data) to the log.

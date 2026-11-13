@@ -510,8 +510,9 @@ public final class SettingsMenu {
 
     private void buildSettingsTab() {
         section(Strings.t("sec_display"));
-        choice("fps", Strings.t("fps_t"), Strings.t("changes_now"), new String[] {"30", "45", "60"},
-                new String[] {"30 fps", "45 fps", "60 fps"}, "60");
+        choice("fps", Strings.t("fps_t"), Strings.t("fps_auto_n") + " " + Strings.t("changes_now"),
+                new String[] {"30", "45", "60", "auto"},
+                new String[] {"30 fps", "45 fps", "60 fps", Strings.t("fps_auto")}, "60");
         choice("aspect_ratio", Strings.t("aspect_t"), Strings.t("aspect_n"),
                 new String[] {"16:9", "auto", "4:3", "21:9"},
                 new String[] {"16:9 " + Strings.t("default_mark"), Strings.t("aspect_fill"), "4:3", "21:9"}, "16:9");

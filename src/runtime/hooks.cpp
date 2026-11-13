@@ -107,6 +107,80 @@ void SkipIntroLogos(Runtime& rt, const GameBuild& b) {
     while (done-- > 0) rt.main.PatchInstruction(edits[done].at, edits[done].to, edits[done].from, &undo_err);
 }
 
+// ---- dynamic frame rate (fps = auto) ---------------------------------------------------------------------------
+// After PR #13 ("Dynamic FPS" mods for console ports): the game's time step already follows the real frame time
+// (FrameLimiter), so the game keeps its speed at any rate; this half picks the rate. A phone screen shows 60, 30, 20
+// and 15 fps with even frame spacing (they divide 60 and 90 Hz), 22-25 fps would alternate short and long frames, so
+// the cap moves between those rates with hysteresis: down quickly when frames do not fit their period, up slowly and
+// only with clear headroom. Not while a video plays: videos are paced at the game version's movie rate.
+std::atomic<int> g_movies{0};
+std::atomic<int> g_cap_fps{60};  // the rate the limiter paces to with fps = auto
+std::atomic<float> g_gpu_frame_ms{0.0f};
+bool MoviePlaying() { return g_movies.load(std::memory_order_relaxed) > 0; }
+int MovieFps() { return g_build ? g_build->movie_fps : 30; }
+int MinFps() { return std::clamp(GetRuntime().config.min_fps, 15, 30); }
+
+struct DynamicFps {
+    double fast = 0, slow = 0;  // smoothed cost of a frame in ms (fast: ~7 frames, slow: ~90 frames)
+    int over = 0, under = 0, hold = 0;
+};
+DynamicFps g_dyn;
+
+int DynamicRates(int out[6]) {  // highest first: 60, 30, 20, 15 down to min_fps
+    static constexpr int kRates[] = {60, 30, 20, 15};
+    const int lo = MinFps();
+    int n = 0;
+    for (int r : kRates)
+        if (r >= lo) out[n++] = r;
+    if (out[n - 1] > lo) out[n++] = lo;
+    return n;
+}
+
+void DynamicStep(double work_ms) {
+    DynamicFps& s = g_dyn;
+    int rates[6];
+    const int n = DynamicRates(rates);
+    int cap = g_cap_fps.load(std::memory_order_relaxed);
+    int idx = n - 1;
+    for (int i = 0; i < n; i++)
+        if (rates[i] <= cap) {
+            idx = i;
+            break;
+        }
+    cap = rates[idx];
+    const double period = 1000.0 / cap;
+    // A frame's cost: what the game thread took, or the GPU's time if that is longer (with the cap leaving the GPU
+    // idle, the game thread alone looks cheap). A loading stall is not the cost of a frame.
+    const double gpu = g_gpu_frame_ms.load(std::memory_order_relaxed);
+    const double cost = std::min(std::max(work_ms, gpu * 1.03), period * 3.0);
+    if (s.fast == 0) s.fast = s.slow = cost;
+    s.fast += 0.15 * (cost - s.fast);
+    s.slow += (1.0 / 90.0) * (cost - s.slow);
+    if (s.hold > 0) s.hold--;
+    s.over = s.fast > period * 0.98 ? s.over + 1 : 0;
+    if (s.over >= 10 && idx + 1 < n) {
+        int next = idx + 1;
+        while (next + 1 < n && 1000.0 / rates[next] < s.fast * 1.06) next++;
+        LOGI("hooks", "fps auto: %d -> %d fps (frame cost %.1f ms, GPU %.1f ms)", cap, rates[next], s.fast, gpu);
+        g_cap_fps.store(rates[next], std::memory_order_relaxed);
+        s.over = s.under = 0;
+        s.slow = s.fast;
+        s.hold = 900;  // ~30-45 s before trying a higher rate again
+        return;
+    }
+    if (idx > 0 && s.hold == 0) {
+        s.under = s.slow * 1.15 < 1000.0 / rates[idx - 1] ? s.under + 1 : 0;
+        if (s.under >= 240) {
+            LOGI("hooks", "fps auto: %d -> %d fps (frame cost %.1f ms, GPU %.1f ms)", cap, rates[idx - 1], s.slow, gpu);
+            g_cap_fps.store(rates[idx - 1], std::memory_order_relaxed);
+            s.under = 0;
+            s.hold = 300;
+        }
+    } else {
+        s.under = 0;
+    }
+}
+
 // Replacement for the game's frame limiter (1.0.0: main+0x70bd90, 1.0.3: main+0x706d28; this, fps): called once
 // per game update on the render thread. Same contract as the original: skip when the engine says so (1.0.0: a
 // global flag; 1.0.3: a flag in `this`); sleep until a frame period has passed since the last call; remember the
@@ -120,17 +194,22 @@ void FrameLimiter(uint8_t* self, int /*fps*/) {
         return;
     using clock = std::chrono::steady_clock;
     static clock::time_point last;
+    auto now = clock::now();
+    // fps = auto: what this frame cost before any sleeping (videos are paced at their own rate).
+    if (rt.config.dynamic_fps && last.time_since_epoch().count() != 0 && !MoviePlaying())
+        DynamicStep(std::chrono::duration<double, std::milli>(now - last).count());
     const int fps = FrameRateNow();
     const auto period = std::chrono::nanoseconds(1'000'000'000 / fps);
-    auto now = clock::now();
     if (last.time_since_epoch().count() != 0 && now < last + period) {
         std::this_thread::sleep_until(last + period);
         now = clock::now();
     }
     const double seconds = last.time_since_epoch().count() ? std::chrono::duration<double>(now - last).count() : 1.0 / fps;
     last = now;
-    // Up to 1/20 s per step: slower devices (20-30 fps) keep the game at normal speed instead of slow motion.
-    if (g_game_step) *g_game_step = float(std::clamp(seconds, 1.0 / 60.0, 1.0 / 20.0));
+    // Up to 1/20 s per step (1/min_fps with fps = auto and min_fps 15): slower devices keep the game at normal speed
+    // instead of slow motion.
+    const double slowest = rt.config.dynamic_fps ? std::min(MinFps(), 20) : 20;
+    if (g_game_step) *g_game_step = float(std::clamp(seconds, 1.0 / 60.0, 1.0 / slowest));
     *reinterpret_cast<int64_t*>(self + b.last_tick) = hle::os::NowTicks();
     self[b.skip_active] = 0;
     self[b.skip_toggle] = 0;
@@ -250,17 +329,20 @@ struct Hook {
 }  // namespace
 
 float GameFrameTime() { return g_game_step ? *g_game_step : 1.0f / 30.0f; }
-namespace {
-std::atomic<int> g_movies{0};
-int MovieFps() { return g_build ? g_build->movie_fps : 30; }
+void ReportGpuFrameTime(double ms) {
+    if (!(ms > 0.0)) return;
+    const float prev = g_gpu_frame_ms.load(std::memory_order_relaxed);
+    g_gpu_frame_ms.store(prev > 0.0f ? prev + 0.1f * (float(ms) - prev) : float(ms), std::memory_order_relaxed);
 }
 void SetMoviePlaying(bool playing) {
-    const int n = playing ? ++g_movies : --g_movies;
-    LOGI("hooks", "movie %s: frame rate %d fps", playing ? "started" : "ended", n > 0 ? MovieFps() : std::clamp(GetRuntime().config.target_fps, 30, 60));
+    playing ? ++g_movies : --g_movies;
+    LOGI("hooks", "movie %s: frame rate %d fps", playing ? "started" : "ended", FrameRateNow());
 }
 bool FrameRateAdjustable() { return g_game_step != nullptr; }
 int FrameRateNow() {
-    return g_movies.load(std::memory_order_relaxed) > 0 ? MovieFps() : std::clamp(GetRuntime().config.target_fps, 30, 60);
+    if (MoviePlaying()) return MovieFps();
+    const RuntimeConfig& c = GetRuntime().config;
+    return c.dynamic_fps ? g_cap_fps.load(std::memory_order_relaxed) : std::clamp(c.target_fps, 30, 60);
 }
 
 const char* GameVersion() { return g_build ? g_build->version : nullptr; }
@@ -273,11 +355,13 @@ void InstallGameHooks() {
         LOGW("hooks", "game version %s: engine patches off (settings game_hooks = 0): 30 fps, 16:9, no engine log",
              g_build->version);
         rt.config.target_fps = 30;
+        rt.config.dynamic_fps = false;
         return;
     }
     if (!g_build) {
         LOGW("hooks", "unknown game build %.32s: engine hooks disabled (supported: 1.0.0, 1.0.3)",
              rt.main_nso.build_id_hex.c_str());
+        rt.config.dynamic_fps = false;  // no frame limiter of ours: the game paces itself
         return;
     }
     const GameBuild& b = *g_build;
@@ -318,13 +402,18 @@ void InstallGameHooks() {
         if (ok) ok = rt.main.HookFunction(b.limiter, reinterpret_cast<void*>(&FrameLimiter), &err);
         if (ok) {
             g_game_step = step;
-            LOGI("hooks", "frame rate: own frame limiter at %d fps (changeable in game), game time step follows the frame time",
-                 std::clamp(rt.config.target_fps, 30, 60));
+            if (rt.config.dynamic_fps)
+                LOGI("hooks", "frame rate: own frame limiter, fps auto (60 / 30 / 20 fps, not below %d; changeable in game), "
+                     "game time step follows the frame time", MinFps());
+            else
+                LOGI("hooks", "frame rate: own frame limiter at %d fps (changeable in game), game time step follows the frame time",
+                     std::clamp(rt.config.target_fps, 30, 60));
         } else {
             LOGW("hooks", "60 fps patches failed (%s): staying at 30 fps", err.c_str());
             rt.main.PatchInstruction(b.step_adrp + 4, 0xBD400108, b.step_ldr_insn, &err);  // undo what applied
             if (adrp_ok) rt.main.PatchInstruction(b.step_adrp, adrp, b.step_adrp_insn, &err);
             rt.config.target_fps = 30;
+            rt.config.dynamic_fps = false;
         }
     }
     // Aspect ratio (offsets below are 1.0.0's; kBuilds has each build's). Two places set the game's resolution, both

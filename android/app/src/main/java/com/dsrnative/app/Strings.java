@@ -193,6 +193,18 @@ final class Strings {
         put("fps_t", "Frame rate cap", "Limite d'images par seconde", "Bildratenbegrenzung", "Limite di frame rate",
                 "Límite de fotogramas", "Limite de quadros", "Ограничение частоты кадров", "フレームレート上限",
                 "프레임 속도 제한", "帧率上限", "影格率上限");
+        put("fps_auto", "Auto", "Auto", "Auto", "Auto", "Auto", "Auto", "Авто", "自動", "자동", "自动", "自動");
+        put("fps_auto_n", "Auto picks 60, 30 or 20 fps by what your device can hold, and keeps the game at normal speed.",
+                "Auto choisit 60, 30 ou 20 IPS selon ce que l'appareil peut tenir, et garde le jeu à vitesse normale.",
+                "Auto wählt 60, 30 oder 20 FPS, je nachdem, was das Gerät schafft, und hält das Spiel auf normaler Geschwindigkeit.",
+                "Auto sceglie 60, 30 o 20 FPS in base a ciò che il dispositivo regge e mantiene il gioco a velocità normale.",
+                "Auto elige 60, 30 o 20 FPS según lo que aguante tu dispositivo y mantiene el juego a velocidad normal.",
+                "Auto escolhe 60, 30 ou 20 FPS conforme o que o aparelho aguenta e mantém o jogo na velocidade normal.",
+                "«Авто» выбирает 60, 30 или 20 FPS по возможностям устройства и сохраняет нормальную скорость игры.",
+                "自動では端末が維持できる 60・30・20 FPS を選び、ゲームの速度は通常のまま保ちます。",
+                "자동은 기기가 유지할 수 있는 60, 30, 20 FPS 중에서 고르며 게임 속도는 정상으로 유지합니다.",
+                "自动会根据设备的承受能力选择 60、30 或 20 FPS，并保持游戏正常速度。",
+                "自動會依裝置可維持的程度選擇 60、30 或 20 FPS，並保持遊戲正常速度。");
         put("aspect_t", "Aspect ratio (experimental)", "Format d'image (expérimental)",
                 "Seitenverhältnis (experimentell)", "Proporzioni (sperimentale)", "Relación de aspecto (experimental)",
                 "Proporção de tela (experimental)", "Соотношение сторон (экспериментально)", "アスペクト比（試験的）",
