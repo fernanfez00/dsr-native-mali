@@ -34,6 +34,9 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -1562,6 +1565,8 @@ private:
         vkCreateSemaphore(device_, &sci, nullptr, &acquire_sem_);
         vkCreateSemaphore(device_, &sci, nullptr, &render_sem_);
         LoadPipelineCache();
+        LoadShaderCache();
+        ParseSkipShaders();
         init_failed_ = false;
         LOGI(kTag, "device ready (queue family %u)", family_);
         return true;
@@ -3813,6 +3818,122 @@ private:
     // ======================================================================================================
     // shaders, layouts, pipelines
     // ======================================================================================================
+    // ---- persistent shader cache (dsr-native-mali fork) ---------------------------------------------------------
+    // Guest shaders are translated once; the SPIR-V and shader info are kept in cache/shader_cache.bin and reused by
+    // later runs (no translation stutter on a slow CPU). The key is the guest code hash plus the translation options.
+    // The file belongs to one build (DSR_BUILD_ID): a new build starts a fresh file, so a changed translator never
+    // meets old SPIR-V. Damaged or foreign files are discarded.
+    struct CachedShader {
+        std::vector<uint32_t> spirv;
+        shader::ShaderInfo info;
+    };
+    std::unordered_map<std::vector<uint32_t>, CachedShader, VecHash> shader_disk_;
+    bool shader_cache_writable_ = false;
+    uint64_t shader_cache_hits_ = 0, shader_cache_misses_ = 0;
+
+    std::string ShaderCachePath() const {
+        const std::string& dir = dsr::GetRuntime().config.cache_dir;
+        return dir.empty() ? std::string() : dir + "/shader_cache.bin";
+    }
+    static void ShaderCacheHeader(char magic[8], char build[16]) {
+        memcpy(magic, "DSRSC03", 8);
+        memset(build, 0, 16);
+#ifdef DSR_BUILD_ID
+        strncpy(build, DSR_BUILD_ID, 15);
+#endif
+    }
+    static void WriteShaderRecord(FILE* f, const std::vector<uint32_t>& key, const std::vector<uint32_t>& spirv,
+                                  const shader::ShaderInfo& info) {
+        const uint32_t nwords = uint32_t(spirv.size()), info_size = uint32_t(sizeof(info));
+        fwrite(key.data(), 4, key.size(), f);
+        fwrite(&nwords, 4, 1, f);
+        fwrite(&info_size, 4, 1, f);
+        fwrite(&info, sizeof(info), 1, f);
+        fwrite(spirv.data(), 4, spirv.size(), f);
+    }
+    void RewriteShaderCache(const std::string& path) {
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) {
+            shader_cache_writable_ = false;
+            return;
+        }
+        char magic[8], build[16];
+        ShaderCacheHeader(magic, build);
+        fwrite(magic, 1, 8, f);
+        fwrite(build, 1, 16, f);
+        for (const auto& e : shader_disk_) WriteShaderRecord(f, e.first, e.second.spirv, e.second.info);
+        fclose(f);
+        shader_cache_writable_ = true;
+    }
+    void LoadShaderCache() {
+        static_assert(std::is_trivially_copyable<shader::ShaderInfo>::value, "ShaderInfo must be plain data");
+        const std::string path = ShaderCachePath();
+        if (path.empty()) return;
+        char magic[8], build[16];
+        ShaderCacheHeader(magic, build);
+        bool damaged = true;
+        if (FILE* f = fopen(path.c_str(), "rb")) {
+            char m[8], b[16];
+            const bool header = fread(m, 1, 8, f) == 8 && memcmp(m, magic, 8) == 0 && fread(b, 1, 16, f) == 16 &&
+                                memcmp(b, build, 16) == 0;
+            if (header) {
+                damaged = false;
+                for (;;) {
+                    uint32_t key[6], nwords = 0, info_size = 0;
+                    if (fread(key, 4, 6, f) != 6) break;  // end of file
+                    if (fread(&nwords, 4, 1, f) != 1 || fread(&info_size, 4, 1, f) != 1) {
+                        damaged = true;
+                        break;
+                    }
+                    CachedShader c;
+                    if (info_size != sizeof(c.info) || nwords == 0 || nwords > (1u << 22)) {
+                        damaged = true;
+                        break;
+                    }
+                    c.spirv.resize(nwords);
+                    if (fread(&c.info, sizeof(c.info), 1, f) != 1 || fread(c.spirv.data(), 4, nwords, f) != nwords) {
+                        damaged = true;
+                        break;
+                    }
+                    shader_disk_.emplace(std::vector<uint32_t>(key, key + 6), std::move(c));
+                }
+            }
+            fclose(f);
+        }
+        if (damaged) {
+            shader_disk_.clear();
+            RewriteShaderCache(path);
+        } else {
+            shader_cache_writable_ = true;
+        }
+        LOGI(kTag, "shader cache: %zu translated shaders loaded (%s)", shader_disk_.size(), path.c_str());
+    }
+    void AppendShaderCache(const std::vector<uint32_t>& key, const shader::TranslateResult& r) {
+        if (!shader_cache_writable_) return;
+        if (FILE* f = fopen(ShaderCachePath().c_str(), "ab")) {
+            WriteShaderRecord(f, key, r.spirv, r.info);
+            fclose(f);
+        }
+    }
+    // settings skip_shaders: fragment shaders listed here are not drawn.
+    void ParseSkipShaders() {
+        const std::string& list = dsr::GetRuntime().config.skip_shaders;
+        size_t pos = 0;
+        while (pos < list.size()) {
+            const size_t comma = list.find(',', pos);
+            const std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            pos = comma == std::string::npos ? list.size() : comma + 1;
+            if (!tok.empty()) skip_fs_.insert(strtoull(tok.c_str(), nullptr, 16));
+        }
+        skip_postfx_ = dsr::GetRuntime().config.skip_postfx;
+        no_depth_snapshot_ = dsr::GetRuntime().config.no_depth_snapshot;
+        if (!skip_fs_.empty() || skip_postfx_ || no_depth_snapshot_)
+            LOGI(kTag, "speed hacks: skip_shaders %zu, skip_postfx %d, no_depth_snapshot %d", skip_fs_.size(),
+                 int(skip_postfx_), int(no_depth_snapshot_));
+    }
+    std::unordered_set<uint64_t> skip_fs_;
+    bool skip_postfx_ = false, no_depth_snapshot_ = false;
+
     Shader* GetShader(const ShaderCode& code, const shader::TranslateOptions& opt) {
         const uint32_t parts[6] = {uint32_t(code.hash), uint32_t(code.hash >> 32), opt.int_attrib_mask,
                                    opt.signed_attrib_mask, uint32_t(opt.gl_depth_range),
@@ -3829,7 +3950,21 @@ private:
             return &it->second;
         }
         Shader& s = shaders_[key];
-        shader::TranslateResult r = shader::Translate(code.code.data(), code.code.size(), opt);
+        shader::TranslateResult r;
+        const auto disk = shader_disk_.find(key);
+        if (disk != shader_disk_.end()) {
+            r.ok = true;
+            r.spirv = disk->second.spirv;
+            r.info = disk->second.info;
+            shader_cache_hits_++;
+        } else {
+            r = shader::Translate(code.code.data(), code.code.size(), opt);
+            shader_cache_misses_++;
+            if (r.ok) {
+                shader_disk_[key] = CachedShader{r.spirv, r.info};
+                AppendShaderCache(key, r);
+            }
+        }
         if (!r.ok) {
             s.error = r.error;
             if (shader_failures_logged_++ < 24)
@@ -4121,6 +4256,10 @@ private:
         if (p.count <= 0 || p.instances <= 0) return;
         if (!begin_rendering_ && !rp_fallback_) return Skip("no dynamic rendering");
         if (!st_.program[0]) return Skip("no vertex program bound");
+        if (skip_postfx_ && st_.num_rt > 0) {  // speed hack (settings skip_postfx)
+            const int tw = st_.rts[0].tex.width, th = st_.rts[0].tex.height;
+            if ((tw == 320 && th == 180) || (tw == 160 && th == 90)) return Skip("post-process target (skip_postfx)");
+        }
         const DeviceModes modes = GetDeviceModes();
 
         // ---- vertex layout and shader options --------------------------------------------------------------
@@ -4153,6 +4292,7 @@ private:
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
         if (!vs->ok || (st_.program[1] && !fs->ok)) return Skip("shader not translated");
+        if (st_.program[1] && skip_fs_.count(st_.program[1]->hash)) return Skip("fragment shader listed in skip_shaders");
 
         VertexInput& vin = scratch_vin_;
         vin.bindings.clear();
@@ -4252,6 +4392,7 @@ private:
                 }
                 if (depth == img) {
                     // Sampling the bound depth buffer (soft particles, fog): read a snapshot copy instead.
+                    if (no_depth_snapshot_) return Skip("depth sampling skipped (no_depth_snapshot)");
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
                 }
