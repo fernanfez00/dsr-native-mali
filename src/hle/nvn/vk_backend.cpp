@@ -1502,7 +1502,9 @@ private:
             LOGI(kTag, "aspect ratio: HUD and menus drawn in a centred %dx%d box of the %dx720 frame", hud_box_w_,
                  hud_box_h_, rw);
         }
-        if (en13.dynamicRendering) {
+        if (en13.dynamicRendering && dsr::GetRuntime().config.render_pass_objects)
+            LOGI(kTag, "settings render_pass_objects = 1: render pass objects instead of the driver's dynamic rendering");
+        else if (en13.dynamicRendering) {
             begin_rendering_ = reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(device_, "vkCmdBeginRendering"));
             end_rendering_ = reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(device_, "vkCmdEndRendering"));
         }

@@ -60,6 +60,9 @@ struct RuntimeConfig {
     int shadow_compare = 0;
     // game_hooks = 0: none of the engine patches (frame rate, resolution, log hooks) are installed.
     bool game_hooks = true;
+    // render_pass_objects = 1: VkRenderPass / VkFramebuffer objects even when the driver has dynamic rendering
+    // (diagnostics for drivers whose dynamic rendering misbehaves, e.g. Mali flicker reports).
+    bool render_pass_objects = false;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
