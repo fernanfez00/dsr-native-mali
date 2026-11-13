@@ -46,18 +46,21 @@ struct GameBuild {
     uint64_t width_cfg, width_get, display_width, height_cfg, height_get, display_height;
     // Engine log, log with va_list, DL_PANIC.
     uint64_t log, vlog, panic;
+    // Game frame rate while a video plays. The movie player is frame-based: 1.0.0 shows one video frame per game
+    // frame (30 fps videos: 30), 1.0.3 one per two game frames (60; at 30 its videos ran at half speed).
+    int movie_fps;
 };
 const GameBuild kBuilds[] = {
     {"5a797a3a5da6c4f3468cb7c84e4dde63", "1.0.0", "20180818_462",
      0x66c9c8, 0xB00080A8, 0xBD497108,
      0x70bd90, 0x251fb4c, 0, 0x310, 0x31d, 0x31e, 0x320,
      0x6a170c, 0x6a18f8, 0x716170, 0x6a1758, 0x6a1968, 0x716178,
-     0x7fea18, 0x7feb30, 0x7892d8},
+     0x7fea18, 0x7feb30, 0x7892d8, 30},
     {"6569410c91c398e78ec76b418ee4cca8", "1.0.3", "20181026_101",
      0x667930, 0xB0008068, 0xBD455908,
      0x706d28, 0, 0x2f7, 0x2e8, 0x2f5, 0x2f6, 0x2f8,
      0x69c638, 0x69c824, 0x711ff0, 0x69c684, 0x69c894, 0x711ff8,
-     0x7f71d4, 0x7f72ec, 0x782dac},
+     0x7f71d4, 0x7f72ec, 0x782dac, 60},
 };
 const GameBuild* g_build = nullptr;
 
@@ -249,14 +252,15 @@ struct Hook {
 float GameFrameTime() { return g_game_step ? *g_game_step : 1.0f / 30.0f; }
 namespace {
 std::atomic<int> g_movies{0};
+int MovieFps() { return g_build ? g_build->movie_fps : 30; }
 }
 void SetMoviePlaying(bool playing) {
     const int n = playing ? ++g_movies : --g_movies;
-    LOGI("hooks", "movie %s: frame rate %d fps", playing ? "started" : "ended", n > 0 ? 30 : std::clamp(GetRuntime().config.target_fps, 30, 60));
+    LOGI("hooks", "movie %s: frame rate %d fps", playing ? "started" : "ended", n > 0 ? MovieFps() : std::clamp(GetRuntime().config.target_fps, 30, 60));
 }
 bool FrameRateAdjustable() { return g_game_step != nullptr; }
 int FrameRateNow() {
-    return g_movies.load(std::memory_order_relaxed) > 0 ? 30 : std::clamp(GetRuntime().config.target_fps, 30, 60);
+    return g_movies.load(std::memory_order_relaxed) > 0 ? MovieFps() : std::clamp(GetRuntime().config.target_fps, 30, 60);
 }
 
 const char* GameVersion() { return g_build ? g_build->version : nullptr; }
