@@ -786,6 +786,10 @@ public:
         StartRecorder();
         ResetTransient();
         list_counter_++;
+        // Each submitted list starts with no sampler pool until it binds one (its recording re-binds the pool its
+        // command buffer had bound): sampler ids then resolve as before pools were tracked. Lists it calls
+        // inherit its pool.
+        st_.sampler_pool = 0;
         MaybeArmCapture();
         ApplyDirtyMarks();
         if (!watched_copies_.empty()) CheckWatchedCopies();
