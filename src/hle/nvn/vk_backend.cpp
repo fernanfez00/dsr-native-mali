@@ -5298,8 +5298,17 @@ private:
     bool pipeline_pending_ = false;  // the last GetPipeline returned null because it is still compiling
     void StartCompilers() {
         if (!compilers_.empty()) return;
-        for (int i = 0; i < 2; i++)
+        // 2 threads up to 7 cores, 3 on 8-9, 4 on 10+: phones with many slow cores build new scenery's
+        // pipelines sooner (the draws waiting for them are skipped meanwhile).
+        const unsigned hw = std::thread::hardware_concurrency();
+        const int count = std::clamp(int(hw / 2) - 1, 2, 4);
+        LOGI(kTag, "%d pipeline compiler threads (%u CPUs)", count, hw);
+        for (int i = 0; i < count; i++)
             compilers_.emplace_back([this] {
+                // Every CPU: created by a thread kept on the fast cores, they inherited its pin and, at low
+                // priority, got almost no time there while the slow cores idled (Helio G80: pipelines took
+                // seconds).
+                dsr::platform::UseAllCores();
                 // Below the render threads: new pipelines are built in the background and must not take CPU
                 // time from the frame being drawn (camera turns into new scenery stuttered).
                 setpriority(PRIO_PROCESS, 0, 8);

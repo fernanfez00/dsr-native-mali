@@ -143,7 +143,7 @@ int g_exit_code = 0;
 void* GameThread(void*) {
     Runtime& rt = GetRuntime();
     hle::os::AdoptMainThread("MainThread", kMainThreadStack, kMainThreadPriority);
-    platform::PreferFastCores("game main thread");
+    platform::PreferFastCores("game main thread", true);
 
     const uintptr_t init_startup = rt.main.Export("nninitStartup");
     const uintptr_t init = rt.main.Export("_init");

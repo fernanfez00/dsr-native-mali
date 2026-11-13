@@ -101,6 +101,7 @@ void* ThreadTrampoline(void* p) {
     t_current = ht;
     QueryStack(ht);
     pthread_setname_np(pthread_self(), ht->name.empty() ? "guest" : ht->name.substr(0, 15).c_str());
+    dsr::platform::ReleaseInheritedPin();  // created by the pinned main thread (few fast cores: not pinned)
     dsr::profiler::RegisterCurrentThread(ht->name.empty() ? "guest" : ht->name.c_str());
     LOGD(kTag, "thread %llu '%s' start entry=%p arg=%p", (unsigned long long)ht->id, ht->name.c_str(), ht->entry,
          ht->arg);

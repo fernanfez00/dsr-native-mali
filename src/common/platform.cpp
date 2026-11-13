@@ -207,7 +207,40 @@ void WatchAffinity() {
 #endif
 }  // namespace
 
-void PreferFastCores(const char* who) {
+namespace {
+#if defined(__ANDROID__)
+// Below this many fast cores, only the game's main thread is pinned. On a Helio G80 (2 fast + 6 slow) eight busy
+// threads were kept on CPUs 6-7 with the pipeline compilers inheriting the same two cores while six cores idled:
+// pipelines took seconds to build and objects went undrawn meanwhile (issue #27). The scheduler places the rest.
+constexpr int kFewFastCores = 4;
+bool FewFastCores() {
+    if (!dsr::GetRuntime().config.fast_cores) return false;
+    const FastCores& fc = GetFastCores();
+    return fc.count > 0 && fc.count < kFewFastCores;
+}
+int SetAllCores() {
+    cpu_set_t all;
+    CPU_ZERO(&all);
+    const long n = sysconf(_SC_NPROCESSORS_CONF);
+    for (long c = 0; c < n && c < CPU_SETSIZE; c++) CPU_SET(c, &all);
+    return sched_setaffinity(0, sizeof(all), &all);
+}
+#endif
+}  // namespace
+
+void UseAllCores() {
+#if defined(__ANDROID__)
+    SetAllCores();  // best effort
+#endif
+}
+
+void ReleaseInheritedPin() {
+#if defined(__ANDROID__)
+    if (FewFastCores()) SetAllCores();
+#endif
+}
+
+void PreferFastCores(const char* who, bool essential) {
 #if defined(__ANDROID__)
     thread_local bool done = false;
     if (done) return;
@@ -215,6 +248,12 @@ void PreferFastCores(const char* who) {
     if (!dsr::GetRuntime().config.fast_cores) return;
     const FastCores& fc = GetFastCores();
     if (fc.count <= 0) return;
+    if (!essential && fc.count < kFewFastCores) {
+        const int r = SetAllCores();  // it may have inherited the main thread's pin
+        LOGI("platform", "%s left to the scheduler on all CPUs (only %d fast cores:%s): %s", who, fc.count,
+             fc.list.c_str(), r == 0 ? "ok" : "refused");
+        return;
+    }
     const int r = sched_setaffinity(0, sizeof(fc.set), &fc.set);
     LOGI("platform", "%s kept on CPUs%s: %s", who, fc.list.c_str(), r == 0 ? "ok" : "refused");
     {
@@ -225,6 +264,7 @@ void PreferFastCores(const char* who) {
     std::call_once(watch_once, [] { std::thread(WatchAffinity).detach(); });
 #else
     (void)who;
+    (void)essential;
 #endif
 }
 namespace {

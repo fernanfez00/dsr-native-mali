@@ -24,7 +24,13 @@ bool TakeText(bool* ok, std::u16string* text);
 
 // Keeps the calling thread on the performance cores (off the slowest cluster, where the scheduler puts
 // threads that sleep between bursts of work every frame). Once per thread; logs `who`. No-op elsewhere.
-void PreferFastCores(const char* who);
+// On chips with fewer than 4 fast cores only `essential` threads (the game's main thread) are pinned; the others
+// are given all CPUs (dropping a pin inherited from the thread that created them).
+void PreferFastCores(const char* who, bool essential = false);
+// Lets the calling thread run on every CPU (background workers created by pinned threads inherit their pin).
+void UseAllCores();
+// On chips with fewer than 4 fast cores: drops a fast-core pin inherited from the creating thread (game threads).
+void ReleaseInheritedPin();
 
 // The app is in the background (Android: between onPause and onResume): the game is held still. Presents,
 // the audio output and the game's sleeping threads wait in WaitWhilePaused until it comes back.
