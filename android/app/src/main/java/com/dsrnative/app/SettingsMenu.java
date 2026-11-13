@@ -263,7 +263,8 @@ public final class SettingsMenu {
     private Dialog mDialog;
     private LinearLayout mBody;
     private ScrollView mScroll;
-    private static final String[] TAB_KEYS = {"tab_driver", "tab_settings", "tab_touch", "tab_language"};
+    private static final String[] TAB_KEYS = {"tab_driver", "tab_settings", "tab_graphics", "tab_touch", "tab_language"};
+    private static final int TAB_GRAPHICS = 2, TAB_TOUCH = 3, TAB_LANGUAGE = 4;
     private final TextView[] mTabs = new TextView[TAB_KEYS.length];
     private TextView mHint, mClose, mScaleLabel;
     private int mTab = 0;
@@ -396,10 +397,42 @@ public final class SettingsMenu {
         switch (tab) {
             case 0: buildDriverTab(); break;
             case 1: buildSettingsTab(); break;
-            case 2: buildTouchTab(); break;
+            case TAB_GRAPHICS: buildGraphicsTab(); break;
+            case TAB_TOUCH: buildTouchTab(); break;
             default: buildLanguageTab(); break;
         }
         mScroll.scrollTo(0, 0);
+    }
+
+    // ---- Graphics tab -------------------------------------------------------------------------------------------
+
+    private void buildGraphicsTab() {
+        section(Strings.t("sec_display"));
+        choice("fps", Strings.t("fps_t"), Strings.t("fps_auto_n") + " " + Strings.t("changes_now"),
+                new String[] {"30", "45", "60", "auto"},
+                new String[] {"30 fps", "45 fps", "60 fps", Strings.t("fps_auto")}, "60");
+        choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
+                new String[] {"fifo", "mailbox"},
+                new String[] {Strings.t("present_vsync") + " " + Strings.t("default_mark"), Strings.t("present_mailbox")},
+                "fifo");
+        renderScale();
+        choice("aspect_ratio", Strings.t("aspect_t"), Strings.t("aspect_n"),
+                new String[] {"16:9", "auto", "4:3", "21:9"},
+                new String[] {"16:9 " + Strings.t("default_mark"), Strings.t("aspect_fill"), "4:3", "21:9"}, "16:9");
+        choice("exposure", Strings.t("bright_t"), Strings.t("changes_now"), new String[] {"1.0", "1.37", "1.7"},
+                new String[] {Strings.t("bright_orig"), Strings.t("bright_def"), Strings.t("bright_more")}, "1.37");
+        toggle("fps_counter", Strings.t("fpscounter_t"), Strings.t("fpscounter_n") + " " + Strings.t("changes_now"),
+                "1", "0", "0");
+
+        section(Strings.t("sec_quality"));
+        toggle("performance_mode", Strings.t("perf_t"), Strings.t("perf_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
+
+        section(Strings.t("sec_gpu"));
+        note(Strings.t("gpu_n"));
+        toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
@@ -509,23 +542,7 @@ public final class SettingsMenu {
     // ---- Settings tab -------------------------------------------------------------------------------------------
 
     private void buildSettingsTab() {
-        section(Strings.t("sec_display"));
-        choice("fps", Strings.t("fps_t"), Strings.t("fps_auto_n") + " " + Strings.t("changes_now"),
-                new String[] {"30", "45", "60", "auto"},
-                new String[] {"30 fps", "45 fps", "60 fps", Strings.t("fps_auto")}, "60");
-        choice("aspect_ratio", Strings.t("aspect_t"), Strings.t("aspect_n"),
-                new String[] {"16:9", "auto", "4:3", "21:9"},
-                new String[] {"16:9 " + Strings.t("default_mark"), Strings.t("aspect_fill"), "4:3", "21:9"}, "16:9");
-        renderScale();
-        toggle("fps_counter", Strings.t("fpscounter_t"), Strings.t("fpscounter_n") + " " + Strings.t("changes_now"),
-                "1", "0", "0");
-        choice("exposure", Strings.t("bright_t"), Strings.t("changes_now"), new String[] {"1.0", "1.37", "1.7"},
-                new String[] {Strings.t("bright_orig"), Strings.t("bright_def"), Strings.t("bright_more")}, "1.37");
-        choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
-                new String[] {"fifo", "mailbox"},
-                new String[] {Strings.t("present_vsync") + " " + Strings.t("default_mark"), Strings.t("present_mailbox")},
-                "fifo");
-
+        section(Strings.t("sec_game"));
         toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
 
         section(Strings.t("sec_controls"));
@@ -718,7 +735,7 @@ public final class SettingsMenu {
         mDialog.dismiss();
         TouchControls.editLayout(a, () -> {
             try {
-                new SettingsMenu(a).open(2);
+                new SettingsMenu(a).open(TAB_TOUCH);
             } catch (Exception e) {
                 android.util.Log.w("DSRNative", "settings menu: could not open again", e);
                 sOpen = null;
@@ -748,7 +765,7 @@ public final class SettingsMenu {
                 mValues.put("language", code);
                 Strings.setLanguage(code);
                 relabel();
-                showTab(3);
+                showTab(TAB_LANGUAGE);
                 mBody.post(() -> {  // keep the controller's focus on the chosen language
                     for (int k = 0; k < mBody.getChildCount(); k++) {
                         View c = mBody.getChildAt(k);
