@@ -13,13 +13,10 @@ Runs the game's original ARM64 code (`exefs/main`) directly on an ARM64 Android 
 > [!IMPORTANT]
 > Mail GPU's not fully supported yet.
 
-**Must use v1.0.0 version of Dark Souls: Remastered for Nintendo Switch.**
-
-Early development. Expect visual bugs and minor performance issues.
+Early development. Expect visual bugs and minor performance issues. Base v1.0.0 and Update v1.0.3 are supported.
 
 Tested with an AYN Thor, a OnePlus 6T, and MuMuPlayer using a 4:3 aspect ratio. Snapdragon chips should be fully supported along with Adreno 6xx, 7xx, and 8xx gpus.
 
-Haven't tested the v1.0.3 update for the game yet.
 
 
 
@@ -49,14 +46,16 @@ I have yet to test later areas in the game so don't expect performance to be ent
 - [x] User-selected game directory
 - [x] Floating GUI (Hold - and + buttons for one full second) with various settings such as FPS cap, aspect ratio, frame presentation, etc..
 - [x] Custom driver support
+- [x] Render scale / Graphics options
+- [x] Several language options
 
 ## Roadmap
 
 - [ ] Higher quality audio patch
 - [ ] Further performance optimizations
 - [ ] Support for more phone gpus and chipsets, specifically Mali GPUs
-- [ ] Render scale / More graphics options
-- [ ] More language options
+
+
 
 
 ## Logs
@@ -78,21 +77,23 @@ file is complete even after a crash. The same output also goes to logcat (`adb l
 
 
 ## Installing game files on the device
-> [!NOTE]
-> Upon first time launch a settings.txt file will also be created with a few changeable settings and their explanations. In-game settings via the floating GUI changes this file.
+**Method 1**
+> [!IMPORTANT]
+> Requires your own prod.keys file.
 
+
+Install the apk, launch it and give it permission to access files. Afterwards, select the game nsp/xci file along with its v1.0.3 update file (optional). The game will begin extracting the necessary files and place them inside "/Download/DSRNative/game/", and then boot the game from inside this folder.
+
+
+
+
+
+**Method 2**
 
 > [!IMPORTANT]
-> You must extract the games **romfs** and **exefs** files to play the game. There many ways to do this, but i recommend using Ryujinx (Ryubing) on Windows to obtain this from your own game dump.
+> You must extract the games **romfs** and **exefs** files to play the game. Method 1 already does this for you but if you prefer to do it yourself you can use a program like Ryubing to extract the files.
 
-
-Install the APK, launch it and give it permission to access files to create the necessary folders, then choose a directory for the game files. The default location is:
-
-```
-/Downloads/DSRNative/files/game/
-```
-
-But you may choose any folder.
+Install the APK, launch it and give it permission to access files to create the necessary folders, then choose a directory to search for the game files. 
 
 Inside your game folder must be the extracted **romfs** files, along with the folders **movww**, **movjp**, and **exefs**. You must create the **exefs** folder and place your extracted **exefs** files inside.
 
