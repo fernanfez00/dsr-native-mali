@@ -370,6 +370,11 @@ void SetMoviePlaying(bool playing) {
     LOGI("hooks", "movie %s: frame rate %d fps", playing ? "started" : "ended", FrameRateNow());
 }
 bool FrameRateAdjustable() { return g_game_step != nullptr; }
+namespace {
+std::atomic<int> g_gpu_has_bc{-1};
+}
+void SetGpuHasBc(bool has) { g_gpu_has_bc = has ? 1 : 0; }
+int GpuHasBc() { return g_gpu_has_bc.load(); }
 int FrameRateNow() {
     if (MoviePlaying()) return MovieFps();
     const RuntimeConfig& c = GetRuntime().config;

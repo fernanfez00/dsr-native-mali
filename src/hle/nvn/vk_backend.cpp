@@ -479,6 +479,8 @@ struct Image {
     // PassEndBarrier made this render target readable by fragment shaders only (mali_barriers); a vertex shader
     // that samples it needs one more barrier first (VertexReadBarrier).
     bool frag_only_sync = false;
+    // texture_mip_skip: the game's level 0 was left out (this image holds its levels 1..n as 0..n-1, at half size).
+    int mip_skip = 0;
     // Depth written by a fragment shader (gl_FragDepth) since the image was last attached: see LrzTouch.
     bool depth_exported = false;
     // Ever had depth written by a fragment shader (gl_FragDepth): depth tests against it are done in the shader.
@@ -1497,6 +1499,9 @@ private:
         }
         LoadDeviceFunctions(device_);
         ProbePatchedBc();
+        dsr::SetGpuHasBc(features_.textureCompressionBC || bc_forced_);
+        mip_skip_ = dsr::GetRuntime().config.texture_mip_skip > 0;
+        if (mip_skip_) LOGI(kTag, "texture_mip_skip: big BC textures are loaded without their most detailed level");
         if (const int rw = dsr::GetRuntime().config.render_width, rh = dsr::GetRuntime().config.render_height;
             (rw != 1280 || rh != 720) && rw > 0 && rh > 0 && dsr::GetRuntime().config.hud_box) {
             // The largest 16:9 box in the frame (the whole frame at 16:9, e.g. with a render scale).
@@ -1924,7 +1929,8 @@ private:
         auto it = images_.find(t.addr);
         if (it == images_.end()) return nullptr;
         Image& img = it->second;
-        if (img.nvn_format != t.tex.format || img.width != t.tex.width || img.height != t.tex.height) {
+        const int ow = img.mip_skip ? img.tex.width : img.width, oh = img.mip_skip ? img.tex.height : img.height;
+        if (img.nvn_format != t.tex.format || ow != t.tex.width || oh != t.tex.height) {
             const uint64_t key = t.addr ^ (uint64_t(t.tex.format) << 48) ^ (uint64_t(img.nvn_format) << 56);
             if (mismatch_logged_.size() < 24 && mismatch_logged_.insert(key).second)
                 LOGW(kTag, "memory @%llx used as fmt %d %dx%d but holds an image of fmt %d %dx%d%s (replaced)",
@@ -2248,6 +2254,16 @@ private:
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
         img.layers = std::max(1, layout.layers);
+        // texture_mip_skip: big BC textures (the game's art; never drawn into) without their most detailed level.
+        if (mip_skip_ && BcKindOf(t.tex.format) != BcKind::None && img.levels >= 2 && t.tex.width >= 512 &&
+            t.tex.height >= 512 && t.tex.target != kTarget3D && t.tex.target != kTarget1D &&
+            t.tex.target != kTarget1DArray) {
+            img.mip_skip = 1;
+            img.width = std::max(1, t.tex.width >> 1);
+            img.height = std::max(1, t.tex.height >> 1);
+            img.levels -= 1;
+            mip_skipped_++;
+        }
         img.depth = t.tex.target == kTarget3D ? std::max(1, t.tex.depth) : 1;
         img.aspect = AspectOf(t.tex.format);
         img.features = feats;
@@ -2443,7 +2459,7 @@ private:
         size_t needed = 0;
         for (int layer = 0; layer < img.layers; layer++)
             for (int lv = 0; lv < img.levels; lv++) {
-                const LevelLayout& l = layout.levels[size_t(lv)];
+                const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
                 needed += img.bc != BcKind::None ? ConvertedLevelBytes(img, std::max(1, l.width), std::max(1, l.height),
                                                                        l.depth) + 16
                                                  : size_t(l.row_bytes) * l.rows * l.depth + 16;
@@ -2461,7 +2477,7 @@ private:
             size_t scratch = 0;
             for (int layer = 0; layer < img.layers; layer++)
                 for (int lv = 0; lv < img.levels; lv++) {
-                    const LevelLayout& l = layout.levels[size_t(lv)];
+                    const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
                     scratch += size_t(l.row_bytes) * l.rows * l.depth;
                 }
             if (bc_scratch_.size() < scratch) bc_scratch_.resize(scratch);
@@ -2469,7 +2485,7 @@ private:
         size_t scratch_used = 0;
         for (int layer = 0; layer < img.layers; layer++) {
             for (int lv = 0; lv < img.levels; lv++) {
-                const LevelLayout& l = layout.levels[size_t(lv)];
+                const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
                 const size_t n = size_t(l.row_bytes) * l.rows * l.depth;
                 const uint8_t* src = base + size_t(layer) * layout.layer_stride + l.offset;
                 VkBufferImageCopy r{};
@@ -2619,7 +2635,7 @@ private:
             default: type = array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D; break;
         }
         // A texture view registered with the texture picks the first level/layer (and counts).
-        const uint32_t base_level = ref ? SubLevel(img, ref->level) : 0;
+        const uint32_t base_level = ref ? SubLevel(img, ref->level - img.mip_skip) : 0;  // mip_skip: one level less
         uint32_t levels = uint32_t(img.levels) - base_level;
         if (ref && ref->view_levels > 0) levels = std::min<uint32_t>(levels, uint32_t(ref->view_levels));
         uint32_t base_layer = 0;
@@ -5851,8 +5867,9 @@ private:
                 if (img.image) vkGetImageMemoryRequirements(device_, img.image, &req);
                 gpu += req.size;
             }
-            LOGI(kTag, "memory: process %ld MB resident, %zu GPU images using %llu MB, %zu index ranges cached", rss_kb / 1024,
-                 images_.size(), (unsigned long long)(gpu >> 20), index_ranges_.size());
+            LOGI(kTag, "memory: process %ld MB resident, %zu GPU images using %llu MB, %zu index ranges cached%s", rss_kb / 1024,
+                 images_.size(), (unsigned long long)(gpu >> 20), index_ranges_.size(),
+                 mip_skip_ ? (", " + std::to_string(mip_skipped_) + " big textures without their top level").c_str() : "");
         }
         if (big_checks_) {
             LOGI(kTag, "game-written textures (>= 512x512): %llu checks, %llu changed and re-uploaded",
@@ -6275,6 +6292,8 @@ private:
         return !full;
     }
     bool bc_patched_ = false, bc_forced_ = false;
+    bool mip_skip_ = false;      // settings texture_mip_skip
+    uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
     std::unordered_set<uint64_t> hud_box_logged_;
     uint64_t hud_full_screen_ = 0;

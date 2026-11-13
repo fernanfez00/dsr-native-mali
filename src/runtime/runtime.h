@@ -73,6 +73,9 @@ struct RuntimeConfig {
     // performance_mode = 1: the engine's own lower-quality options: low-quality effects, 1024x1024 shadow maps instead
     // of 2048x2048 (read at start-up). The menu also sets render_scale 0.75 when it is turned on.
     bool performance_mode = false;
+    // texture_mip_skip = 1: big BC textures (512x512 and up, with mip levels) are loaded without their most detailed
+    // level: half the width and height, ~75% less data to convert, upload and sample; softer up close.
+    int texture_mip_skip = 0;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
@@ -116,6 +119,10 @@ int FrameRateNow();  // the rate the frame limiter paces to now (the cap, or the
 // Smoothed GPU time of one submission in ms (0 = not known yet), from the Vulkan backend's GPU timestamps: what the
 // dynamic frame rate (fps = auto) weighs against the frame period.
 void ReportGpuFrameTime(double ms);
+// Whether the GPU samples BC textures itself (natively or through BCeNabler): 1 yes, 0 no (converted on the CPU),
+// -1 not known yet (no Vulkan device). The menu turns texture_mip_skip on with performance mode only without BC.
+void SetGpuHasBc(bool has);
+int GpuHasBc();
 bool FrameRateAdjustable();  // the frame rate patches are in: config.target_fps may change while the game runs
 
 // Prints an import binding summary (implemented / unimplemented / data) to the log.

@@ -253,6 +253,21 @@ final class Strings {
                 "BC를 지원하지 않는 GPU에서 텍스처 메모리가 4분의 1로 줄어듭니다. 약간 손실이 있습니다.",
                 "在不支持 BC 的 GPU 上纹理内存减少至 1/4；略有损失。",
                 "在不支援 BC 的 GPU 上紋理記憶體減少至 1/4；略有損失。");
+        put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
+                "Omitir mip de texturas", "Pular mip de texturas", "Пропуск MIP текстур", "テクスチャ MIP スキップ",
+                "텍스처 밉 건너뛰기", "跳过纹理 Mip", "略過紋理 Mip");
+        put("mip_n",
+                "Big textures load without their most detailed level: about 75% less texture data, softer up close. Performance mode turns it on on GPUs without BC support.",
+                "Les grandes textures se chargent sans leur niveau le plus détaillé : environ 75 % de données en moins, plus flou de près. Le mode performance l'active sur les GPU sans BC.",
+                "Große Texturen werden ohne ihre detaillierteste Stufe geladen: etwa 75 % weniger Texturdaten, aus der Nähe weicher. Der Leistungsmodus schaltet es auf GPUs ohne BC ein.",
+                "Le texture grandi si caricano senza il livello più dettagliato: circa il 75% di dati in meno, più morbide da vicino. La modalità prestazioni lo attiva sulle GPU senza BC.",
+                "Las texturas grandes se cargan sin su nivel más detallado: un 75 % menos de datos, más suaves de cerca. El modo rendimiento lo activa en GPU sin BC.",
+                "Texturas grandes carregam sem o nível mais detalhado: cerca de 75% menos dados, mais suaves de perto. O modo desempenho liga isso em GPUs sem BC.",
+                "Большие текстуры загружаются без самого детального уровня: примерно на 75% меньше данных, вблизи мягче. Режим производительности включает это на GPU без BC.",
+                "大きなテクスチャを最も詳細なレベルなしで読み込みます：データ量は約 75% 減、近くでは少しぼやけます。BC 非対応 GPU ではパフォーマンスモードでオンになります。",
+                "큰 텍스처를 가장 세밀한 단계 없이 불러옵니다: 텍스처 데이터 약 75% 감소, 가까이서는 조금 흐립니다. BC를 지원하지 않는 GPU에서는 성능 모드가 이를 켭니다.",
+                "大纹理不加载最精细的一级：纹理数据减少约 75%，近看略模糊。在不支持 BC 的 GPU 上，性能模式会将其开启。",
+                "大型紋理不載入最精細的一級：紋理資料減少約 75%，近看略模糊。在不支援 BC 的 GPU 上，效能模式會將其開啟。");
         put("malib_t", "Tile-GPU barriers (experimental)", "Barrières GPU à tuiles (expérimental)",
                 "Kachel-GPU-Barrieren (experimentell)", "Barriere GPU a tile (sperimentale)",
                 "Barreras para GPU por mosaicos (experimental)", "Barreiras para GPU em blocos (experimental)",

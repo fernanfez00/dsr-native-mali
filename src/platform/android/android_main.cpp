@@ -521,6 +521,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "settings_version")) settings_version = v;
             else if (!strcmp(key, "mali_barriers")) cfg->mali_barriers = v != 0;
             else if (!strcmp(key, "performance_mode")) cfg->performance_mode = v != 0;
+            else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "gamma")) {
                 const float g = float(atof(value));
                 cfg->gamma = g >= 0.5f && g <= 3.0f ? g : 1.0f;
@@ -597,9 +598,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          path.c_str(), cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "", cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
-    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, mali_barriers %d, performance_mode %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
+    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, mali_barriers %d, performance_mode %d, texture_mip_skip %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
          int(cfg->bc_enabler), cfg->language.c_str(), cfg->render_scale, cfg->shadow_compare,
-         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), int(cfg->performance_mode), cfg->present_mode.c_str(),
+         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), int(cfg->performance_mode), cfg->texture_mip_skip, cfg->present_mode.c_str(),
          cfg->hole_test);
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
@@ -1015,6 +1016,8 @@ void JNICALL MenuOpen(JNIEnv*, jclass, jboolean open) {
 
 // Frames shown so far, for the FPS counter (SettingsMenu polls it twice a second).
 jlong JNICALL MenuFrames(JNIEnv*, jclass) { return jlong(dsr::platform::FramesShown()); }
+// 1: the GPU samples BC textures itself, 0: it does not (converted on the CPU), -1: not known yet.
+jint JNICALL MenuGpuHasBc(JNIEnv*, jclass) { return jint(dsr::GpuHasBc()); }
 
 jclass g_menu_cls = nullptr;  // global ref
 
@@ -1079,8 +1082,9 @@ void StartSettingsMenu(android_app* app, const std::string& base, const dsr::Run
          reinterpret_cast<void*>(&MenuApply)},
         {const_cast<char*>("nativeMenuOpen"), const_cast<char*>("(Z)V"), reinterpret_cast<void*>(&MenuOpen)},
         {const_cast<char*>("nativeFrames"), const_cast<char*>("()J"), reinterpret_cast<void*>(&MenuFrames)},
+        {const_cast<char*>("nativeGpuHasBc"), const_cast<char*>("()I"), reinterpret_cast<void*>(&MenuGpuHasBc)},
     };
-    if (env->RegisterNatives(cls, methods, 3) != JNI_OK || env->ExceptionCheck()) {
+    if (env->RegisterNatives(cls, methods, 4) != JNI_OK || env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGW(kTag, "settings menu: could not register natives");
         return;

@@ -64,6 +64,9 @@ public final class SettingsMenu {
     /** Frames shown on screen so far (the FPS counter). */
     static native long nativeFrames();
 
+    /** 1: the GPU samples BC textures itself, 0: it does not (converted on the CPU), -1: not known yet. */
+    static native int nativeGpuHasBc();
+
     static final int REQ_DRIVER = 4101, REQ_FOLDER = 4102;
 
     private static String sSettingsPath = "", sDriversDir = "", sRunningDriver = "system", sGameDir = "",
@@ -434,6 +437,8 @@ public final class SettingsMenu {
         section(Strings.t("sec_gpu"));
         note(Strings.t("gpu_n"));
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
     }
@@ -1016,8 +1021,33 @@ public final class SettingsMenu {
     /** Render scale performance mode sets (the player can move it afterwards; turning the mode off restores theirs). */
     private static final String PERF_SCALE = "0.75";
 
-    /** Performance mode on: remembers the render scale and sets 75%; off: puts the remembered one back. */
+    /** 1: the GPU has no BC support (performance mode then turns texture_mip_skip on too). */
+    private static boolean gpuLacksBc() {
+        try {
+            return nativeGpuHasBc() == 0;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    /**
+     * Performance mode on: remembers the render scale and sets 75%, and on GPUs without BC support remembers
+     * texture_mip_skip and turns it on; off: puts the remembered values back.
+     */
     private void performanceScale(boolean on) {
+        if (on && gpuLacksBc()) {
+            String mip = mValues.containsKey("texture_mip_skip") ? mValues.get("texture_mip_skip") : "0";
+            writeSetting("texture_mip_skip_before_perf", mip);
+            mValues.put("texture_mip_skip_before_perf", mip);
+            if (writeSetting("texture_mip_skip", "1")) mValues.put("texture_mip_skip", "1");
+        } else if (!on) {
+            String before = mValues.get("texture_mip_skip_before_perf");
+            if (before != null && !before.isEmpty()) {  // performance mode had turned it on: restored
+                if (writeSetting("texture_mip_skip", before)) mValues.put("texture_mip_skip", before);
+                writeSetting("texture_mip_skip_before_perf", "");
+                mValues.put("texture_mip_skip_before_perf", "");
+            }
+        }
         String cur = mValues.containsKey("render_scale") ? mValues.get("render_scale") : "1.00";
         String scale;
         if (on) {
