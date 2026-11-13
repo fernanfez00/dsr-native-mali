@@ -34,9 +34,6 @@
 #include <set>
 #include <string>
 #include <unordered_map>
-#include <cstdio>
-#include <cstdlib>
-#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -51,6 +48,10 @@
 #include "hle/nvn/bc_decode.h"
 #include "hle/nvn/etc_encode.h"
 #include "hle/nvn/parallel.h"
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include "runtime/runtime.h"
 #include "hle/nvn/layout.h"
 #include "hle/os/os.h"
@@ -460,6 +461,8 @@ struct Image {
     VkFormatFeatureFlags features = 0;
     bool written = false;  // has the GPU (or an upload) put anything in it
     bool uploaded = false;
+    bool pending = false;  // converted on the background thread; its copy is recorded when the result is ready
+    uint64_t serial = 0;   // identifies one upload (a result for a replaced image is dropped)
     // Contents came from game memory (not rendered by the GPU): re-uploaded when the game rewrites the
     // memory. Checked via a sparse hash: after an unchanged check the next one comes twice as many command
     // lists later (up to kMaxCheckInterval); a change, or an explicit MarkTextureDirty, resets that.
@@ -535,6 +538,9 @@ struct DrawState {
 };
 
 class VulkanBackend final : public Backend {
+public:
+    ~VulkanBackend() { StopBcThread(); }
+private:
 public:
     const char* Name() const override { return "vulkan"; }
 
@@ -1264,6 +1270,7 @@ public:
         if (!EnsureSwapchain()) return;
         // Acquire, copy and present run on the recorder after this frame's commands; the render thread goes on.
         BeginCommands();
+        PumpBcUploads();
         PresentJob pj;
         if (src) {
             Transition(*src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1565,8 +1572,6 @@ private:
         vkCreateSemaphore(device_, &sci, nullptr, &acquire_sem_);
         vkCreateSemaphore(device_, &sci, nullptr, &render_sem_);
         LoadPipelineCache();
-        LoadShaderCache();
-        ParseSkipShaders();
         init_failed_ = false;
         LOGI(kTag, "device ready (queue family %u)", family_);
         return true;
@@ -2066,6 +2071,7 @@ private:
         Image* img = FindImage(t);
         if (!img) img = CreateImage(t);
         if (!img) return nullptr;
+        if (img->pending && !img->written) return nullptr;  // converting in the background: not drawn yet
         if (upload && TakeFrame(*img, t)) return img;
         if (upload && !img->written && !img->uploaded) {
             Upload(*img, t);
@@ -2389,21 +2395,81 @@ private:
     double bc_convert_ms_ = 0;     // conversion time, for the stats line
     uint64_t bc_cache_hits_ = 0, bc_converted_levels_ = 0;
 
-    void RunBcJobs() {
-        if (bc_jobs_.empty()) return;
-        const auto t0 = std::chrono::steady_clock::now();
-        bc_tasks_.clear();
-        for (uint32_t j = 0; j < bc_jobs_.size(); j++) {
-            const BcJob& job = bc_jobs_[j];
+    // ---- BC textures: converted on a background thread --------------------------------------------------
+    // Converting a large texture takes seconds on a phone; done on the render thread it stalled the game. Now one
+    // background thread converts it (WorkPool helps), and the render thread records the copy a few frames later
+    // (PumpBcUploads), at most kBcFrameBudget bytes per frame. Until the copy is recorded the texture is not drawn.
+    static constexpr size_t kBcFrameBudget = size_t(24) << 20;
+
+    struct PendingLevel {
+        size_t src_off = 0, n = 0, out_off = 0, out_bytes = 0;
+        LevelLayout lay;
+        bool linear = false;
+        int bx = 0, brows = 0, w = 1, h = 1, depth = 1;
+    };
+    struct PendingBc {
+        uint64_t addr = 0, serial = 0;
+        int nvn_format = 0;
+        BcKind kind = BcKind::None;
+        BcTo to = BcTo::Decoded;
+        bool punch = false;
+        std::vector<uint8_t> raw;                // a copy of the texture's guest memory (the game may rewrite it)
+        std::vector<PendingLevel> levels;
+        std::vector<VkBufferImageCopy> regions;  // bufferOffset relative to `result`
+        size_t result_bytes = 0;
+        std::vector<uint8_t> result;             // converted levels, back to back (filled by the background thread)
+        uint64_t cache_hits = 0;
+        std::atomic<bool> done{false};
+    };
+    std::deque<std::shared_ptr<PendingBc>> bc_queue_;     // to the background thread (under bc_mutex_)
+    std::deque<std::shared_ptr<PendingBc>> bc_inflight_;  // render thread: queued order, recorded when done
+    std::mutex bc_mutex_, etc_mutex_;
+    std::condition_variable bc_cv_;
+    bool bc_stop_ = false;
+    std::thread bc_thread_;
+    uint64_t image_serial_ = 0, bc_queued_ = 0;
+
+    void EnsureBcThread() {
+        if (!bc_thread_.joinable()) bc_thread_ = std::thread([this] { BcThreadLoop(); });
+    }
+    void StopBcThread() {
+        {
+            std::lock_guard<std::mutex> lk(bc_mutex_);
+            bc_stop_ = true;
+        }
+        bc_cv_.notify_all();
+        if (bc_thread_.joinable()) bc_thread_.join();
+    }
+    void BcThreadLoop() {
+        for (;;) {
+            std::shared_ptr<PendingBc> p;
+            {
+                std::unique_lock<std::mutex> lk(bc_mutex_);
+                bc_cv_.wait(lk, [this] { return bc_stop_ || !bc_queue_.empty(); });
+                if (bc_queue_.empty()) return;  // stop requested and nothing left to convert
+                p = bc_queue_.front();
+                bc_queue_.pop_front();
+            }
+            ConvertPending(*p);
+            p->done.store(true, std::memory_order_release);
+        }
+    }
+
+    // Converts the BC jobs (BC -> RGBA8 or ETC2) with WorkPool; the tasks of each job write its own output.
+    void ConvertJobs(const std::vector<BcJob>& jobs) {
+        if (jobs.empty()) return;
+        std::vector<BcTask> tasks;
+        for (uint32_t j = 0; j < jobs.size(); j++) {
+            const BcJob& job = jobs[j];
             const int band = std::max(2, 4096 / std::max(1, job.bx));  // ~4096 blocks per task
             for (int z = 0; z < job.depth; z++)
                 for (int r = 0; r < job.brows && r * 4 < job.h; r += band)
-                    bc_tasks_.push_back({j, z, r, std::min(band, job.brows - r)});
+                    tasks.push_back({j, z, r, std::min(band, job.brows - r)});
         }
-        WorkPool::Get().Run(bc_tasks_.size(), [this](size_t i) {
+        WorkPool::Get().Run(tasks.size(), [&](size_t i) {
             thread_local std::vector<uint8_t> rgba;
-            const BcTask& k = bc_tasks_[i];
-            const BcJob& j = bc_jobs_[k.job];
+            const BcTask& k = tasks[i];
+            const BcJob& j = jobs[k.job];
             const int bpb = (j.kind == BcKind::BC1 || j.kind == BcKind::BC4U || j.kind == BcKind::BC4S) ? 8 : 16;
             const uint8_t* blocks = j.blocks + (size_t(k.z) * size_t(j.brows) + size_t(k.row0)) * size_t(j.bx) * bpb;
             const int y0 = k.row0 * 4, hh = std::min(j.h - y0, k.rows * 4);
@@ -2426,28 +2492,156 @@ private:
                     break;
             }
         });
-        for (const BcJob& j : bc_jobs_) {
-            bc_converted_levels_++;
-            if (!j.key) continue;
-            if (etc_cache_bytes_ + j.out_bytes > kEtcCacheLimit) {
-                etc_cache_.clear();
-                etc_cache_bytes_ = 0;
+    }
+
+    // Background thread: deswizzles every level, takes what the ETC2 cache has, converts the rest.
+    void ConvertPending(PendingBc& p) {
+        p.result.assign(p.result_bytes, 0);
+        size_t blocks_total = 0;
+        for (const PendingLevel& L : p.levels) blocks_total += L.n;
+        std::vector<uint8_t> blocks(blocks_total);
+        std::vector<BcJob> jobs;
+        std::vector<uint64_t> keys;  // parallel to jobs: the ETC2 cache key (0: not cached)
+        size_t off = 0;
+        for (const PendingLevel& L : p.levels) {
+            uint8_t* dst = blocks.data() + off;
+            off += L.n;
+            if (L.linear)
+                memcpy(dst, p.raw.data() + L.src_off, L.n);
+            else
+                DeswizzleLevel(dst, p.raw.data() + L.src_off, L.lay);
+            uint8_t* out = p.result.data() + L.out_off;
+            uint64_t key = 0;
+            if (p.to != BcTo::Decoded) {
+                key = HashStep(Fnv(dst, L.n), uint64_t(p.nvn_format) << 48 ^ uint64_t(L.w) << 24 ^ uint64_t(L.h) ^
+                                                  uint64_t(L.depth) << 40) | 1;
+                std::lock_guard<std::mutex> lk(etc_mutex_);
+                auto hit = etc_cache_.find(key);
+                if (hit != etc_cache_.end() && hit->second.size() == L.out_bytes) {
+                    memcpy(out, hit->second.data(), L.out_bytes);
+                    p.cache_hits++;
+                    continue;
+                }
             }
-            auto& e = etc_cache_[j.key];
-            etc_cache_bytes_ += j.out_bytes - e.size();
-            e.assign(j.out, j.out + j.out_bytes);
+            jobs.push_back(BcJob{p.kind, p.to, p.punch, dst, L.bx, L.brows, L.w, L.h, L.depth, out, L.out_bytes, key});
+            keys.push_back(key);
         }
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        bc_convert_ms_ += ms;
-        static int logged = 0;
-        if (ms > 30 && logged++ < 20)
-            LOGI(kTag, "texture conversion: %zu levels in %zu tasks, %.1f ms (%d workers + render thread)",
-                 bc_jobs_.size(), bc_tasks_.size(), ms, WorkPool::Get().Workers());
-        bc_jobs_.clear();
+        p.raw.clear();
+        p.raw.shrink_to_fit();  // the copy of the game memory is no longer needed
+        ConvertJobs(jobs);
+        if (p.to != BcTo::Decoded) {
+            std::lock_guard<std::mutex> lk(etc_mutex_);
+            for (size_t i = 0; i < jobs.size(); i++) {
+                if (!keys[i]) continue;
+                const BcJob& j = jobs[i];
+                if (etc_cache_bytes_ + j.out_bytes > kEtcCacheLimit) {
+                    etc_cache_.clear();
+                    etc_cache_bytes_ = 0;
+                }
+                auto& e = etc_cache_[j.key];
+                etc_cache_bytes_ += j.out_bytes - e.size();
+                e.assign(j.out, j.out + j.out_bytes);
+            }
+        }
+    }
+
+    // Render thread: queues a BC texture for the background thread. The image is not drawn until PumpBcUploads
+    // has recorded its copy (a re-upload keeps the old contents meanwhile).
+    void EnqueueBcUpload(Image& img, const TexRef& t, const TextureLayout& layout, const FormatInfo& fi) {
+        auto p = std::make_shared<PendingBc>();
+        p->addr = t.addr;
+        p->serial = img.serial = ++image_serial_;
+        p->nvn_format = img.nvn_format;
+        p->kind = img.bc;
+        p->to = img.bc_to;
+        p->punch = EtcHasPunchThrough(img.nvn_format);
+        const uint8_t* base = reinterpret_cast<const uint8_t*>(t.addr);
+        p->raw.assign(base, base + layout.total);
+        size_t out = 0;
+        for (int layer = 0; layer < img.layers; layer++)
+            for (int lv = 0; lv < img.levels; lv++) {
+                const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
+                PendingLevel L;
+                L.src_off = size_t(layer) * layout.layer_stride + l.offset;
+                L.n = size_t(l.row_bytes) * l.rows * l.depth;
+                L.lay = l;
+                L.linear = layout.linear;
+                L.w = std::max(1, l.width);
+                L.h = std::max(1, l.height);
+                L.depth = l.depth;
+                L.bx = l.row_bytes / std::max(1, fi.bytes_per_block);
+                L.brows = l.rows;
+                L.out_bytes = ConvertedLevelBytes(img, L.w, L.h, L.depth);
+                out = (out + 15) & ~size_t(15);
+                L.out_off = out;
+                out += L.out_bytes;
+                VkBufferImageCopy r{};
+                r.bufferOffset = L.out_off;
+                r.imageSubresource = {img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT ? img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT
+                                                                                 : img.aspect,
+                                      uint32_t(lv), uint32_t(layer), 1};
+                r.imageExtent = {uint32_t(L.w), uint32_t(img.type == VK_IMAGE_TYPE_1D ? 1 : L.h), uint32_t(L.depth)};
+                p->regions.push_back(r);
+                p->levels.push_back(L);
+            }
+        p->result_bytes = out;
+        img.pending = true;
+        EnsureBcThread();
+        {
+            std::lock_guard<std::mutex> lk(bc_mutex_);
+            bc_queue_.push_back(p);
+        }
+        bc_cv_.notify_one();
+        bc_inflight_.push_back(p);
+        if (++bc_queued_ <= 24)
+            LOGI(kTag, "texture %dx%d format %d: converting in the background (%zu bytes)", img.width, img.height,
+                 img.nvn_format, out);
+    }
+
+    // Render thread, once per frame: records the copies of converted textures, in the order they were queued,
+    // at most kBcFrameBudget bytes per frame. A result whose texture was replaced or released is dropped.
+    void PumpBcUploads() {
+        if (bc_inflight_.empty()) return;
+        size_t budget = kBcFrameBudget;
+        bool ended = false;
+        while (!bc_inflight_.empty() && bc_inflight_.front()->done.load(std::memory_order_acquire)) {
+            std::shared_ptr<PendingBc> p = bc_inflight_.front();
+            auto it = images_.find(p->addr);
+            if (it == images_.end() || !it->second.pending || it->second.serial != p->serial) {
+                bc_inflight_.pop_front();
+                continue;
+            }
+            const size_t bytes = p->result_bytes;
+            if (bytes > budget && budget < kBcFrameBudget) break;  // the rest waits for the next frame
+            if (StreamRemaining() < bytes + 1024) break;           // the stream is reset next frame
+            if (!ended) {
+                EndRendering();
+                ended = true;
+            }
+            Image& img = it->second;
+            const VkDeviceSize off = StreamAlloc(bytes, 16);
+            memcpy(stream_ptr_ + off, p->result.data(), bytes);
+            std::vector<VkBufferImageCopy> regions = p->regions;
+            for (VkBufferImageCopy& r : regions) r.bufferOffset += off;
+            Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            Rec([regions = std::move(regions), buf = stream_, image = img.image](VkCommandBuffer cb) {
+                vkCmdCopyBufferToImage(cb, buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
+                                       regions.data());
+            });
+            img.written = true;
+            img.pending = false;
+            uploads_++;
+            bc_converted_levels_ += p->levels.size();
+            bc_cache_hits_ += p->cache_hits;
+            budget = budget > bytes ? budget - bytes : 0;
+            std::vector<uint8_t>().swap(p->result);  // free the CPU copy of the converted texels
+            bc_inflight_.pop_front();
+        }
     }
 
     // Fills a sampled texture from game memory: deswizzle each level/layer into the stream, then copy.
     void Upload(Image& img, const TexRef& t) {
+        if (img.pending) return;  // already on its way (a re-upload while the first conversion runs)
         img.uploaded = true;
         img.cpu_source = true;
         img.sample_hash = SampleHash(t);
@@ -2473,66 +2667,31 @@ private:
             LogOnce("upload-size", "texture too large to upload in one go (%zu bytes)", needed);
             return;
         }
+        if (img.bc != BcKind::None) {
+            EnqueueBcUpload(img, t, layout, fi);
+            return;
+        }
         Begin();
         EndRendering();
         if (StreamRemaining() < needed + 1024) Flush();
         std::vector<VkBufferImageCopy> regions;
         const uint8_t* base = reinterpret_cast<const uint8_t*>(t.addr);
-        if (img.bc != BcKind::None) {  // room for every level's deswizzled blocks (converted after the loop)
-            size_t scratch = 0;
-            for (int layer = 0; layer < img.layers; layer++)
-                for (int lv = 0; lv < img.levels; lv++) {
-                    const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
-                    scratch += size_t(l.row_bytes) * l.rows * l.depth;
-                }
-            if (bc_scratch_.size() < scratch) bc_scratch_.resize(scratch);
-        }
         size_t scratch_used = 0;
+        (void)scratch_used;
         for (int layer = 0; layer < img.layers; layer++) {
             for (int lv = 0; lv < img.levels; lv++) {
                 const LevelLayout& l = layout.levels[size_t(lv + img.mip_skip)];
                 const size_t n = size_t(l.row_bytes) * l.rows * l.depth;
                 const uint8_t* src = base + size_t(layer) * layout.layer_stride + l.offset;
+                VkDeviceSize off = StreamAlloc(n, 16);
+                if (layout.linear)
+                    memcpy(stream_ptr_ + off, src, n);
+                else
+                    DeswizzleLevel(stream_ptr_ + off, src, l);
                 VkBufferImageCopy r{};
-                if (img.bc != BcKind::None) {
-                    // Deswizzle the blocks now; they are converted into the upload buffer after the loop (RunBcJobs),
-                    // in parallel, or copied from the ETC2 cache.
-                    uint8_t* blocks = bc_scratch_.data() + scratch_used;
-                    scratch_used += n;
-                    if (layout.linear)
-                        memcpy(blocks, src, n);
-                    else
-                        DeswizzleLevel(blocks, src, l);
-                    const int w = std::max(1, l.width), h = std::max(1, l.height);
-                    const size_t out_bytes = ConvertedLevelBytes(img, w, h, l.depth);
-                    VkDeviceSize off = StreamAlloc(out_bytes, 16);
-                    BcJob job{img.bc, img.bc_to, EtcHasPunchThrough(img.nvn_format), blocks,
-                              int(l.row_bytes / std::max(1, fi.bytes_per_block)), int(l.rows), w, h, l.depth,
-                              stream_ptr_ + off, out_bytes, 0};
-                    bool cached = false;
-                    if (img.bc_to != BcTo::Decoded) {
-                        job.key = HashStep(Fnv(blocks, n), uint64_t(img.nvn_format) << 48 ^ uint64_t(w) << 24 ^
-                                                               uint64_t(h) ^ uint64_t(l.depth) << 40) | 1;
-                        auto hit = etc_cache_.find(job.key);
-                        if (hit != etc_cache_.end() && hit->second.size() == out_bytes) {
-                            memcpy(job.out, hit->second.data(), out_bytes);
-                            bc_cache_hits_++;
-                            cached = true;
-                        }
-                    }
-                    if (!cached) bc_jobs_.push_back(job);
-                    r.bufferOffset = off;
-                    bc_decoded_bytes_ += n;
-                } else {
-                    VkDeviceSize off = StreamAlloc(n, 16);
-                    if (layout.linear)
-                        memcpy(stream_ptr_ + off, src, n);
-                    else
-                        DeswizzleLevel(stream_ptr_ + off, src, l);
-                    r.bufferOffset = off;
-                    r.bufferRowLength = uint32_t(l.row_bytes / fi.bytes_per_block * fi.block_w);
-                    r.bufferImageHeight = uint32_t(l.rows * fi.block_h);
-                }
+                r.bufferOffset = off;
+                r.bufferRowLength = uint32_t(l.row_bytes / fi.bytes_per_block * fi.block_w);
+                r.bufferImageHeight = uint32_t(l.rows * fi.block_h);
                 r.imageSubresource = {img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT ? img.aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT
                                                                                  : img.aspect,
                                       uint32_t(lv), uint32_t(layer), 1};
@@ -2541,7 +2700,6 @@ private:
                 regions.push_back(r);
             }
         }
-        RunBcJobs();  // the converted texels are in the stream before the copy is recorded
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         Rec([regions = std::move(regions), buf = stream_, image = img.image](VkCommandBuffer cb) {
             vkCmdCopyBufferToImage(cb, buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(regions.size()),
@@ -3818,123 +3976,6 @@ private:
     // ======================================================================================================
     // shaders, layouts, pipelines
     // ======================================================================================================
-    // ---- persistent shader cache (dsr-native-mali fork) ---------------------------------------------------------
-    // Guest shaders are translated once; the SPIR-V and shader info are kept in cache/shader_cache.bin and reused by
-    // later runs (no translation stutter on a slow CPU). The key is the guest code hash plus the translation options.
-    // The file belongs to one build (DSR_BUILD_ID): a new build starts a fresh file, so a changed translator never
-    // meets old SPIR-V. Damaged or foreign files are discarded.
-    struct CachedShader {
-        std::vector<uint32_t> spirv;
-        shader::ShaderInfo info;
-    };
-    std::unordered_map<std::vector<uint32_t>, CachedShader, VecHash> shader_disk_;
-    bool shader_cache_writable_ = false;
-    uint64_t shader_cache_hits_ = 0, shader_cache_misses_ = 0;
-
-    std::string ShaderCachePath() const {
-        const std::string& dir = dsr::GetRuntime().config.cache_dir;
-        return dir.empty() ? std::string() : dir + "/shader_cache.bin";
-    }
-    static void ShaderCacheHeader(char magic[8], char build[16]) {
-        memcpy(magic, "DSRSC03", 8);
-        memset(build, 0, 16);
-#ifdef DSR_BUILD_ID
-        strncpy(build, DSR_BUILD_ID, 15);
-#endif
-    }
-    static void WriteShaderRecord(FILE* f, const std::vector<uint32_t>& key, const std::vector<uint32_t>& spirv,
-                                  const shader::ShaderInfo& info) {
-        const uint32_t nwords = uint32_t(spirv.size()), info_size = uint32_t(sizeof(info));
-        fwrite(key.data(), 4, key.size(), f);
-        fwrite(&nwords, 4, 1, f);
-        fwrite(&info_size, 4, 1, f);
-        fwrite(&info, sizeof(info), 1, f);
-        fwrite(spirv.data(), 4, spirv.size(), f);
-    }
-    void RewriteShaderCache(const std::string& path) {
-        FILE* f = fopen(path.c_str(), "wb");
-        if (!f) {
-            shader_cache_writable_ = false;
-            return;
-        }
-        char magic[8], build[16];
-        ShaderCacheHeader(magic, build);
-        fwrite(magic, 1, 8, f);
-        fwrite(build, 1, 16, f);
-        for (const auto& e : shader_disk_) WriteShaderRecord(f, e.first, e.second.spirv, e.second.info);
-        fclose(f);
-        shader_cache_writable_ = true;
-    }
-    void LoadShaderCache() {
-        static_assert(std::is_trivially_copyable<shader::ShaderInfo>::value, "ShaderInfo must be plain data");
-        const std::string path = ShaderCachePath();
-        if (path.empty()) return;
-        char magic[8], build[16];
-        ShaderCacheHeader(magic, build);
-        bool damaged = true;
-        if (FILE* f = fopen(path.c_str(), "rb")) {
-            char m[8], b[16];
-            const bool header = fread(m, 1, 8, f) == 8 && memcmp(m, magic, 8) == 0 && fread(b, 1, 16, f) == 16 &&
-                                memcmp(b, build, 16) == 0;
-            if (header) {
-                damaged = false;
-                for (;;) {
-                    uint32_t key[6], nwords = 0, info_size = 0;
-                    if (fread(key, 4, 6, f) != 6) break;  // end of file
-                    if (fread(&nwords, 4, 1, f) != 1 || fread(&info_size, 4, 1, f) != 1) {
-                        damaged = true;
-                        break;
-                    }
-                    CachedShader c;
-                    if (info_size != sizeof(c.info) || nwords == 0 || nwords > (1u << 22)) {
-                        damaged = true;
-                        break;
-                    }
-                    c.spirv.resize(nwords);
-                    if (fread(&c.info, sizeof(c.info), 1, f) != 1 || fread(c.spirv.data(), 4, nwords, f) != nwords) {
-                        damaged = true;
-                        break;
-                    }
-                    shader_disk_.emplace(std::vector<uint32_t>(key, key + 6), std::move(c));
-                }
-            }
-            fclose(f);
-        }
-        if (damaged) {
-            shader_disk_.clear();
-            RewriteShaderCache(path);
-        } else {
-            shader_cache_writable_ = true;
-        }
-        LOGI(kTag, "shader cache: %zu translated shaders loaded (%s)", shader_disk_.size(), path.c_str());
-    }
-    void AppendShaderCache(const std::vector<uint32_t>& key, const shader::TranslateResult& r) {
-        if (!shader_cache_writable_) return;
-        if (FILE* f = fopen(ShaderCachePath().c_str(), "ab")) {
-            WriteShaderRecord(f, key, r.spirv, r.info);
-            fclose(f);
-        }
-    }
-    // settings skip_shaders: fragment shaders listed here are not drawn.
-    void ParseSkipShaders() {
-        const std::string& list = dsr::GetRuntime().config.skip_shaders;
-        size_t pos = 0;
-        while (pos < list.size()) {
-            const size_t comma = list.find(',', pos);
-            const std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-            pos = comma == std::string::npos ? list.size() : comma + 1;
-            if (!tok.empty()) skip_fs_.insert(strtoull(tok.c_str(), nullptr, 16));
-        }
-        skip_postfx_ = dsr::GetRuntime().config.skip_postfx;
-        no_depth_snapshot_ = dsr::GetRuntime().config.no_depth_snapshot;
-        if (!skip_fs_.empty() || skip_postfx_ || no_depth_snapshot_)
-            LOGI(kTag, "speed hacks: skip_shaders %zu, skip_postfx %d, no_depth_snapshot %d", skip_fs_.size(),
-                 int(skip_postfx_), int(no_depth_snapshot_));
-    }
-    std::unordered_set<uint64_t> skip_fs_;
-    bool skip_postfx_ = false, no_depth_snapshot_ = false;
-    int main_rt_w_ = 0, main_rt_h_ = 0;  // the main picture's size (see skip_postfx)
-
     Shader* GetShader(const ShaderCode& code, const shader::TranslateOptions& opt) {
         const uint32_t parts[6] = {uint32_t(code.hash), uint32_t(code.hash >> 32), opt.int_attrib_mask,
                                    opt.signed_attrib_mask, uint32_t(opt.gl_depth_range),
@@ -3951,21 +3992,7 @@ private:
             return &it->second;
         }
         Shader& s = shaders_[key];
-        shader::TranslateResult r;
-        const auto disk = shader_disk_.find(key);
-        if (disk != shader_disk_.end()) {
-            r.ok = true;
-            r.spirv = disk->second.spirv;
-            r.info = disk->second.info;
-            shader_cache_hits_++;
-        } else {
-            r = shader::Translate(code.code.data(), code.code.size(), opt);
-            shader_cache_misses_++;
-            if (r.ok) {
-                shader_disk_[key] = CachedShader{r.spirv, r.info};
-                AppendShaderCache(key, r);
-            }
-        }
+        shader::TranslateResult r = shader::Translate(code.code.data(), code.code.size(), opt);
         if (!r.ok) {
             s.error = r.error;
             if (shader_failures_logged_++ < 24)
@@ -4257,22 +4284,6 @@ private:
         if (p.count <= 0 || p.instances <= 0) return;
         if (!begin_rendering_ && !rp_fallback_) return Skip("no dynamic rendering");
         if (!st_.program[0]) return Skip("no vertex program bound");
-        if (st_.num_rt > 0) {
-            const int tw = st_.rts[0].tex.width, th = st_.rts[0].tex.height;
-            // The main picture's size: the largest 16:9 colour target seen (1280x720, or 824x464 at render_scale 0.65).
-            if (tw >= 512 && th > 0 && tw > main_rt_w_ && std::fabs(float(tw) / float(th) - 16.0f / 9.0f) < 0.12f) {
-                main_rt_w_ = tw;
-                main_rt_h_ = th;
-            }
-            // speed hack (settings skip_postfx): the quarter and eighth size post-process targets (320x180 and 160x90 at
-            // 720p; 206x116 and 103x58 at 824x464). Nothing is skipped before the main size is known.
-            if (skip_postfx_ && main_rt_w_ > 0) {
-                auto near = [](int a, int b) { return std::abs(a - b) <= 1; };
-                const bool quarter = near(tw, (main_rt_w_ + 3) / 4) && near(th, (main_rt_h_ + 3) / 4);
-                const bool eighth = near(tw, (main_rt_w_ + 7) / 8) && near(th, (main_rt_h_ + 7) / 8);
-                if (quarter || eighth) return Skip("post-process target (skip_postfx)");
-            }
-        }
         const DeviceModes modes = GetDeviceModes();
 
         // ---- vertex layout and shader options --------------------------------------------------------------
@@ -4305,7 +4316,6 @@ private:
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
         if (!vs->ok || (st_.program[1] && !fs->ok)) return Skip("shader not translated");
-        if (st_.program[1] && skip_fs_.count(st_.program[1]->hash)) return Skip("fragment shader listed in skip_shaders");
 
         VertexInput& vin = scratch_vin_;
         vin.bindings.clear();
@@ -4405,7 +4415,6 @@ private:
                 }
                 if (depth == img) {
                     // Sampling the bound depth buffer (soft particles, fog): read a snapshot copy instead.
-                    if (no_depth_snapshot_) return Skip("depth sampling skipped (no_depth_snapshot)");
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
                 }
