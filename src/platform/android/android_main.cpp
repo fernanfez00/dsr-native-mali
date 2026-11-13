@@ -305,8 +305,9 @@ void LogDeviceInfo() {
 }
 
 #define PRESENT_MODE_HELP                                                                                    \
-    "# present_mode: how finished frames reach the screen: mailbox (newest frame shown at each refresh,\n"   \
-    "# lower latency), fifo (classic vsync queue), fifo_relaxed (vsync, tears when a frame is late),\n"      \
+    "# present_mode: how finished frames reach the screen: fifo (vsync queue, the default: every frame shown in\n" \
+    "# order, steady pacing), mailbox (newest frame shown at each refresh, lower latency; can stutter or flicker\n" \
+    "# on devices below 60 fps), fifo_relaxed (vsync, tears when a frame is late),\n"                         \
     "# immediate (no vsync, can tear). Falls back to fifo if the device does not offer the mode.\n"
 
 bool g_face_by_position = false;  // `face_buttons` setting (see KeyToButton)
@@ -414,7 +415,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "# audio_smooth: 1 = release audio buffers to the game at a smoothed pace (experimental)\n"
                     "audio_smooth = 0\n"
                     PRESENT_MODE_HELP
-                    "present_mode = mailbox\n"
+                    "present_mode = fifo\n"
+                    "settings_version = 2\n"
                     FACE_BUTTONS_HELP
                     "face_buttons = label\n"
                     "# lrz_workaround: 1 = refresh depth buffers written by shaders before reuse (experiment, off)\n"
@@ -437,6 +439,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_gpu_driver = false, have_bc_enabler = false;
         bool have_touch = false, have_aspect = false;
+        int settings_version = 1;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             char key[64], value[64];
@@ -515,7 +518,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "present_mode")) {
                 cfg->present_mode = value;
                 have_present_mode = true;
-            }
+            } else if (!strcmp(key, "settings_version")) settings_version = v;
+            else if (!strcmp(key, "mali_barriers")) cfg->mali_barriers = v != 0;
             else if (!strcmp(key, "gamma")) {
                 const float g = float(atof(value));
                 cfg->gamma = g >= 0.5f && g <= 3.0f ? g : 1.0f;
@@ -525,10 +529,34 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             }
         }
         fclose(f);
+        // Version 2: the presentation default changed from mailbox to fifo. Files from before carry the old default
+        // (written by the app), so `present_mode = mailbox` there becomes fifo, once; a choice made later is kept.
+        if (settings_version < 2) {
+            std::string text;
+            if (FILE* r = fopen(path.c_str(), "r")) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), r)) > 0) text.append(buf, n);
+                fclose(r);
+            }
+            const std::string from = "present_mode = mailbox";
+            const size_t at = text.find("\n" + from);
+            const bool migrate = at != std::string::npos || text.rfind(from, 0) == 0;
+            if (migrate) text.replace(at != std::string::npos ? at + 1 : 0, from.size(), "present_mode = fifo");
+            text += "\nsettings_version = 2\n";
+            if (FILE* w = fopen(path.c_str(), "w")) {
+                fwrite(text.data(), 1, text.size(), w);
+                fclose(w);
+                if (migrate) {
+                    cfg->present_mode = "fifo";
+                    LOGI(kTag, "settings: present_mode mailbox -> fifo (the new default) in %s", path.c_str());
+                }
+            }
+        }
         // Settings added since the file was written are appended with their defaults, so they can be found.
         if (!have_present_mode)
             if (FILE* w = fopen(path.c_str(), "a")) {
-                fputs("\n" PRESENT_MODE_HELP "present_mode = mailbox\n", w);
+                fputs("\n" PRESENT_MODE_HELP "present_mode = fifo\n", w);
                 fclose(w);
                 LOGI(kTag, "settings: added present_mode to %s", path.c_str());
             }
@@ -568,9 +596,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          path.c_str(), cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "", cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
-    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
+    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, mali_barriers %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
          int(cfg->bc_enabler), cfg->language.c_str(), cfg->render_scale, cfg->shadow_compare,
-         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), cfg->present_mode.c_str(),
+         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), cfg->present_mode.c_str(),
          cfg->hole_test);
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",

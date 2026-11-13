@@ -522,9 +522,9 @@ public final class SettingsMenu {
         choice("exposure", Strings.t("bright_t"), Strings.t("changes_now"), new String[] {"1.0", "1.37", "1.7"},
                 new String[] {Strings.t("bright_orig"), Strings.t("bright_def"), Strings.t("bright_more")}, "1.37");
         choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
-                new String[] {"mailbox", "fifo"},
-                new String[] {Strings.t("present_mailbox") + " " + Strings.t("default_mark"), Strings.t("present_vsync")},
-                "mailbox");
+                new String[] {"fifo", "mailbox"},
+                new String[] {Strings.t("present_vsync") + " " + Strings.t("default_mark"), Strings.t("present_mailbox")},
+                "fifo");
 
         toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
 

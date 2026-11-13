@@ -476,6 +476,9 @@ struct Image {
     // Was an attachment of a render pass with no barrier on it since: a later pass that uses it again in the same
     // layout needs a barrier first (see BeginRendering).
     bool attach_unsynced = false;
+    // PassEndBarrier made this render target readable by fragment shaders only (mali_barriers); a vertex shader
+    // that samples it needs one more barrier first (VertexReadBarrier).
+    bool frag_only_sync = false;
     // Depth written by a fragment shader (gl_FragDepth) since the image was last attached: see LrzTouch.
     bool depth_exported = false;
     // Ever had depth written by a fragment shader (gl_FragDepth): depth tests against it are done in the shader.
@@ -1508,6 +1511,9 @@ private:
             begin_rendering_ = reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(device_, "vkCmdBeginRendering"));
             end_rendering_ = reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(device_, "vkCmdEndRendering"));
         }
+        mali_barriers_ = dsr::GetRuntime().config.mali_barriers;
+        if (mali_barriers_)
+            LOGI(kTag, "settings mali_barriers = 1: narrow layout barriers, render targets readable when their pass ends");
         if (!begin_rendering_ || !end_rendering_) {
             // Older drivers (Vulkan 1.1, e.g. Adreno 6xx on Android 10/11): render pass and framebuffer objects.
             begin_rendering_ = nullptr;
@@ -3127,9 +3133,29 @@ private:
         ReapRetired();
     }
 
+    // Stages that use an image in `layout` (settings mali_barriers, from PR #13). A layout transition then holds back
+    // only these stages of the commands after it, not ALL_COMMANDS: on a tile-based GPU (Mali) a barrier whose
+    // destination includes the vertex stage makes the next pass's vertex/tiler work wait for the previous pass's
+    // fragment work, which otherwise overlap. The source stays ALL_COMMANDS: every earlier writer is waited for.
+    static VkPipelineStageFlags StagesUsing(VkImageLayout layout) {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+                return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: return VK_PIPELINE_STAGE_TRANSFER_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            default: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+    }
+    bool mali_barriers_ = false;  // settings mali_barriers
+    uint64_t vertex_read_barriers_ = 0;
     void RawBarrier(VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
                     uint32_t levels = 1, uint32_t layers = 1) {
         barriers_++;
+        const VkPipelineStageFlags dst_stages = mali_barriers_ ? StagesUsing(to) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -3139,9 +3165,8 @@ private:
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = image;
         b.subresourceRange = {aspect, 0, levels, 0, layers};
-        Rec([b](VkCommandBuffer cb) {
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                                 nullptr, 1, &b);
+        Rec([b, dst_stages](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dst_stages, 0, 0, nullptr, 0, nullptr, 1, &b);
         });
     }
     void Transition(Image& img, VkImageLayout to) {
@@ -3150,6 +3175,49 @@ private:
         RawBarrier(img.image, img.aspect, img.layout, to, uint32_t(img.levels), uint32_t(img.layers));
         img.layout = to;
         img.attach_unsynced = false;
+        img.frag_only_sync = false;  // the barrier above waited for every earlier write
+    }
+    // mali_barriers: a colour target the pass wrote becomes readable by fragment shaders as soon as the pass ends (a
+    // barrier outside the pass), so a later draw that samples it needs no pass break to make it readable. Only
+    // fragment shaders: fragment -> vertex dependencies are what stop a tile-based GPU from running the next pass's
+    // vertex work while this pass shades; a vertex shader sampling a render target is rare (VertexReadBarrier).
+    void PassEndBarrier(Image& img) {
+        barriers_++;
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = {img.aspect, 0, uint32_t(img.levels), 0, uint32_t(img.layers)};
+        Rec([b](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                 0, nullptr, 0, nullptr, 1, &b);
+        });
+        img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        img.attach_unsynced = false;
+        img.frag_only_sync = true;
+    }
+    // Outside a render pass: lets vertex shaders read a render target PassEndBarrier released to fragment shaders only.
+    void VertexReadBarrier(Image& img) {
+        barriers_++;
+        vertex_read_barriers_++;
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = {img.aspect, 0, uint32_t(img.levels), 0, uint32_t(img.layers)};
+        Rec([b](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &b);
+        });
+        img.frag_only_sync = false;
     }
 
     // ======================================================================================================
@@ -3555,6 +3623,11 @@ private:
             });
             rendering_ = false;
             pass_breaks_[line]++;
+            if (mali_barriers_)
+                for (size_t i = 0; i < pass_color_count_; i++) {
+                    Image* c = pass_colors_[i];
+                    if (c && !c->clear_pending && c->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) PassEndBarrier(*c);
+                }
         }
     }
 
@@ -4165,6 +4238,11 @@ private:
                     // Sampling the bound depth buffer (soft particles, fog): read a snapshot copy instead.
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
+                }
+                if (stage == 0 && img->frag_only_sync && img->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+                    !img->clear_pending) {  // mali_barriers: released to fragment shaders only
+                    EndRendering();
+                    VertexReadBarrier(*img);
                 }
                 if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || img->clear_pending) {
                     if (rendering_) {
@@ -5794,8 +5872,9 @@ private:
                 for (uint64_t& c : video_cadence_) c = 0;
             }
         }
-        LOGI(kTag, "last 10 s: %llu render passes started, %llu image barriers", (unsigned long long)render_passes_,
-             (unsigned long long)barriers_);
+        LOGI(kTag, "last 10 s: %llu render passes started, %llu image barriers (%llu for vertex-shader reads of render targets)",
+             (unsigned long long)render_passes_, (unsigned long long)barriers_, (unsigned long long)vertex_read_barriers_);
+        vertex_read_barriers_ = 0;
         render_passes_ = barriers_ = 0;
         if (!pass_breaks_.empty()) {
             std::vector<std::pair<uint64_t, int>> v;

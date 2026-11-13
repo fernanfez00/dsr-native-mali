@@ -28,7 +28,7 @@ struct RuntimeConfig {
     bool auto_capture = false;    // diagnostics: save a few frame captures automatically during play
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
     float gamma = 1.0f;           // extra display gamma applied through the game's brightness ramp (> 1 lifts shadows)
-    std::string present_mode = "mailbox";  // swapchain present mode: mailbox, fifo, fifo_relaxed, immediate (FIFO if unsupported)
+    std::string present_mode = "fifo";  // swapchain present mode: fifo (vsync, default), mailbox, fifo_relaxed, immediate (FIFO if unsupported)
     bool lrz_workaround = false;
     bool shader_depth_test = true;  // depth tests against gl_FragDepth-written depth done in the shader (square holes)  // refresh depth buffers written by gl_FragDepth before reuse (square holes)
     int hole_test = 0;  // square-hole diagnostics (bits): 1 = effects without depth test, 2 = uncompressed depth, 4 = no write-masked colour targets, 8 = one render pass per draw into reduced-size targets, 16 = depth textures read from copies, 64 = D24S8 depth, 128 = CPU waits for GPU idle at each slot, 256 = uncompressed colour targets, 512 = no null colour attachments, 1024 = effect shaders output debug values, 2048 = no depth test in reduced-size effect passes
@@ -67,6 +67,9 @@ struct RuntimeConfig {
     // render_pass_objects = 1: VkRenderPass / VkFramebuffer objects even when the driver has dynamic rendering
     // (diagnostics for drivers whose dynamic rendering misbehaves, e.g. Mali flicker reports).
     bool render_pass_objects = false;
+    // mali_barriers = 1 (PR #13): narrow layout-transition barriers (destination = the stages that use the image) and
+    // render targets made readable when their pass ends, so a tile-based GPU (Mali) can overlap passes. Off by default.
+    bool mali_barriers = false;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
