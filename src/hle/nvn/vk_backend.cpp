@@ -1264,11 +1264,19 @@ public:
             SetWindowFrameRate();
         Image* src = tex.valid ? FindImage(tex) : nullptr;
         if (src && !(src->written && !IsDepthFormat(src->nvn_format))) src = nullptr;
-        // The swapchain is sized for the game's frame (see EnsureSwapchain): a frame of another size remakes it.
-        if (src && dsr::GetRuntime().config.compositor_scaling && (src->width != frame_w_ || src->height != frame_h_)) {
-            frame_w_ = src->width;
-            frame_h_ = src->height;
-            if (swapchain_) swapchain_dirty_ = true;
+        if (src) {
+            presented_addrs_.insert(src->addr);  // the textures the game presents: hud_full_res only redirects draws to them
+            HudUpdateSize(*src);
+        }
+        // The swapchain is sized for the game's frame (see EnsureSwapchain): a frame of another size remakes it. With
+        // hud_full_res it is sized for the screen-sized HUD image instead (the picture then needs no stretching).
+        if (src && (hud_w_ > 0 || dsr::GetRuntime().config.compositor_scaling)) {
+            const int tw = hud_w_ > 0 ? hud_w_ : src->width, th = hud_w_ > 0 ? hud_h_ : src->height;
+            if (tw != frame_w_ || th != frame_h_) {
+                frame_w_ = tw;
+                frame_h_ = th;
+                if (swapchain_) swapchain_dirty_ = true;
+            }
         }
         if (!EnsureSwapchain()) return;
         // Acquire, copy and present run on the recorder after this frame's commands; the render thread goes on.
@@ -1277,14 +1285,19 @@ public:
         WarmupStep(25.0);
         PumpBcUploads();
         PresentJob pj;
-        if (src) {
-            Transition(*src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            pj.src = src->image;
-            pj.sw = src->width;
-            pj.sh = src->height;
+        // hud_full_res: this frame's HUD went into hud_img_ (the enlarged 3D picture plus the HUD): show that one.
+        Image* shown = src;
+        if (src && hud_started_ && hud_img_.image && src->addr == hud_src_addr_) shown = &hud_img_;
+        hud_started_ = false;
+        if (shown) {
+            if (shown == &hud_img_) EndRendering();
+            Transition(*shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            pj.src = shown->image;
+            pj.sw = shown->width;
+            pj.sh = shown->height;
             if (!logged_first_image_) {
                 logged_first_image_ = true;
-                LOGI(kTag, "showing the game's frame: %dx%d (format %d)", pj.sw, pj.sh, src->nvn_format);
+                LOGI(kTag, "showing the game's frame: %dx%d (format %d)", pj.sw, pj.sh, shown->nvn_format);
             }
         }
         barriers_ += 2;
@@ -1992,6 +2005,8 @@ private:
         // display hardware, as a rule) instead of the GPU clearing and filling a screen-sized image every frame
         // (2340x1080 from 1560x720 on the OnePlus 6T: twice the pixels of the game's own frame).
         const VkExtent2D window_extent = extent;
+        win_w_ = int(window_extent.width);  // hud_full_res sizes its image from this (see HudUpdateSize)
+        win_h_ = int(window_extent.height);
         if (dsr::GetRuntime().config.compositor_scaling && frame_w_ > 0 && frame_h_ > 0 && extent.width && extent.height) {
             const double k = std::max(double(frame_w_) / extent.width, double(frame_h_) / extent.height);
             if (k < 0.999) {
@@ -4718,6 +4733,26 @@ private:
         // Keep enough streaming space for this draw so nothing allocated below is lost to a flush.
         if (StreamRemaining() < (16ull << 20)) Flush();
 
+        // ---- hud_full_res: the game's HUD and menus drawn at the screen's resolution -------------------------
+        // The first blended 2D draw on the game's presented frame enlarges the 3D picture made so far into a
+        // screen-sized image (hud_img_); that draw and every later one on the frame go into that image instead, with
+        // their viewport and scissor scaled, and Present shows it. Draws that cannot be redirected stay in the frame.
+        bool hud_redirect = false, hud_boxed = false;
+        if (hud_w_ > 0 && !colors.empty() && colors[0] && HudTarget(colors, depth)) {
+            Image* f = colors[0];
+            const int cls = HudClass(p, vin);
+            if (!hud_started_ && cls) {
+                hud_started_ = HudStart(*f);
+                if (!hud_started_) hud_w_ = 0;  // could not make the image: the rest of this frame is drawn as before
+            }
+            if (hud_started_ && hud_src_addr_ == f->addr) {
+                hud_redirect = true;
+                hud_boxed = cls == 1 && hud_box_w_ > 0;
+                colors[0] = &hud_img_;
+                hud_redirected_++;
+            }
+        }
+
         Phase(1);
         // ---- textures (uploads and layout changes happen outside rendering) ---------------------------------
         std::vector<TexWrite>& tex_writes = scratch_tex_writes_;  // members: no allocation per draw
@@ -5199,17 +5234,21 @@ private:
         d.layout = layout;
         d.set_layouts[0] = vsl;
         d.set_layouts[1] = fsl;
-        DynamicState(extent, modes, &d.dyn);
+        // Redirected HUD draws are laid out in the game's frame (hud_src_w_ x hud_src_h_) and scaled up afterwards.
+        const int ew = hud_redirect ? hud_src_w_ : int(extent.width), eh = hud_redirect ? hud_src_h_ : int(extent.height);
+        DynamicState(hud_redirect ? VkExtent2D{uint32_t(ew), uint32_t(eh)} : extent, modes, &d.dyn);
         // Other aspect ratios (aspect_ratio): the game lays its HUD and menus out for 1280x720 and stretches that
         // over the whole (wider or narrower) frame. Every draw made with that 1280x720 2D projection (several
         // shaders: quads, text, bars) goes into a centred 16:9 box instead: 1280x720 in the middle of wider frames,
         // the full width and 9/16 of it high on narrower ones, so the HUD keeps its shape and layout. Full-screen
         // quads (fades, dimming behind menus) still cover the whole frame.
-        if (hud_box_w_ && int(extent.height) == dsr::GetRuntime().config.render_height &&
-            int(extent.width) == dsr::GetRuntime().config.render_width && HudBoxed(p, vin)) {
-            const int fh = int(extent.height);
-            const float sx = float(hud_box_w_) / float(extent.width), sy = float(hud_box_h_) / float(fh);
-            const float x0 = float((int(extent.width) - hud_box_w_) / 2), y0 = float((fh - hud_box_h_) / 2);
+        const bool boxed = hud_redirect ? hud_boxed
+                                        : (hud_box_w_ && int(extent.height) == dsr::GetRuntime().config.render_height &&
+                                           int(extent.width) == dsr::GetRuntime().config.render_width && HudBoxed(p, vin));
+        if (boxed) {
+            const int fh = eh;
+            const float sx = float(hud_box_w_) / float(ew), sy = float(hud_box_h_) / float(fh);
+            const float x0 = float((ew - hud_box_w_) / 2), y0 = float((fh - hud_box_h_) / 2);
             d.dyn.vp.x = x0 + d.dyn.vp.x * sx;
             d.dyn.vp.width *= sx;
             d.dyn.vp.y = y0 + d.dyn.vp.y * sy;
@@ -5219,14 +5258,14 @@ private:
             VkRect2D& sc = d.dyn.sc;
             float l = x0, t = y0, r = x0 + float(hud_box_w_), b = y0 + float(hud_box_h_);
             if (st_.scissor_set && st_.scissor[2] > 0 && st_.scissor[3] > 0 &&
-                !(st_.scissor[0] <= 0 && st_.scissor[1] <= 0 && st_.scissor[2] >= int(extent.width) &&
-                  st_.scissor[3] >= int(extent.height))) {
+                !(st_.scissor[0] <= 0 && st_.scissor[1] <= 0 && st_.scissor[2] >= ew &&
+                  st_.scissor[3] >= eh)) {
                 const float kx = float(hud_box_w_) / 1280.0f, ky = float(hud_box_h_) / 720.0f;
                 l = std::max(l, x0 + float(st_.scissor[0]) * kx);
                 t = std::max(t, y0 + float(st_.scissor[1]) * ky);
                 // The game cuts its rectangles at the frame's edges (960 on a 4:3 frame, 540 high at a 0.75 render
                 // scale), which in layout units are not the layout's edges: one ending there runs to them.
-                const float right = st_.scissor[0] + st_.scissor[2] >= float(extent.width) - 0.5f
+                const float right = st_.scissor[0] + st_.scissor[2] >= float(ew) - 0.5f
                                         ? 1280.0f : st_.scissor[0] + st_.scissor[2];
                 const float bottom = st_.scissor[1] + st_.scissor[3] >= float(fh) - 0.5f
                                          ? 720.0f : st_.scissor[1] + st_.scissor[3];
@@ -5237,6 +5276,19 @@ private:
             sc.offset = {il, it};
             sc.extent = {uint32_t(std::max(0, ir - il)), uint32_t(std::max(0, ib - it))};
             hud_draws_boxed_++;
+        }
+        if (hud_redirect) {  // the game's frame -> the screen-sized image
+            const float kx = float(hud_w_) / float(ew), ky = float(hud_h_) / float(eh);
+            d.dyn.vp.x *= kx;
+            d.dyn.vp.width *= kx;
+            d.dyn.vp.y *= ky;
+            d.dyn.vp.height *= ky;
+            VkRect2D& sc2 = d.dyn.sc;
+            const int l = int(std::floor(float(sc2.offset.x) * kx)), t = int(std::floor(float(sc2.offset.y) * ky));
+            const int r = std::min(hud_w_, int(std::ceil(float(sc2.offset.x + int(sc2.extent.width)) * kx)));
+            const int b = std::min(hud_h_, int(std::ceil(float(sc2.offset.y + int(sc2.extent.height)) * ky)));
+            sc2.offset = {l, t};
+            sc2.extent = {uint32_t(std::max(0, r - l)), uint32_t(std::max(0, b - t))};
         }
         d.push[0] = st_.alpha_ref;
         d.indexed = use_indices;
@@ -6812,6 +6864,97 @@ private:
         if (full) hud_full_screen_++;
         return !full;
     }
+    // ---- hud_full_res ------------------------------------------------------------------------------------------
+    // Size of the screen-sized HUD image for a game frame (0 = the feature is off, or the screen is not much bigger
+    // than the frame): the frame's aspect ratio fitted into the window.
+    void HudUpdateSize(const Image& f) {
+        int w = 0, h = 0;
+        if (dsr::GetRuntime().config.hud_full_res && win_w_ > 0 && win_h_ > 0 && f.width > 0 && f.height > 0) {
+            const double k = std::min(double(win_w_) / f.width, double(win_h_) / f.height);
+            if (k >= 1.2) {
+                w = int(std::lround(f.width * k));
+                h = int(std::lround(f.height * k));
+            }
+        }
+        hud_w_ = w;
+        hud_h_ = h;
+        hud_src_w_ = w ? f.width : 0;
+        hud_src_h_ = w ? f.height : 0;
+    }
+    // Whether a draw renders only to a game frame the game presents (at its frame size, no depth, a plain view): the
+    // draws hud_full_res can redirect.
+    bool HudTarget(const std::vector<Image*>& colors, const Image* depth) const {
+        const Image* f = colors[0];
+        if (depth || !f || f->width != hud_src_w_ || f->height != hud_src_h_ || f->levels != 1 || f->layers != 1)
+            return false;
+        if (st_.rts.empty() || st_.rts[0].view_format || st_.rts[0].layer || st_.rts[0].level) return false;
+        for (size_t i = 1; i < colors.size(); i++)
+            if (colors[i]) return false;
+        return presented_addrs_.count(f->addr) != 0;
+    }
+    // 0 = not a blended 2D HUD / menu draw; 1 = one that stays in the 16:9 box (hud_box); 2 = a blending full-screen
+    // one (fades, dimming behind menus). Same tests as HudBoxed.
+    int HudClass(const DrawParams& p, const VertexInput& vin) {
+        float sx, sy;
+        if (!Projection2D(&sx, &sy) || std::fabs(sx - 2.0f / 1280.0f) > 1e-6f || std::fabs(sy + 2.0f / 720.0f) > 1e-6f)
+            return 0;
+        if (!(st_.color.blend_enable & 1)) return 0;
+        float x0, x1, y0, y1;
+        if (!DrawBounds(p, vin, &x0, &x1, &y0, &y1)) return 1;
+        return (x0 <= 2.0f && x1 >= 1278.0f && y0 <= 2.0f && y1 >= 718.0f) ? 2 : 1;
+    }
+    // The screen-sized image for the game frame `f`, made (again) when its size or format changed.
+    bool HudEnsureImage(const Image& f) {
+        if (hud_img_.image && hud_img_.width == hud_w_ && hud_img_.height == hud_h_ && hud_img_.vk_format == f.vk_format)
+            return true;
+        if (hud_img_.image) DestroyImage(hud_img_);  // retired: destroyed once the GPU is done with it
+        Image h;
+        h.vk_format = f.vk_format;
+        h.nvn_format = f.nvn_format;
+        h.target = f.target;
+        h.type = VK_IMAGE_TYPE_2D;
+        h.width = hud_w_;
+        h.height = hud_h_;
+        h.aspect = f.aspect;
+        h.features = f.features;
+        if (!(h.features & VK_FORMAT_FEATURE_BLIT_DST_BIT) || !(h.features & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) return false;
+        if (!AllocImage(h, false, false, &h.image, &h.memory)) return false;
+        hud_img_ = std::move(h);
+        LOGI(kTag, "hud_full_res: HUD and menus drawn at %dx%d (the game's frame is %dx%d)", hud_w_, hud_h_, f.width,
+             f.height);
+        return true;
+    }
+    // Enlarges the 3D picture drawn so far on `f` into the HUD image; the frame's HUD draws then go there.
+    bool HudStart(Image& f) {
+        if (!HudEnsureImage(f)) return false;
+        EndRendering();
+        Transition(f, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(hud_img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit b{};
+        b.srcSubresource = {f.aspect, 0, 0, 1};
+        b.srcOffsets[1] = {f.width, f.height, 1};
+        b.dstSubresource = {hud_img_.aspect, 0, 0, 1};
+        b.dstOffsets[1] = {hud_w_, hud_h_, 1};
+        const VkFilter filter = (dsr::GetRuntime().config.scale_filter == 0 ||
+                                 !(f.features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+                                    ? VK_FILTER_NEAREST
+                                    : VK_FILTER_LINEAR;
+        Rec([b, filter, si = f.image, di = hud_img_.image](VkCommandBuffer cb) {
+            vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, di, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                           filter);
+        });
+        hud_img_.written = true;
+        hud_src_addr_ = f.addr;
+        return true;
+    }
+    Image hud_img_;                 // the game's frame enlarged to the screen, with the HUD drawn on it
+    int hud_w_ = 0, hud_h_ = 0;     // its size (0 = hud_full_res not in use)
+    int hud_src_w_ = 0, hud_src_h_ = 0;  // the game frame size it was sized from
+    uint64_t hud_src_addr_ = 0;     // the game frame the current picture was enlarged from
+    bool hud_started_ = false;      // this frame's HUD goes into hud_img_ (reset by Present)
+    uint64_t hud_redirected_ = 0;
+    std::unordered_set<uint64_t> presented_addrs_;  // frame textures the game has presented
+    int win_w_ = 0, win_h_ = 0;     // the window's size (EnsureSwapchain)
     bool bc_patched_ = false, bc_forced_ = false;
     bool mip_skip_ = false;      // settings texture_mip_skip
     uint64_t mip_skipped_ = 0;   // images created without their top level
