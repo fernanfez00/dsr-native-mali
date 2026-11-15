@@ -289,6 +289,25 @@ final class Strings {
         put("up_0", "Plain scaling", "Agrandissement simple", "Einfache Skalierung", "Ingrandimento semplice", "Escalado simple", "Escala simples");
         put("up_1", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)");
         put("up_2", "FSR 1 + sharpening", "FSR 1 + netteté", "FSR 1 + Schärfe", "FSR 1 + nitidezza", "FSR 1 + nitidez", "FSR 1 + nitidez");
+        put("fxaa_t", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA");
+        put("fxaa_n",
+                "Smooths jagged edges of the 3D picture before it is enlarged (FXAA 3.11). Fast is the light one, for Mali GPUs. Needs 'HUD at full resolution'.",
+                "Lisse les bords crénelés de l'image 3D avant son agrandissement (FXAA 3.11). Rapide est la version légère, pour les GPU Mali. Demande 'HUD en pleine résolution'.",
+                "Glättet Kanten des 3D-Bilds vor dem Vergrößern (FXAA 3.11). Schnell ist die leichte Variante für Mali-GPUs. Braucht 'HUD in voller Auflösung'.",
+                "Leviga i bordi seghettati dell'immagine 3D prima dell'ingrandimento (FXAA 3.11). Veloce è la versione leggera, per GPU Mali. Richiede 'HUD a piena risoluzione'.",
+                "Suaviza los bordes dentados de la imagen 3D antes de ampliarla (FXAA 3.11). Rápido es la versión ligera, para GPU Mali. Necesita 'HUD a resolución completa'.",
+                "Suaviza as bordas serrilhadas da imagem 3D antes de ampliá-la (FXAA 3.11). Rápido é a versão leve, para GPUs Mali. Precisa de 'HUD em resolução total'.");
+        put("fxaa_fast", "Fast (Mali)", "Rapide (Mali)", "Schnell (Mali)", "Veloce (Mali)", "Rápido (Mali)", "Rápido (Mali)");
+        put("fxaa_quality", "Quality", "Qualité", "Qualität", "Qualità", "Calidad", "Qualidade");
+        put("hudmax_t", "Picture height limit", "Hauteur maximale de l'image", "Maximale Bildhöhe", "Altezza massima immagine", "Altura máxima de la imagen", "Altura máxima da imagem");
+        put("hudmax_n",
+                "Caps the enlarged picture and HUD at this many lines; Android stretches it to the screen. Fewer pixels for FSR and the HUD on a weak GPU (Mali). Needs 'HUD at full resolution'.",
+                "Limite l'image agrandie et le HUD à ce nombre de lignes ; Android l'étire à l'écran. Moins de pixels pour FSR et le HUD sur un GPU faible (Mali). Demande 'HUD en pleine résolution'.",
+                "Begrenzt das vergrößerte Bild samt HUD auf so viele Zeilen; Android streckt es auf den Bildschirm. Weniger Pixel für FSR und HUD auf schwacher GPU (Mali). Braucht 'HUD in voller Auflösung'.",
+                "Limita l'immagine ingrandita e l'HUD a queste righe; Android la estende allo schermo. Meno pixel per FSR e HUD su una GPU debole (Mali). Richiede 'HUD a piena risoluzione'.",
+                "Limita la imagen ampliada y el HUD a estas líneas; Android la estira a la pantalla. Menos píxeles para FSR y el HUD en una GPU débil (Mali). Necesita 'HUD a resolución completa'.",
+                "Limita a imagem ampliada e o HUD a este número de linhas; o Android estica para a tela. Menos pixels para o FSR e o HUD numa GPU fraca (Mali). Precisa de 'HUD em resolução total'.");
+        put("hudmax_0", "No limit", "Sans limite", "Kein Limit", "Nessun limite", "Sin límite", "Sem limite");
         put("sharp_t", "FSR sharpness", "Netteté FSR", "FSR-Schärfe", "Nitidezza FSR", "Nitidez de FSR", "Nitidez do FSR");
         put("sharp_n", "RCAS sharpening after the upscaling (only with 'FSR 1 + sharpening').",
                 "Netteté RCAS après l'agrandissement (seulement avec 'FSR 1 + netteté').",

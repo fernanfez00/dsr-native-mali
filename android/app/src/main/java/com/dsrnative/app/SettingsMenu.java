@@ -427,6 +427,12 @@ public final class SettingsMenu {
         choice("fsr_sharpness", Strings.t("sharp_t"), Strings.t("sharp_n") + " " + Strings.t("changes_now"),
                 new String[] {"100", "85", "70", "50", "30", "0"},
                 new String[] {"100%", "85%", "70%", "50%", "30%", "0%"}, "70");
+        choice("fxaa", Strings.t("fxaa_t"), Strings.t("fxaa_n") + " " + Strings.t("changes_now"),
+                new String[] {"0", "1", "2"},
+                new String[] {Strings.t("q_off"), Strings.t("fxaa_fast"), Strings.t("fxaa_quality")}, "0");
+        choice("hud_max_height", Strings.t("hudmax_t"), Strings.t("hudmax_n") + " " + Strings.t("changes_now"),
+                new String[] {"0", "1080", "720", "540"},
+                new String[] {Strings.t("hudmax_0"), "1080", "720", "540"}, "0");
         toggle("hud_full_res", Strings.t("hudres_t"), Strings.t("hudres_n") + " " + Strings.t("changes_now"), "1", "0",
                 "1");
         choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
