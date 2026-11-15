@@ -67,6 +67,10 @@ struct RuntimeConfig {
     // bc_astc = 1: BC1 and BC3 textures are re-encoded as ASTC 4x4 instead (GPUs with ASTC LDR: all Mali). 8 bits per
     // texel: twice the size of BC1 as ETC2, the same as BC3; BC1 stays close to the source and alpha is native.
     bool bc_astc = false;
+    // astc_block: the ASTC block size (4, 6 or 8) of converted textures: 8, 3.56 or 2 bits per texel. bc5_astc = 1:
+    // BC5 (normal maps) also becomes ASTC (luminance + alpha, two weight planes) instead of staying RG8 (16 bits).
+    int astc_block = 4;
+    bool bc5_astc = false;
     // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = the game's function as Vulkan's;
     // 1 = operands swapped; 2 = always 1 (shadowed); 3 = always 0 (lit)).
     int shadow_compare = 0;
