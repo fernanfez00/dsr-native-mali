@@ -48,6 +48,7 @@
 #include "common/profiler.h"
 #include "common/platform.h"
 #include "hle/nvn/backend.h"
+#include "hle/nvn/astc_encode.h"
 #include "hle/nvn/bc_decode.h"
 #include "hle/nvn/etc_encode.h"
 #include "hle/nvn/parallel.h"
@@ -162,6 +163,8 @@ VkFormat SrgbTwin(VkFormat f) {
         case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK: return VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
         case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK: return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
         case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK: return VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+        case VK_FORMAT_ASTC_4x4_UNORM_BLOCK: return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+        case VK_FORMAT_ASTC_4x4_SRGB_BLOCK: return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
         default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -328,10 +331,12 @@ VkFormat BcDecodedFormat(int f) {
     }
 }
 
-// What a BC texture becomes on a GPU without BC support: decoded (RGBA8, R8, RG8, RGBA16F) or re-encoded as ETC2.
-enum class BcTo : uint8_t { Decoded, Etc2, Etc2Rgba8 };
+// What a BC texture becomes on a GPU without BC support: decoded (RGBA8, R8, RG8, RGBA16F) or re-encoded as ETC2 or
+// ASTC 4x4 (settings bc_astc: BC1 and BC3).
+enum class BcTo : uint8_t { Decoded, Etc2, Etc2Rgba8, Astc };
 VkFormat ConvertedFormat(int f, BcTo to) {
     const bool srgb = f == 69 || f == 70 || f == 71 || f == 72 || f == 78;
+    if (to == BcTo::Astc && IsAstcEncodable(f)) return srgb ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
     if (to == BcTo::Etc2 && IsEtcEncodable(f)) {
         if (EtcHasPunchThrough(f)) return srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
         return srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
@@ -1608,6 +1613,7 @@ private:
         VkPhysicalDeviceFeatures en{};
         en.textureCompressionBC = have.features.textureCompressionBC;
         en.textureCompressionETC2 = have.features.textureCompressionETC2;
+        en.textureCompressionASTC_LDR = have.features.textureCompressionASTC_LDR;
         en.samplerAnisotropy = have.features.samplerAnisotropy;
         en.shaderImageGatherExtended = have.features.shaderImageGatherExtended;
         en.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -1625,9 +1631,9 @@ private:
         VkPhysicalDeviceFeatures2 en2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         en2.features = en;
         if (v13) en2.pNext = &en13;
-        LOGI(kTag, "features: dynamic rendering %d, BC textures %d, ETC2 textures %d, anisotropy %d, gather-extended %d",
+        LOGI(kTag, "features: dynamic rendering %d, BC textures %d, ETC2 textures %d, ASTC textures %d, anisotropy %d, gather-extended %d",
              int(en13.dynamicRendering), int(en.textureCompressionBC), int(en.textureCompressionETC2),
-             int(en.samplerAnisotropy), int(en.shaderImageGatherExtended));
+             int(en.textureCompressionASTC_LDR), int(en.samplerAnisotropy), int(en.shaderImageGatherExtended));
 
         float prio = 1.0f;
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -2183,6 +2189,14 @@ private:
     // 4x4 block; decoded RGBA8 is 4x larger), which saves memory and texture bandwidth on Mali.
     BcTo BcTarget(int nvn_format) {
         const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        // bc_astc: ASTC 4x4 for BC1 and BC3 when the GPU has it (all Mali); a format it cannot take falls through to
+        // the ETC2 choice below.
+        if (c.bc_astc && features_.textureCompressionASTC_LDR && IsAstcEncodable(nvn_format)) {
+            VkFormatProperties p;
+            vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, BcTo::Astc), &p);
+            if ((p.optimalTilingFeatures & need) == need) return BcTo::Astc;
+        }
         if (!features_.textureCompressionETC2 || !c.bc_etc2) return BcTo::Decoded;
         BcTo to = BcTo::Decoded;
         if (IsEtcEncodable(nvn_format)) to = BcTo::Etc2;
@@ -2190,7 +2204,6 @@ private:
         if (to == BcTo::Decoded) return to;
         VkFormatProperties p;
         vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, to), &p);
-        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
         return (p.optimalTilingFeatures & need) == need ? to : BcTo::Decoded;
     }
 
@@ -2227,7 +2240,8 @@ private:
                 chosen = f;
                 feats = p.optimalTilingFeatures;
                 LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: %s on upload (Vulkan format %d)",
-                     nvn_format, to == BcTo::Decoded ? "decoded" : "re-encoded as ETC2", int(f));
+                     nvn_format, to == BcTo::Decoded ? "decoded" : to == BcTo::Astc ? "re-encoded as ASTC 4x4" : "re-encoded as ETC2",
+                     int(f));
                 if (BcKindOf(nvn_format) == BcKind::BC7 || BcKindOf(nvn_format) == BcKind::BC6H_S ||
                     BcKindOf(nvn_format) == BcKind::BC6H_U)
                     LOGW(kTag, "NVN format %d: decoding not implemented yet, shown as grey", nvn_format);
@@ -2430,7 +2444,7 @@ private:
         img.tex = t.tex;
         img.vk_format = vf;
         if (BcKindOf(t.tex.format) != BcKind::None)  // a BC texture in a format the GPU has instead: converted
-            for (BcTo to : {BcTo::Etc2, BcTo::Etc2Rgba8, BcTo::Decoded})
+            for (BcTo to : {BcTo::Astc, BcTo::Etc2, BcTo::Etc2Rgba8, BcTo::Decoded})
                 if (vf == ConvertedFormat(t.tex.format, to) && (to == BcTo::Decoded || vf != BcDecodedFormat(t.tex.format))) {
                     img.bc = BcKindOf(t.tex.format);
                     img.bc_to = to;
@@ -2537,6 +2551,7 @@ private:
         switch (img.bc_to) {
             case BcTo::Etc2: return EtcLevelBytes(w, h, d);
             case BcTo::Etc2Rgba8: return EtcRgba8LevelBytes(w, h, d);
+            case BcTo::Astc: return AstcLevelBytes(w, h, d);
             default: return size_t(w) * size_t(h) * size_t(d) * size_t(BcDecodedBytes(img.bc));
         }
     }
@@ -2554,7 +2569,7 @@ private:
         int bx, brows, w, h, depth;
         uint8_t* out;
         size_t out_bytes;
-        uint64_t key;  // ETC2 cache key (0: not cached)
+        uint64_t key;  // ETC2 / ASTC cache key (0: not cached)
     };
     struct BcTask {
         uint32_t job;
@@ -2666,6 +2681,11 @@ private:
                     else
                         EncodeEtc2Rgba8(out + size_t(k.row0) * size_t(bxn) * 16, rgba.data(), j.w, hh, 1);
                     break;
+                case BcTo::Astc:
+                    rgba.resize(size_t(j.w) * size_t(hh) * 4);
+                    BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
+                    EncodeAstc4x4(out + size_t(k.row0) * size_t(bxn) * 16, rgba.data(), j.w, hh, 1);
+                    break;
             }
         });
     }
@@ -2689,7 +2709,7 @@ private:
             uint8_t* out = p.result.data() + L.out_off;
             uint64_t key = 0;
             if (p.to != BcTo::Decoded) {
-                key = HashStep(Fnv(dst, L.n), uint64_t(p.nvn_format) << 48 ^ uint64_t(L.w) << 24 ^ uint64_t(L.h) ^
+                key = HashStep(Fnv(dst, L.n), uint64_t(p.nvn_format) << 48 ^ uint64_t(p.to) << 44 ^ uint64_t(L.w) << 24 ^ uint64_t(L.h) ^
                                                   uint64_t(L.depth) << 40) | 1;
                 std::lock_guard<std::mutex> lk(etc_mutex_);
                 auto hit = etc_cache_.find(key);
