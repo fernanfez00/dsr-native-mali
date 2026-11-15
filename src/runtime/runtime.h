@@ -64,6 +64,9 @@ struct RuntimeConfig {
     // (4x smaller than RGBA8, but lossier: off by default).
     bool bc_etc2 = true;
     bool bc3_etc2 = false;
+    // bc_astc = 1: BC1 and BC3 textures are re-encoded as ASTC 4x4 instead (GPUs with ASTC LDR: all Mali). 8 bits per
+    // texel: twice the size of BC1 as ETC2, the same as BC3; BC1 stays close to the source and alpha is native.
+    bool bc_astc = false;
     // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = the game's function as Vulkan's;
     // 1 = operands swapped; 2 = always 1 (shadowed); 3 = always 0 (lit)).
     int shadow_compare = 0;
