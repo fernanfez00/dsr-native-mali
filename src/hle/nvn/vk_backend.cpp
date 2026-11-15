@@ -346,10 +346,10 @@ VkFormat AstcFormat(int block, bool srgb) {
         default: return srgb ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
     }
 }
-VkFormat ConvertedFormat(int f, BcTo to) {
+VkFormat ConvertedFormat(int f, BcTo to, int astc_block = 0) {  // astc_block 0: settings astc_block
     const bool srgb = f == 69 || f == 70 || f == 71 || f == 72 || f == 78;
-    if (to == BcTo::Astc && IsAstcEncodable(f)) return AstcFormat(AstcBlock(), srgb);
-    if (to == BcTo::AstcLa && IsAstcLaEncodable(f)) return AstcFormat(AstcBlock(), false);
+    if (to == BcTo::Astc && IsAstcEncodable(f)) return AstcFormat(astc_block ? astc_block : AstcBlock(), srgb);
+    if (to == BcTo::AstcLa && IsAstcLaEncodable(f)) return AstcFormat(astc_block ? astc_block : AstcBlock(), false);
     if (to == BcTo::Etc2 && IsEtcEncodable(f)) {
         if (EtcHasPunchThrough(f)) return srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
         return srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
@@ -518,6 +518,7 @@ struct Image {
     bool fragdepth_written = false;
     BcKind bc = BcKind::None;  // block-compressed texture converted on upload (GPU without BC support)
     BcTo bc_to = BcTo::Decoded;  // ... into what
+    int astc_block = 4;          // ... block size when that is ASTC (settings astc_block, 4 for small / UI textures)
     bool storage = false;      // created with VK_IMAGE_USAGE_STORAGE_BIT
     bool mutable_fmt = false;  // created with VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT (views in `twin` allowed)
     uint64_t attach_gen = 0;  // times attached to a render pass (`hole_test` 16 copies)
@@ -2261,7 +2262,7 @@ private:
                 LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: %s on upload (Vulkan format %d)",
                      nvn_format,
                      to == BcTo::Decoded ? "decoded"
-                     : to == BcTo::Astc ? (AstcBlock() == 6 ? "re-encoded as ASTC 6x6" : AstcBlock() == 8 ? "re-encoded as ASTC 8x8" : "re-encoded as ASTC 4x4")
+                     : to == BcTo::Astc ? (AstcBlock() == 6 ? "re-encoded as ASTC 6x6 (world textures; the HUD, text and small textures 4x4)" : AstcBlock() == 8 ? "re-encoded as ASTC 8x8 (world textures; the HUD, text and small textures 4x4)" : "re-encoded as ASTC 4x4")
                      : to == BcTo::AstcLa ? "re-encoded as ASTC luminance+alpha (dual plane)"
                                           : "re-encoded as ETC2",
                      int(f));
@@ -2477,6 +2478,23 @@ private:
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
         img.layers = std::max(1, layout.layers);
+        // astc_block 6 / 8 is for the game's world art: textures with a long mip chain. The HUD, menus and text
+        // (a single level: atlases, fonts, icons, backgrounds) and small textures stay 4x4, where they stay sharp.
+        if (img.bc != BcKind::None && (img.bc_to == BcTo::Astc || img.bc_to == BcTo::AstcLa)) {
+            int blk = AstcBlock();
+            const bool world_art = img.levels >= 4 && std::min(t.tex.width, t.tex.height) >= 128 &&
+                                   t.tex.target != kTarget3D && t.tex.target != kTarget1D && t.tex.target != kTarget1DArray;
+            if (blk > 4 && !world_art) blk = 4;
+            img.astc_block = blk;
+            if (blk != AstcBlock()) {
+                vf = ConvertedFormat(t.tex.format, img.bc_to, blk);
+                img.vk_format = vf;
+                astc_ui_kept_++;
+                if (astc_ui_kept_ <= 8)
+                    LOGI(kTag, "ASTC %dx%d requested; texture %dx%d format %d (%d levels) is not world art: ASTC 4x4",
+                         AstcBlock(), AstcBlock(), t.tex.width, t.tex.height, t.tex.format, img.levels);
+            }
+        }
         // texture_mip_skip: big BC textures (the game's art; never drawn into) without their most detailed level.
         if (mip_skip_ && BcKindOf(t.tex.format) != BcKind::None && img.levels >= 2 && t.tex.width >= 512 &&
             t.tex.height >= 512 && t.tex.target != kTarget3D && t.tex.target != kTarget1D &&
@@ -2575,7 +2593,7 @@ private:
             case BcTo::Etc2: return EtcLevelBytes(w, h, d);
             case BcTo::Etc2Rgba8: return EtcRgba8LevelBytes(w, h, d);
             case BcTo::Astc:
-            case BcTo::AstcLa: return AstcLevelBytes(w, h, d, AstcBlock());
+            case BcTo::AstcLa: return AstcLevelBytes(w, h, d, img.astc_block);
             default: return size_t(w) * size_t(h) * size_t(d) * size_t(BcDecodedBytes(img.bc));
         }
     }
@@ -2628,6 +2646,7 @@ private:
         int nvn_format = 0;
         BcKind kind = BcKind::None;
         BcTo to = BcTo::Decoded;
+        int astc = 4;  // ASTC block size of this texture
         bool punch = false;
         std::vector<uint8_t> raw;                // a copy of the texture's guest memory (the game may rewrite it)
         std::vector<PendingLevel> levels;
@@ -2745,7 +2764,7 @@ private:
             uint8_t* out = p.result.data() + L.out_off;
             uint64_t key = 0;
             if (p.to != BcTo::Decoded) {
-                key = HashStep(Fnv(dst, L.n), uint64_t(p.nvn_format) << 48 ^ uint64_t(p.to) << 44 ^ uint64_t(AstcBlock()) << 36 ^ uint64_t(L.w) << 24 ^ uint64_t(L.h) ^
+                key = HashStep(Fnv(dst, L.n), uint64_t(p.nvn_format) << 48 ^ uint64_t(p.to) << 44 ^ uint64_t(p.astc) << 36 ^ uint64_t(L.w) << 24 ^ uint64_t(L.h) ^
                                                   uint64_t(L.depth) << 40) | 1;
                 std::lock_guard<std::mutex> lk(etc_mutex_);
                 auto hit = etc_cache_.find(key);
@@ -2756,7 +2775,7 @@ private:
                 }
             }
             jobs.push_back(BcJob{p.kind, p.to, p.punch, dst, L.bx, L.brows, L.w, L.h, L.depth, out, L.out_bytes, key,
-                                 AstcBlock()});
+                                 p.astc});
             keys.push_back(key);
         }
         p.raw.clear();
@@ -2787,6 +2806,7 @@ private:
         p->nvn_format = img.nvn_format;
         p->kind = img.bc;
         p->to = img.bc_to;
+        p->astc = img.astc_block;
         p->punch = EtcHasPunchThrough(img.nvn_format);
         const uint8_t* base = reinterpret_cast<const uint8_t*>(t.addr);
         p->raw.assign(base, base + layout.total);
@@ -2981,7 +3001,7 @@ private:
     VkFormat ViewFormat(const Image& img, int view_nvn) {
         if (!view_nvn || view_nvn == img.nvn_format) return VK_FORMAT_UNDEFINED;
         if (img.bc != BcKind::None && BcKindOf(view_nvn) != BcKind::None) {  // converted: compare converted formats
-            const VkFormat f = ConvertedFormat(view_nvn, img.bc_to);
+            const VkFormat f = ConvertedFormat(view_nvn, img.bc_to, img.astc_block);
             if (f == img.vk_format) return VK_FORMAT_UNDEFINED;
             if (f == img.twin && f != VK_FORMAT_UNDEFINED) return f;
         }
@@ -7679,6 +7699,7 @@ private:
     bool bc_patched_ = false, bc_forced_ = false;
     bool mip_skip_ = false;      // settings texture_mip_skip
     bool shadow_skip_logged_ = false;
+    int astc_ui_kept_ = 0;
     // skip_fs (settings): hex fragment-program hashes separated by commas
     bool skip_parsed_ = false;
     std::unordered_set<uint64_t> skip_fs_, skip_logged_;
