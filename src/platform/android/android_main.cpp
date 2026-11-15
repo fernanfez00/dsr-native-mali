@@ -472,7 +472,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "game_hooks")) cfg->game_hooks = v != 0;
             else if (!strcmp(key, "skip_intro")) cfg->skip_intro = v != 0;
             else if (!strcmp(key, "render_pass_objects")) cfg->render_pass_objects = v != 0;
-            else if (!strcmp(key, "render_scale")) cfg->render_scale = std::clamp(float(atof(value)), 0.5f, 1.0f);
+            else if (!strcmp(key, "render_scale")) cfg->render_scale = std::clamp(float(atof(value)), 0.30f, 1.0f);
             else if (!strcmp(key, "language")) {
                 // The game's languages (nn::settings codes it recognises); the settings menu lists the same.
                 static const char* const kLanguages[] = {"en-US", "fr", "de", "it", "es", "pt", "ru", "ja", "ko",
@@ -526,6 +526,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "settings_version")) settings_version = v;
             else if (!strcmp(key, "mali_barriers")) cfg->mali_barriers = v != 0;
             else if (!strcmp(key, "performance_mode")) cfg->performance_mode = v != 0;
+            else if (!strcmp(key, "shadow_quality")) cfg->shadow_quality = std::clamp(v, 0, 3);
+            else if (!strcmp(key, "low_effects")) cfg->low_effects = v != 0;
             else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "scale_filter")) cfg->scale_filter = std::clamp(v, 0, 1);
             else if (!strcmp(key, "gamma")) {
@@ -619,7 +621,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");
-    LOGI(kTag, "settings: hud_full_res %d", int(cfg->hud_full_res));
+    LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d", int(cfg->hud_full_res), cfg->shadow_quality,
+         int(cfg->low_effects));
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
