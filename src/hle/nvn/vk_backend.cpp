@@ -1287,10 +1287,25 @@ public:
         PresentJob pj;
         // hud_full_res: this frame's HUD went into hud_img_ (the enlarged 3D picture plus the HUD): show that one.
         Image* shown = src;
-        if (src && hud_started_ && hud_img_.image && src->addr == hud_src_addr_) shown = &hud_img_;
+        if (src) {
+            if (hud_final_ && hud2_img_.image) {
+                shown = &hud2_img_;  // the final pass ran on the enlarged picture, at the screen's size
+            } else if (hud_started_ && hud_img_.image && src->addr == hud_t_addr_) {
+                shown = &hud_img_;   // the HUD frame is presented as it is
+            } else if (hud_started_ && ++hud_orphans_ >= 3) {
+                // The HUD went into the enlarged picture but nothing turned it into the presented frame: stop using it.
+                hud_sources_.erase(hud_t_addr_);
+                hud_orphans_ = 0;
+                LOGW(kTag, "hud_full_res: the HUD frame @%llx never reached the screen: not redirected any more",
+                     (unsigned long long)hud_t_addr_);
+            }
+            if (shown != src) hud_orphans_ = 0;
+        }
         hud_started_ = false;
+        hud_final_ = false;
+        hud_cand_addr_ = 0;
         if (shown) {
-            if (shown == &hud_img_) EndRendering();
+            if (shown == &hud_img_ || shown == &hud2_img_) EndRendering();
             Transition(*shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             pj.src = shown->image;
             pj.sw = shown->width;
@@ -4734,22 +4749,33 @@ private:
         if (StreamRemaining() < (16ull << 20)) Flush();
 
         // ---- hud_full_res: the game's HUD and menus drawn at the screen's resolution -------------------------
-        // The first blended 2D draw on the game's presented frame enlarges the 3D picture made so far into a
-        // screen-sized image (hud_img_); that draw and every later one on the frame go into that image instead, with
-        // their viewport and scissor scaled, and Present shows it. Draws that cannot be redirected stay in the frame.
-        bool hud_redirect = false, hud_boxed = false;
+        // The game draws its HUD (blended 2D draws) on a target of its frame size (`T`), and a final pass then turns T
+        // into the frame it presents. The first HUD draw on T enlarges the 3D picture made so far into a screen-sized
+        // image (hud_img_); that draw and every later one on T go into that image instead, with their viewport and
+        // scissor scaled. The final pass then reads hud_img_ instead of T and renders into a second screen-sized
+        // image (hud2_img_), which Present shows. A T that is presented as it is needs no final pass. A T is only
+        // redirected once a frame has shown how it reaches the screen (hud_sources_); anything else stays as it was.
+        bool hud_redirect = false, hud_boxed = false, samples_t = false, sampled_cand = false;
         if (hud_w_ > 0 && !colors.empty() && colors[0] && HudTarget(colors, depth)) {
             Image* f = colors[0];
             const int cls = HudClass(p, vin);
-            if (!hud_started_ && cls) {
-                hud_started_ = HudStart(*f);
-                if (!hud_started_) hud_w_ = 0;  // could not make the image: the rest of this frame is drawn as before
+            if (cls && !hud_started_ && !hud_sources_.count(f->addr)) {
+                // A HUD draw on a target not known yet: it is a source if the game presents it as it is, or if a
+                // later draw of the frame reads it to make a presented frame (the final pass, see below).
+                hud_cand_addr_ = f->addr;
+                if (presented_addrs_.count(f->addr)) hud_sources_.insert(f->addr);
             }
-            if (hud_started_ && hud_src_addr_ == f->addr) {
-                hud_redirect = true;
-                hud_boxed = cls == 1 && hud_box_w_ > 0;
-                colors[0] = &hud_img_;
-                hud_redirected_++;
+            if (hud_sources_.count(f->addr)) {
+                if (!hud_started_ && cls) {
+                    hud_started_ = HudStart(*f);
+                    if (!hud_started_) hud_w_ = 0;  // could not make the image: the rest of this frame is drawn as before
+                }
+                if (hud_started_ && hud_t_addr_ == f->addr) {
+                    hud_redirect = true;
+                    hud_boxed = cls == 1 && hud_box_w_ > 0;
+                    colors[0] = &hud_img_;
+                    hud_redirected_++;
+                }
             }
         }
 
@@ -4788,6 +4814,13 @@ private:
                     bt.texture.tex.swizzle[2] = 4;
                     bt.texture.tex.swizzle[3] = 5;
                     if (!img) return Skip("no stand-in texture");
+                }
+                // hud_full_res: what the game reads as this frame's picture is the enlarged one with the HUD on it.
+                if (hud_started_ && img->addr == hud_t_addr_ && img != &hud_img_ && img != &hud2_img_) {
+                    img = &hud_img_;
+                    samples_t = true;
+                } else if (hud_cand_addr_ && !hud_started_ && img->addr == hud_cand_addr_) {
+                    sampled_cand = true;
                 }
                 for (Image* c : colors)
                     if (c == img) return Skip("texture is also a render target");
@@ -4875,6 +4908,23 @@ private:
                                                                          Filterable(*img)),
                                            view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
             }
+        }
+
+        // hud_full_res, the frame's final pass: the draw that reads the HUD's target and renders to a frame the game
+        // presents. Learned the first time (the HUD target is then a source from the next frame on); with the HUD
+        // started, the pass reads the enlarged picture (above) and renders into a second screen-sized image.
+        bool hud_final_pending = false;
+        if (sampled_cand && !colors.empty() && colors[0] && presented_addrs_.count(colors[0]->addr) &&
+            colors[0]->width == hud_src_w_ && colors[0]->height == hud_src_h_ && hud_sources_.insert(hud_cand_addr_).second)
+            LOGI(kTag, "hud_full_res: the HUD's target @%llx is turned into the presented frame @%llx by a final pass: "
+                 "the HUD is drawn at full resolution from now on", (unsigned long long)hud_cand_addr_,
+                 (unsigned long long)colors[0]->addr);
+        if (samples_t && hud_w_ > 0 && !colors.empty() && colors[0] && !hud_redirect && HudTarget(colors, depth) &&
+            presented_addrs_.count(colors[0]->addr) && HudEnsureImage(hud2_img_, *colors[0])) {
+            hud_final_pending = hud_redirect = true;
+            hud_boxed = false;
+            colors[0] = &hud2_img_;
+            if (!hud_final_) hud2_img_.written = false;  // the pass covers all of it: nothing to load
         }
 
         // Storage images the fragment shader writes (SUST). Kept in GENERAL layout while bound.
@@ -5228,6 +5278,7 @@ private:
         Phase(5);
         // ---- queue the draw: the recorder thread builds its descriptor sets and records it --------------------
         if (!EnsureRendering(colors, depth, &extent)) return Skip("no render target");
+        if (hud_final_pending) hud_final_ = true;
         if (depth && fs->info.writes_depth && st_.depth.depth_write) depth->depth_exported = depth->fragdepth_written = true;
         DrawPacket d;
         d.pipeline = pipeline;
@@ -6881,8 +6932,8 @@ private:
         hud_src_w_ = w ? f.width : 0;
         hud_src_h_ = w ? f.height : 0;
     }
-    // Whether a draw renders only to a game frame the game presents (at its frame size, no depth, a plain view): the
-    // draws hud_full_res can redirect.
+    // Whether a draw renders only to one target of the game's frame size (no depth, a plain view): the draws
+    // hud_full_res can redirect.
     bool HudTarget(const std::vector<Image*>& colors, const Image* depth) const {
         const Image* f = colors[0];
         if (depth || !f || f->width != hud_src_w_ || f->height != hud_src_h_ || f->levels != 1 || f->layers != 1)
@@ -6890,7 +6941,7 @@ private:
         if (st_.rts.empty() || st_.rts[0].view_format || st_.rts[0].layer || st_.rts[0].level) return false;
         for (size_t i = 1; i < colors.size(); i++)
             if (colors[i]) return false;
-        return presented_addrs_.count(f->addr) != 0;
+        return true;
     }
     // 0 = not a blended 2D HUD / menu draw; 1 = one that stays in the 16:9 box (hud_box); 2 = a blending full-screen
     // one (fades, dimming behind menus). Same tests as HudBoxed.
@@ -6903,11 +6954,10 @@ private:
         if (!DrawBounds(p, vin, &x0, &x1, &y0, &y1)) return 1;
         return (x0 <= 2.0f && x1 >= 1278.0f && y0 <= 2.0f && y1 >= 718.0f) ? 2 : 1;
     }
-    // The screen-sized image for the game frame `f`, made (again) when its size or format changed.
-    bool HudEnsureImage(const Image& f) {
-        if (hud_img_.image && hud_img_.width == hud_w_ && hud_img_.height == hud_h_ && hud_img_.vk_format == f.vk_format)
-            return true;
-        if (hud_img_.image) DestroyImage(hud_img_);  // retired: destroyed once the GPU is done with it
+    // A screen-sized image like the game frame `f` in `slot`, made (again) when its size or format changed.
+    bool HudEnsureImage(Image& slot, const Image& f) {
+        if (slot.image && slot.width == hud_w_ && slot.height == hud_h_ && slot.vk_format == f.vk_format) return true;
+        if (slot.image) DestroyImage(slot);  // retired: destroyed once the GPU is done with it
         Image h;
         h.vk_format = f.vk_format;
         h.nvn_format = f.nvn_format;
@@ -6919,14 +6969,14 @@ private:
         h.features = f.features;
         if (!(h.features & VK_FORMAT_FEATURE_BLIT_DST_BIT) || !(h.features & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) return false;
         if (!AllocImage(h, false, false, &h.image, &h.memory)) return false;
-        hud_img_ = std::move(h);
-        LOGI(kTag, "hud_full_res: HUD and menus drawn at %dx%d (the game's frame is %dx%d)", hud_w_, hud_h_, f.width,
-             f.height);
+        slot = std::move(h);
+        LOGI(kTag, "hud_full_res: %s image %dx%d (the game's frame is %dx%d)", &slot == &hud_img_ ? "HUD" : "final pass",
+             hud_w_, hud_h_, f.width, f.height);
         return true;
     }
     // Enlarges the 3D picture drawn so far on `f` into the HUD image; the frame's HUD draws then go there.
     bool HudStart(Image& f) {
-        if (!HudEnsureImage(f)) return false;
+        if (!HudEnsureImage(hud_img_, f)) return false;
         EndRendering();
         Transition(f, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(hud_img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -6944,13 +6994,18 @@ private:
                            filter);
         });
         hud_img_.written = true;
-        hud_src_addr_ = f.addr;
+        hud_t_addr_ = f.addr;
         return true;
     }
     Image hud_img_;                 // the game's frame enlarged to the screen, with the HUD drawn on it
     int hud_w_ = 0, hud_h_ = 0;     // its size (0 = hud_full_res not in use)
     int hud_src_w_ = 0, hud_src_h_ = 0;  // the game frame size it was sized from
-    uint64_t hud_src_addr_ = 0;     // the game frame the current picture was enlarged from
+    Image hud2_img_;                // the final pass's output at the screen's size (when the HUD target is not presented)
+    uint64_t hud_t_addr_ = 0;       // the target the current picture was enlarged from (the one the HUD is drawn on)
+    uint64_t hud_cand_addr_ = 0;    // this frame: a HUD draw was seen on this target, not yet known as a source
+    std::unordered_set<uint64_t> hud_sources_;  // HUD targets that reach the screen (learned), see Draw
+    int hud_orphans_ = 0;
+    bool hud_final_ = false;        // this frame's final pass was drawn into hud2_img_ (reset by Present)
     bool hud_started_ = false;      // this frame's HUD goes into hud_img_ (reset by Present)
     uint64_t hud_redirected_ = 0;
     std::unordered_set<uint64_t> presented_addrs_;  // frame textures the game has presented
