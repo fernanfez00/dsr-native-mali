@@ -14,7 +14,6 @@ struct RuntimeConfig {
     std::string game_dir;     // directory holding exefs/ and the romfs contents (dvdbnd*.bdt, ...)
     std::string save_dir;     // writable directory for save data
     std::string cache_dir;    // writable directory for caches (shaders etc.)
-    std::string cheats_dir;   // cheat files (<build id>.txt, runtime/cheats.h); empty = no cheats
     bool dry_run = false;     // map + relocate + bind only, never execute guest code
     bool abort_on_unimplemented = false;
     bool docked = false;      // nn::oe::GetOperationMode: false = handheld (720p), true = console
@@ -91,6 +90,13 @@ struct RuntimeConfig {
     int texture_mip_skip = 0;
     // scale_filter: how the picture is enlarged to the screen. 0 = nearest (sharp pixels), 1 = bilinear (default)
     int scale_filter = 1;
+    // upscaler: how the 3D picture is enlarged to the HUD image (needs hud_full_res and a render scale under ~83%):
+    // 0 = the plain scale_filter blit, 1 = FSR 1 EASU, 2 = EASU + RCAS sharpening (fsr_sharpness 0..100 %).
+    int upscaler = 0;
+    // skip_fs: fragment-program hashes (hex, separated by commas) whose draws are left out, e.g. a bloom chain (see
+    // the "capture pass" lines of a frame capture for the hashes). Their targets are cleared to zero instead.
+    std::string skip_fs;
+    int fsr_sharpness = 70;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
