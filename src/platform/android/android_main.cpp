@@ -439,7 +439,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         }
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_gpu_driver = false, have_bc_enabler = false;
-        bool have_touch = false, have_aspect = false, have_hud_full_res = false;
+        bool have_touch = false, have_aspect = false, have_hud_full_res = false, have_fxaa = false;
         int settings_version = 1;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
@@ -533,6 +533,11 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
+            else if (!strcmp(key, "fxaa")) {
+                cfg->fxaa = std::clamp(v, 0, 2);
+                have_fxaa = true;
+            }
+            else if (!strcmp(key, "hud_max_height")) cfg->hud_max_height = v >= 360 ? std::min(v, 4320) : 0;
             else if (!strcmp(key, "gamma")) {
                 const float g = float(atof(value));
                 cfg->gamma = g >= 0.5f && g <= 3.0f ? g : 1.0f;
@@ -590,6 +595,17 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fputs("\n" TOUCH_HELP TOUCH_DEFAULTS, w);
                 fclose(w);
                 LOGI(kTag, "settings: added the touch controls settings to %s", path.c_str());
+            }
+        if (!have_fxaa)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n# fxaa: 0 = off, 1 = FXAA 3.11 fast (light: for Mali GPUs), 2 = FXAA 3.11 quality. Smooths the 3D picture's\n"
+                      "# edges at the game's render size, before it is enlarged. Needs hud_full_res = 1\n"
+                      "fxaa = 0\n"
+                      "# hud_max_height: 0 = the picture and HUD at the screen's size; 720 / 540 = at most that many lines tall,\n"
+                      "# stretched to the screen by Android (fewer pixels for FSR and the HUD on a weak GPU such as a Mali-G57)\n"
+                      "hud_max_height = 0\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added fxaa and hud_max_height to %s", path.c_str());
             }
         if (!have_hud_full_res)
             if (FILE* w = fopen(path.c_str(), "a")) {
@@ -1017,6 +1033,13 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         now = true;
     } else if (key == "fsr_sharpness") {
         c.fsr_sharpness = std::clamp(atoi(value.c_str()), 0, 100);
+        now = true;
+    } else if (key == "fxaa") {  // read when the HUD image is started, every frame
+        c.fxaa = std::clamp(atoi(value.c_str()), 0, 2);
+        now = true;
+    } else if (key == "hud_max_height") {  // read with the HUD image's size, every frame
+        const int v = atoi(value.c_str());
+        c.hud_max_height = v >= 360 ? std::min(v, 4320) : 0;
         now = true;
     } else if (key == "hud_full_res") {  // read by the presenter every frame
         c.hud_full_res = atoi(value.c_str()) != 0;
