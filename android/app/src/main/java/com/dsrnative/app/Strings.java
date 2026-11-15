@@ -256,6 +256,28 @@ final class Strings {
         put("sec_game", "Game", "Jeu", "Spiel", "Gioco", "Juego", "Jogo", "Игра", "ゲーム", "게임", "游戏", "遊戲");
         put("sec_quality", "Quality", "Qualité", "Qualität", "Qualità", "Calidad", "Qualidade", "Качество", "画質", "품질",
                 "画质", "畫質");
+        // en, fr, de, it, es, pt (other languages show the English text)
+        put("shadow_t", "Shadows", "Ombres", "Schatten", "Ombre", "Sombras", "Sombras");
+        put("shadow_n",
+                "Shadow map quality. Off skips the shadow pass completely: the biggest saving on weak GPUs.",
+                "Qualité des cartes d'ombres. Désactivé supprime entièrement la passe d'ombres : le plus gros gain sur les GPU faibles.",
+                "Qualität der Schattenkarten. Aus überspringt die Schattenpassage komplett: die größte Ersparnis bei schwachen GPUs.",
+                "Qualità delle mappe d'ombra. Disattivato salta del tutto il passaggio delle ombre: il risparmio maggiore sulle GPU deboli.",
+                "Calidad de los mapas de sombras. Desactivado omite por completo el pase de sombras: el mayor ahorro en GPUs débiles.",
+                "Qualidade dos mapas de sombra. Desligado ignora totalmente a passagem de sombras: a maior economia em GPUs fracas.");
+        put("q_high", "High (2048)", "Élevée (2048)", "Hoch (2048)", "Alta (2048)", "Alta (2048)", "Alta (2048)");
+        put("q_medium", "Medium (1024)", "Moyenne (1024)", "Mittel (1024)", "Media (1024)", "Media (1024)", "Média (1024)");
+        put("q_low", "Low (512)", "Faible (512)", "Niedrig (512)", "Bassa (512)", "Baja (512)", "Baixa (512)");
+        put("q_off", "Off", "Désactivé", "Aus", "Disattivato", "Desactivadas", "Desligado");
+        put("loweff_t", "Low-quality effects", "Effets basse qualité", "Effekte in niedriger Qualität",
+                "Effetti a bassa qualità", "Efectos de baja calidad", "Efeitos de baixa qualidade");
+        put("loweff_n",
+                "Smoke, fog and glow use the game's cheaper path.",
+                "Fumée, brouillard et lueurs utilisent le chemin moins coûteux du jeu.",
+                "Rauch, Nebel und Leuchten nutzen den günstigeren Weg des Spiels.",
+                "Fumo, nebbia e bagliori usano il percorso più leggero del gioco.",
+                "Humo, niebla y brillos usan la ruta más ligera del juego.",
+                "Fumaça, névoa e brilhos usam o caminho mais leve do jogo.");
         put("perf_t", "Performance mode", "Mode performance", "Leistungsmodus", "Modalità prestazioni",
                 "Modo rendimiento", "Modo desempenho", "Режим производительности", "パフォーマンスモード", "성능 모드",
                 "性能模式", "效能模式");
