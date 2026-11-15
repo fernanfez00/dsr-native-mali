@@ -97,6 +97,12 @@ struct RuntimeConfig {
     // the "capture pass" lines of a frame capture for the hashes). Their targets are cleared to zero instead.
     std::string skip_fs;
     int fsr_sharpness = 70;
+    // Post-processing at the game's render size, in the HUD path (needs hud_full_res = 1; read every frame):
+    // fxaa: 0 = off, 1 = FXAA 3.11 fast (6 steps; for a Mali), 2 = quality (12 steps; from gu-native).
+    int fxaa = 0;
+    // hud_max_height: 0 = the picture (and HUD) at the screen's size; N (>= 360) = at most N lines tall, enlarged to the
+    // screen by the compositor (fewer pixels for FSR / the HUD on a weak GPU).
+    int hud_max_height = 0;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
