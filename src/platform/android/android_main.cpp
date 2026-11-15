@@ -44,7 +44,6 @@
 #include "hle/nvn/backend.h"
 #include "hle/video.h"
 #include "runtime/runtime.h"
-#include "runtime/cheats.h"
 
 namespace {
 constexpr const char* kTag = "android";
@@ -444,8 +443,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         int settings_version = 1;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
-            char key[64], value[64];
-            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %63s", key, value) != 2) continue;
+            char key[64], value[256];  // (skip_fs lists several 16-digit hashes)
+            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %255s", key, value) != 2) continue;
             const int v = atoi(value);
             if (!strcmp(key, "fps")) {  // e.g. 45: a steady cap below 60; auto: dynamic (60 / 30 / 20)
                 cfg->dynamic_fps = !strcmp(value, "auto");
@@ -531,6 +530,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "low_effects")) cfg->low_effects = v != 0;
             else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "scale_filter")) cfg->scale_filter = std::clamp(v, 0, 1);
+            else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
+            else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "gamma")) {
                 const float g = float(atof(value));
                 cfg->gamma = g >= 0.5f && g <= 3.0f ? g : 1.0f;
@@ -1010,6 +1012,12 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
     } else if (key == "scale_filter") {  // read by the presenter every frame
         c.scale_filter = std::clamp(atoi(value.c_str()), 0, 1);
         now = true;
+    } else if (key == "upscaler") {  // read when the HUD image is started, every frame
+        c.upscaler = std::clamp(atoi(value.c_str()), 0, 2);
+        now = true;
+    } else if (key == "fsr_sharpness") {
+        c.fsr_sharpness = std::clamp(atoi(value.c_str()), 0, 100);
+        now = true;
     } else if (key == "hud_full_res") {  // read by the presenter every frame
         c.hud_full_res = atoi(value.c_str()) != 0;
         now = true;
@@ -1046,35 +1054,6 @@ void JNICALL MenuOpen(JNIEnv*, jclass, jboolean open) {
 jlong JNICALL MenuFrames(JNIEnv*, jclass) { return jlong(dsr::platform::FramesShown()); }
 // 1: the GPU samples BC textures itself, 0: it does not (converted on the CPU), -1: not known yet.
 jint JNICALL MenuGpuHasBc(JNIEnv*, jclass) { return jint(dsr::GpuHasBc()); }
-
-// Cheats tab (runtime/cheats.h). Text crosses as UTF-8 bytes (names in cheat files need not be valid modified UTF-8).
-jbyteArray Bytes(JNIEnv* env, const std::string& s) {
-    jbyteArray a = env->NewByteArray(jsize(s.size()));
-    if (a) env->SetByteArrayRegion(a, 0, jsize(s.size()), reinterpret_cast<const jbyte*>(s.data()));
-    return a;
-}
-std::string FromBytes(JNIEnv* env, jbyteArray a) {
-    if (!a) return std::string();
-    std::string s(size_t(env->GetArrayLength(a)), '\0');
-    env->GetByteArrayRegion(a, 0, jsize(s.size()), reinterpret_cast<jbyte*>(s.data()));
-    return s;
-}
-jbyteArray JNICALL CheatList(JNIEnv* env, jclass) { return Bytes(env, dsr::cheats::List()); }
-jboolean JNICALL CheatSet(JNIEnv*, jclass, jint i, jboolean on) {
-    return i >= 0 && dsr::cheats::SetEnabled(size_t(i), on) ? JNI_TRUE : JNI_FALSE;
-}
-jbyteArray JNICALL CheatAdd(JNIEnv* env, jclass, jbyteArray text) {
-    return Bytes(env, dsr::cheats::Add(FromBytes(env, text)));
-}
-jbyteArray JNICALL CheatCheck(JNIEnv* env, jclass, jbyteArray text) {
-    return Bytes(env, dsr::cheats::Check(FromBytes(env, text)));
-}
-jboolean JNICALL CheatDelete(JNIEnv*, jclass, jint i) {
-    return i >= 0 && dsr::cheats::Remove(size_t(i)) ? JNI_TRUE : JNI_FALSE;
-}
-jbyteArray JNICALL CheatText(JNIEnv* env, jclass, jint i) {
-    return Bytes(env, i >= 0 ? dsr::cheats::Text(size_t(i)) : std::string());
-}
 
 jclass g_menu_cls = nullptr;  // global ref
 
@@ -1140,14 +1119,8 @@ void StartSettingsMenu(android_app* app, const std::string& base, const dsr::Run
         {const_cast<char*>("nativeMenuOpen"), const_cast<char*>("(Z)V"), reinterpret_cast<void*>(&MenuOpen)},
         {const_cast<char*>("nativeFrames"), const_cast<char*>("()J"), reinterpret_cast<void*>(&MenuFrames)},
         {const_cast<char*>("nativeGpuHasBc"), const_cast<char*>("()I"), reinterpret_cast<void*>(&MenuGpuHasBc)},
-        {const_cast<char*>("nativeCheats"), const_cast<char*>("()[B"), reinterpret_cast<void*>(&CheatList)},
-        {const_cast<char*>("nativeCheatSet"), const_cast<char*>("(IZ)Z"), reinterpret_cast<void*>(&CheatSet)},
-        {const_cast<char*>("nativeCheatAdd"), const_cast<char*>("([B)[B"), reinterpret_cast<void*>(&CheatAdd)},
-        {const_cast<char*>("nativeCheatCheck"), const_cast<char*>("([B)[B"), reinterpret_cast<void*>(&CheatCheck)},
-        {const_cast<char*>("nativeCheatDelete"), const_cast<char*>("(I)Z"), reinterpret_cast<void*>(&CheatDelete)},
-        {const_cast<char*>("nativeCheatText"), const_cast<char*>("(I)[B"), reinterpret_cast<void*>(&CheatText)},
     };
-    if (env->RegisterNatives(cls, methods, int(std::size(methods))) != JNI_OK || env->ExceptionCheck()) {
+    if (env->RegisterNatives(cls, methods, 4) != JNI_OK || env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGW(kTag, "settings menu: could not register natives");
         return;
@@ -1283,14 +1256,12 @@ void StartGame(android_app* app) {
         cfg.game_dir = st.base + "/game";
         cfg.save_dir = st.base + "/save";
         cfg.cache_dir = st.base + "/cache";
-        cfg.cheats_dir = st.base + "/cheats";
         // On a first launch the app's own folder may not exist yet (Android creates it lazily), and then nothing
         // below could be written. Create it and everything the user is expected to find in it.
         MakeDirs(st.base);
         mkdir(cfg.game_dir.c_str(), 0775);
         mkdir(cfg.save_dir.c_str(), 0775);
         mkdir(cfg.cache_dir.c_str(), 0775);
-        mkdir(cfg.cheats_dir.c_str(), 0775);
         LoadSettings(st.base + "/settings.txt", &cfg);
         if (app->window) {
             const int ww = ANativeWindow_getWidth(app->window), wh = ANativeWindow_getHeight(app->window);
