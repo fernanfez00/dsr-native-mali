@@ -358,6 +358,29 @@ final class Strings {
                 "BC를 지원하지 않는 GPU에서 텍스처 메모리가 4분의 1로 줄어듭니다. 약간 손실이 있습니다.",
                 "在不支持 BC 的 GPU 上纹理内存减少至 1/4；略有损失。",
                 "在不支援 BC 的 GPU 上紋理記憶體減少至 1/4；略有損失。");
+        put("astc_t", "BC textures as ASTC instead of ETC2",
+                "Textures BC en ASTC au lieu d'ETC2",
+                "BC-Texturen als ASTC statt ETC2",
+                "Texture BC in ASTC invece di ETC2",
+                "Texturas BC en ASTC en lugar de ETC2",
+                "Texturas BC em ASTC em vez de ETC2");
+        put("astc_n",
+                "BC1 and BC3 textures are re-encoded as ASTC 4x4 (8 bits per texel; BC1 takes twice the memory it does in ETC2, but stays closer to the original and keeps alpha exact). Needs a GPU with ASTC, such as Mali.",
+                "Les textures BC1 et BC3 sont réencodées en ASTC 4x4 (8 bits par texel ; le BC1 prend deux fois plus de mémoire qu'en ETC2, mais reste plus fidèle et garde l'alpha exact). Nécessite un GPU avec ASTC, comme Mali.",
+                "BC1- und BC3-Texturen werden als ASTC 4x4 neu kodiert (8 Bit pro Texel; BC1 braucht doppelt so viel Speicher wie in ETC2, bleibt aber näher am Original und behält Alpha exakt). Benötigt eine GPU mit ASTC, z. B. Mali.",
+                "Le texture BC1 e BC3 vengono ricodificate in ASTC 4x4 (8 bit per texel; il BC1 usa il doppio della memoria rispetto a ETC2, ma resta più fedele e mantiene l'alpha esatto). Richiede una GPU con ASTC, come Mali.",
+                "Las texturas BC1 y BC3 se recodifican en ASTC 4x4 (8 bits por texel; BC1 ocupa el doble de memoria que en ETC2, pero queda más fiel al original y conserva el alfa exacto). Requiere una GPU con ASTC, como Mali.",
+                "As texturas BC1 e BC3 são recodificadas em ASTC 4x4 (8 bits por texel; o BC1 usa o dobro da memória do ETC2, mas fica mais fiel ao original e mantém o alfa exato). Requer uma GPU com ASTC, como a Mali.");
+        put("aniso_t", "Anisotropic filtering", "Filtrage anisotrope", "Anisotrope Filterung",
+                "Filtro anisotropico", "Filtrado anisotrópico", "Filtragem anisotrópica");
+        put("aniso_n",
+                "Limit on the game's texture filtering at oblique angles. Lower is faster on weaker GPUs.",
+                "Limite du filtrage des textures sous des angles obliques. Plus bas = plus rapide sur les GPU modestes.",
+                "Obergrenze für die Texturfilterung bei schrägen Winkeln. Niedriger ist auf schwächeren GPUs schneller.",
+                "Limite del filtraggio delle texture ad angoli obliqui. Più basso = più veloce sulle GPU deboli.",
+                "Límite del filtrado de texturas en ángulos oblicuos. Más bajo es más rápido en GPU modestas.",
+                "Limite da filtragem de texturas em ângulos oblíquos. Mais baixo é mais rápido em GPUs fracas.");
+        put("aniso_0", "Game's own", "Celui du jeu", "Wie im Spiel", "Quello del gioco", "El del juego", "O do jogo");
         put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
                 "Omitir mip de texturas", "Pular mip de texturas", "Пропуск MIP текстур", "テクスチャ MIP スキップ",
                 "텍스처 밉 건너뛰기", "跳过纹理 Mip", "略過紋理 Mip");

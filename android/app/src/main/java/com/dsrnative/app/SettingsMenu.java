@@ -456,10 +456,14 @@ public final class SettingsMenu {
                 new String[] {Strings.t("q_high"), Strings.t("q_medium"), Strings.t("q_low"), Strings.t("q_off")}, "3");
         toggle("low_effects", Strings.t("loweff_t"), Strings.t("loweff_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        choice("max_anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "2", "4", "8", "16"},
+                new String[] {Strings.t("aniso_0"), "2x", "4x", "8x", "16x"}, "0");
 
         section(Strings.t("sec_gpu"));
         note(Strings.t("gpu_n"));
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
