@@ -48,7 +48,7 @@ struct RuntimeConfig {
     bool hud_full_res = true;
     int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied
     int render_height = 720;
-    float render_scale = 1.0f;  // settings render_scale: 0.5 - 1.0 of the game's 720-line resolution
+    float render_scale = 1.0f;  // settings render_scale: 0.30 - 1.0 of the game's 720-line resolution
     // GPU driver: settings.txt `gpu_driver` (a file in DSRNative/drivers, or "system"). The Android front end
     // copies (or unzips) it into the app's private folder: gpu_driver_dir (ends in '/') holds gpu_driver_lib.
     // Empty gpu_driver_lib: the system driver.
@@ -78,6 +78,13 @@ struct RuntimeConfig {
     // performance_mode = 1: the engine's own lower-quality options: low-quality effects, 1024x1024 shadow maps instead
     // of 2048x2048 (read at start-up). The menu also sets render_scale 0.75 when it is turned on.
     bool performance_mode = false;
+    // shadow_quality: 0 = no shadows (the shadow map pass is not drawn at all and lookups always say "lit"),
+    // 1 = 512x512 maps, 2 = 1024x1024, 3 = 2048x2048 (the game's own; default). performance_mode with the default
+    // gives 1024 as before.
+    int shadow_quality = 3;
+    // low_effects = 1: the engine's low-quality effects path (smoke, fog, glow resolved at lower cost), without the
+    // rest of performance_mode.
+    bool low_effects = false;
     // texture_mip_skip = 1: big BC textures (512x512 and up, with mip levels) are loaded without their most detailed
     // level: half the width and height, ~75% less data to convert, upload and sample; softer up close.
     int texture_mip_skip = 0;
