@@ -64,6 +64,9 @@
 
 namespace dsr::hle::nvn {
 #include "hle/nvn/vk_dispatch.h"
+#ifdef DSR_HAVE_FSR1
+#include "fsr1_spv.h"  // generated at build time from src/hle/nvn/shaders (cmake/build_fsr1_spv.cmake)
+#endif
 namespace {
 constexpr const char* kTag = "vulkan";
 
@@ -502,6 +505,7 @@ struct Image {
     VkClearValue clear_value{};
     VkImageAspectFlags clear_aspect = 0;
     int clear_layer = 0, clear_level = 0;
+    bool skip_zeroed = false;  // settings skip_fs: a skipped pass's target, cleared to zero (until a draw writes it)
 };
 
 struct Shader {
@@ -4757,6 +4761,27 @@ private:
             while (!colors.empty() && !colors.back()) colors.pop_back();
         if (depth && !IsDepthFormat(depth->nvn_format)) depth = nullptr;
 
+        // ---- skip_fs: full-screen passes left out (bloom, depth of field...) ----------------------------------
+        // On a Mali each full-screen pass costs about the same whatever its size (a tile load and store), so a long
+        // post-processing chain is a large part of the frame. A draw whose fragment program is in the list is not
+        // drawn; the target it would have written is cleared to zero (once, until some other draw writes it) so that
+        // what samples it later (the tone mapping adding the bloom) reads black instead of whatever the memory held.
+        if (!skip_parsed_) ParseSkipList();
+        if (!skip_fs_.empty() && !colors.empty()) {
+            if (st_.program[1] && skip_fs_.count(st_.program[1]->hash)) {
+                for (size_t i = 0; i < colors.size(); i++)
+                    if (colors[i]) ZeroSkippedTarget(*colors[i], i);
+                if (skip_logged_.insert(st_.program[1]->hash).second)
+                    LOGI(kTag, "skip_fs: fragment program %016llx is not drawn (%dx%d target)",
+                         (unsigned long long)st_.program[1]->hash, colors[0] ? colors[0]->width : 0,
+                         colors[0] ? colors[0]->height : 0);
+                skipped_draws_++;
+                return;
+            }
+            for (Image* c : colors)
+                if (c) c->skip_zeroed = false;  // a real draw writes it now
+        }
+
         Begin();
         // Keep enough streaming space for this draw so nothing allocated below is lost to a flush.
         if (StreamRemaining() < (16ull << 20)) Flush();
@@ -6983,7 +7008,8 @@ private:
         if (!(h.features & VK_FORMAT_FEATURE_BLIT_DST_BIT) || !(h.features & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) return false;
         if (!AllocImage(h, false, false, &h.image, &h.memory)) return false;
         slot = std::move(h);
-        LOGI(kTag, "hud_full_res: %s image %dx%d (the game's frame is %dx%d)", &slot == &hud_img_ ? "HUD" : "final pass",
+        LOGI(kTag, "hud_full_res: %s image %dx%d (the game's frame is %dx%d)",
+             &slot == &hud_img_ ? "HUD" : (&slot == &hud2_img_ ? "final pass" : "FSR 1 intermediate"),
              hud_w_, hud_h_, f.width, f.height);
         return true;
     }
@@ -6991,6 +7017,13 @@ private:
     bool HudStart(Image& f) {
         if (!HudEnsureImage(hud_img_, f)) return false;
         EndRendering();
+#ifdef DSR_HAVE_FSR1
+        if (Fsr1Upscale(f)) {
+            hud_img_.written = true;
+            hud_t_addr_ = f.addr;
+            return true;
+        }
+#endif
         Transition(f, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(hud_img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkImageBlit b{};
@@ -7010,6 +7043,237 @@ private:
         hud_t_addr_ = f.addr;
         return true;
     }
+#ifdef DSR_HAVE_FSR1
+    // ---- FSR 1 (settings upscaler = 1: EASU, 2: EASU + RCAS) ---------------------------------------------------
+    // Replaces the bilinear blit that enlarges the 3D picture into the screen-sized HUD image (HudStart): EASU
+    // (edge-adaptive upscaling) draws the picture at the screen's size, and RCAS (sharpening) draws it again into the
+    // HUD image. Two full-screen passes at the screen's size: it costs GPU time, so it is for looking better at a low
+    // 3D resolution, not for speed. Needs dynamic rendering; anything missing leaves the plain blit (logged once).
+    struct Fsr1 {
+        bool tried = false, ok = false;
+        VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+        VkPipelineLayout lay_easu = VK_NULL_HANDLE, lay_rcas = VK_NULL_HANDLE;
+        VkShaderModule vs = VK_NULL_HANDLE, easu = VK_NULL_HANDLE, rcas = VK_NULL_HANDLE;
+        VkSampler samp = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        static constexpr int kSets = 16;  // a ring: a set is written again only kSets / 2 frames later
+        VkDescriptorSet sets[kSets] = {};
+        int next = 0;
+        std::map<std::pair<int, VkFormat>, VkPipeline> pipes;
+        uint64_t frames = 0;
+    } fsr1_;
+    Image fsr1_tmp_;  // EASU's output when RCAS follows
+
+    bool Fsr1Init() {
+        if (fsr1_.tried) return fsr1_.ok;
+        fsr1_.tried = true;
+        if (!begin_rendering_ || !end_rendering_ || rp_fallback_) {
+            LOGW(kTag, "upscaler: FSR 1 needs dynamic rendering; the plain blit stays");
+            return false;
+        }
+        auto module = [&](const unsigned char* code, size_t size, VkShaderModule* out) {
+            VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            ci.codeSize = size;
+            ci.pCode = reinterpret_cast<const uint32_t*>(code);
+            return vkCreateShaderModule(device_, &ci, nullptr, out) == VK_SUCCESS;
+        };
+        VkDescriptorSetLayoutBinding bind{};
+        bind.binding = 0;
+        bind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bind.descriptorCount = 1;
+        bind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        dl.bindingCount = 1;
+        dl.pBindings = &bind;
+        VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
+        sc.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sc.maxLod = 0.25f;
+        bool ok = module(kFsr1VertSpv, sizeof kFsr1VertSpv, &fsr1_.vs) &&
+                  module(kFsr1EasuSpv, sizeof kFsr1EasuSpv, &fsr1_.easu) &&
+                  module(kFsr1RcasSpv, sizeof kFsr1RcasSpv, &fsr1_.rcas) &&
+                  vkCreateDescriptorSetLayout(device_, &dl, nullptr, &fsr1_.dsl) == VK_SUCCESS &&
+                  vkCreateSampler(device_, &sc, nullptr, &fsr1_.samp) == VK_SUCCESS;
+        if (ok) {
+            VkPushConstantRange pr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64};
+            VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            pl.setLayoutCount = 1;
+            pl.pSetLayouts = &fsr1_.dsl;
+            pl.pushConstantRangeCount = 1;
+            pl.pPushConstantRanges = &pr;
+            ok = vkCreatePipelineLayout(device_, &pl, nullptr, &fsr1_.lay_easu) == VK_SUCCESS;
+            pr.size = 16;
+            ok = ok && vkCreatePipelineLayout(device_, &pl, nullptr, &fsr1_.lay_rcas) == VK_SUCCESS;
+        }
+        if (ok) {
+            VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, uint32_t(Fsr1::kSets)};
+            VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            dp.maxSets = uint32_t(Fsr1::kSets);
+            dp.poolSizeCount = 1;
+            dp.pPoolSizes = &ps;
+            VkDescriptorSetLayout layouts[Fsr1::kSets];
+            for (auto& l : layouts) l = fsr1_.dsl;
+            VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            ok = vkCreateDescriptorPool(device_, &dp, nullptr, &fsr1_.pool) == VK_SUCCESS;
+            ai.descriptorPool = fsr1_.pool;
+            ai.descriptorSetCount = uint32_t(Fsr1::kSets);
+            ai.pSetLayouts = layouts;
+            ok = ok && vkAllocateDescriptorSets(device_, &ai, fsr1_.sets) == VK_SUCCESS;
+        }
+        fsr1_.ok = ok;
+        LOGI(kTag, "upscaler: FSR 1 %s", ok ? "ready" : "could not be set up; the plain blit stays");
+        return ok;
+    }
+    VkPipeline Fsr1Pipeline(bool rcas, VkFormat format) {
+        const auto key = std::make_pair(rcas ? 1 : 0, format);
+        auto it = fsr1_.pipes.find(key);
+        if (it != fsr1_.pipes.end()) return it->second;
+        VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+                                                     {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = fsr1_.vs;
+        stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = rcas ? fsr1_.rcas : fsr1_.easu;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = 1;
+        vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState ba{};
+        ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                            VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &ba;
+        const VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+        VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachmentFormats = &format;
+        VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        ci.pNext = &ri;
+        ci.stageCount = 2;
+        ci.pStages = stages;
+        ci.pVertexInputState = &vi;
+        ci.pInputAssemblyState = &ia;
+        ci.pViewportState = &vp;
+        ci.pRasterizationState = &rs;
+        ci.pMultisampleState = &ms;
+        ci.pColorBlendState = &cb;
+        ci.pDynamicState = &dy;
+        ci.layout = rcas ? fsr1_.lay_rcas : fsr1_.lay_easu;
+        VkPipeline p = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+        fsr1_.pipes[key] = p;
+        if (!p) LOGW(kTag, "upscaler: FSR 1 %s pipeline for format %d failed; the plain blit stays", rcas ? "RCAS" : "EASU",
+                     int(format));
+        return p;
+    }
+    // One full-screen pass: `src` sampled, `dst` drawn at w x h. Runs on the recorder.
+    void Fsr1Pass(bool rcas, Image& src, Image& dst, const uint32_t* pc, uint32_t pc_size) {
+        VkPipeline pipe = Fsr1Pipeline(rcas, dst.vk_format);
+        static const uint8_t kIdentity[4] = {2, 3, 4, 5};
+        VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, VK_IMAGE_ASPECT_COLOR_BIT, kIdentity);
+        VkImageView dv = AttachmentView(dst);
+        Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        const VkPipelineLayout lay = rcas ? fsr1_.lay_rcas : fsr1_.lay_easu;
+        const VkDescriptorSet set = fsr1_.sets[fsr1_.next];
+        fsr1_.next = (fsr1_.next + 1) % Fsr1::kSets;
+        const VkSampler samp = fsr1_.samp;
+        const uint32_t w = uint32_t(dst.width), h = uint32_t(dst.height);
+        uint32_t consts[16] = {};
+        std::memcpy(consts, pc, pc_size);
+        Rec([this, pipe, lay, set, samp, sv, dv, w, h, consts, pc_size](VkCommandBuffer cb) {
+            VkDescriptorImageInfo ii{samp, sv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            wr.dstSet = set;
+            wr.dstBinding = 0;
+            wr.descriptorCount = 1;
+            wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr.pImageInfo = &ii;
+            vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+            VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            ca.imageView = dv;
+            ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every pixel is written
+            ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            ri.renderArea = {{0, 0}, {w, h}};
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &ca;
+            begin_rendering_(cb, &ri);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay, 0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(cb, lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pc_size, consts);
+            const VkViewport vp{0, 0, float(w), float(h), 0.0f, 1.0f};
+            const VkRect2D rect{{0, 0}, {w, h}};
+            vkCmdSetViewport(cb, 0, 1, &vp);
+            vkCmdSetScissor(cb, 0, 1, &rect);
+            vkCmdDraw(cb, 3, 1, 0, 0);
+            end_rendering_(cb);
+            VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &mb, 0, nullptr, 0, nullptr);
+            InvalidateBoundState();  // (the recorder's pipeline, sets and dynamic state are not the ones bound now)
+        });
+        dst.attach_unsynced = false;
+        dst.frag_only_sync = false;
+        dst.written = true;
+    }
+    // Draws the game's 3D picture `f` into hud_img_ (already made at the screen's size) with FSR 1. False: not done
+    // (off, not available), the caller blits.
+    bool Fsr1Upscale(Image& f) {
+        const int mode = dsr::GetRuntime().config.upscaler;
+        if (mode <= 0 || !Fsr1Init()) return false;
+        if (f.type != VK_IMAGE_TYPE_2D || f.levels != 1 || f.layers != 1 || f.aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+            !(f.features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
+            !(hud_img_.features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+            return false;
+        const bool rcas = mode >= 2;
+        if (rcas && !HudEnsureImage(fsr1_tmp_, f)) return false;
+        if (!Fsr1Pipeline(false, hud_img_.vk_format) || (rcas && !Fsr1Pipeline(true, hud_img_.vk_format))) return false;
+        auto bits = [](float v) {
+            uint32_t u;
+            std::memcpy(&u, &v, 4);
+            return u;
+        };
+        const float iw = float(f.width), ih = float(f.height), ow = float(hud_w_), oh = float(hud_h_);
+        // (AMD's ffxFsrPopulateEasuConstants: the input is the whole image, no offset)
+        const uint32_t easu[16] = {bits(iw / ow), bits(ih / oh), bits(0.5f * iw / ow - 0.5f), bits(0.5f * ih / oh - 0.5f),
+                                   bits(1.0f / iw), bits(1.0f / ih), bits(1.0f / iw), bits(-1.0f / ih),
+                                   bits(-1.0f / iw), bits(2.0f / ih), bits(1.0f / iw), bits(2.0f / ih),
+                                   bits(0.0f), bits(4.0f / ih), 0, 0};
+        Fsr1Pass(false, f, rcas ? fsr1_tmp_ : hud_img_, easu, 64);
+        if (rcas) {
+            const float pct = float(std::clamp(dsr::GetRuntime().config.fsr_sharpness, 0, 100));
+            const float stops = 2.0f * (1.0f - pct / 100.0f);  // RCAS: 0 stops = the sharpest, 2 = a quarter of it
+            const uint32_t con[4] = {bits(std::exp2(-stops)), 0, 0, 0};
+            Fsr1Pass(true, fsr1_tmp_, hud_img_, con, 16);
+        }
+        if (fsr1_.frames++ == 0) LOGI(kTag, "upscaler: FSR 1 %s, %dx%d -> %dx%d", rcas ? "EASU + RCAS" : "EASU", f.width, f.height, hud_w_, hud_h_);
+        return true;
+    }
+#endif  // DSR_HAVE_FSR1
     Image hud_img_;                 // the game's frame enlarged to the screen, with the HUD drawn on it
     int hud_w_ = 0, hud_h_ = 0;     // its size (0 = hud_full_res not in use)
     int hud_src_w_ = 0, hud_src_h_ = 0;  // the game frame size it was sized from
@@ -7026,6 +7290,42 @@ private:
     bool bc_patched_ = false, bc_forced_ = false;
     bool mip_skip_ = false;      // settings texture_mip_skip
     bool shadow_skip_logged_ = false;
+    // skip_fs (settings): hex fragment-program hashes separated by commas
+    bool skip_parsed_ = false;
+    std::unordered_set<uint64_t> skip_fs_, skip_logged_;
+    uint64_t skipped_draws_ = 0;
+    void ParseSkipList() {
+        skip_parsed_ = true;
+        const std::string& s = dsr::GetRuntime().config.skip_fs;
+        size_t at = 0;
+        while (at < s.size()) {
+            size_t end = s.find_first_of(", ;", at);
+            if (end == std::string::npos) end = s.size();
+            if (end > at) {
+                char* stop = nullptr;
+                const std::string tok = s.substr(at, end - at);
+                const unsigned long long h = std::strtoull(tok.c_str(), &stop, 16);
+                if (stop && *stop == 0 && h) skip_fs_.insert(h);
+                else LOGW(kTag, "skip_fs: '%s' is not a hash", tok.c_str());
+            }
+            at = end + 1;
+        }
+        if (!skip_fs_.empty()) LOGI(kTag, "skip_fs: %zu fragment programs are left out", skip_fs_.size());
+    }
+    void ZeroSkippedTarget(Image& img, size_t i) {
+        if (img.skip_zeroed) return;
+        img.skip_zeroed = true;
+        const auto sub_rt = RtSub(i);
+        if (InOpenPass(&img)) EndRendering();
+        if (img.clear_pending) FlushClear(img);
+        img.clear_pending = true;
+        img.clear_value = {};
+        img.clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        img.clear_layer = sub_rt.first;
+        img.clear_level = sub_rt.second;
+        img.written = true;     // (never uploaded from the game's memory when sampled)
+        img.cpu_source = false;
+    }
     uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
     std::unordered_set<uint64_t> hud_box_logged_;
