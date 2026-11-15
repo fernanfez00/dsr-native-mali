@@ -465,6 +465,10 @@ public final class SettingsMenu {
         note(Strings.t("gpu_n"));
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_next"),
+                new String[] {"4", "6", "8"},
+                new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
+        toggle("bc5_astc", Strings.t("bc5_t"), Strings.t("bc5_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",

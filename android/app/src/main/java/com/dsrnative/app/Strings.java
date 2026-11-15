@@ -371,6 +371,31 @@ final class Strings {
                 "Le texture BC1 e BC3 vengono ricodificate in ASTC 4x4 (8 bit per texel; il BC1 usa il doppio della memoria rispetto a ETC2, ma resta più fedele e mantiene l'alpha esatto). Richiede una GPU con ASTC, come Mali.",
                 "Las texturas BC1 y BC3 se recodifican en ASTC 4x4 (8 bits por texel; BC1 ocupa el doble de memoria que en ETC2, pero queda más fiel al original y conserva el alfa exacto). Requiere una GPU con ASTC, como Mali.",
                 "As texturas BC1 e BC3 são recodificadas em ASTC 4x4 (8 bits por texel; o BC1 usa o dobro da memória do ETC2, mas fica mais fiel ao original e mantém o alfa exato). Requer uma GPU com ASTC, como a Mali.");
+        // en, fr, de, it, es, pt (other languages show the English text)
+        put("astcb_t", "ASTC block size", "Taille de bloc ASTC", "ASTC-Blockgröße", "Dimensione blocco ASTC",
+                "Tamaño de bloque ASTC", "Tamanho do bloco ASTC");
+        put("astcb_n",
+                "For textures converted to ASTC. Bigger blocks take much less memory and bandwidth but lose detail; cut-out alpha (leaves, fences) suffers most.",
+                "Pour les textures converties en ASTC. Des blocs plus grands prennent beaucoup moins de mémoire et de bande passante mais perdent des détails ; l'alpha découpé (feuilles, grilles) en souffre le plus.",
+                "Für nach ASTC umgewandelte Texturen. Größere Blöcke brauchen viel weniger Speicher und Bandbreite, verlieren aber Details; ausgeschnittenes Alpha (Blätter, Zäune) leidet am meisten.",
+                "Per le texture convertite in ASTC. Blocchi più grandi usano molta meno memoria e banda ma perdono dettaglio; l'alpha ritagliato (foglie, recinzioni) ne risente di più.",
+                "Para las texturas convertidas a ASTC. Los bloques grandes usan mucha menos memoria y ancho de banda, pero pierden detalle; el alfa recortado (hojas, rejas) es lo que más sufre.",
+                "Para texturas convertidas em ASTC. Blocos maiores usam muito menos memória e largura de banda, mas perdem detalhe; o alfa recortado (folhas, cercas) sofre mais.");
+        put("astcb_4", "4x4 (8 bits/texel, best)", "4x4 (8 bits/texel, meilleur)", "4x4 (8 Bit/Texel, beste)",
+                "4x4 (8 bit/texel, migliore)", "4x4 (8 bits/texel, mejor)", "4x4 (8 bits/texel, melhor)");
+        put("astcb_6", "6x6 (3.6 bits/texel)", "6x6 (3,6 bits/texel)", "6x6 (3,6 Bit/Texel)", "6x6 (3,6 bit/texel)",
+                "6x6 (3,6 bits/texel)", "6x6 (3,6 bits/texel)");
+        put("astcb_8", "8x8 (2 bits/texel, smallest)", "8x8 (2 bits/texel, le plus petit)", "8x8 (2 Bit/Texel, kleinste)",
+                "8x8 (2 bit/texel, il più piccolo)", "8x8 (2 bits/texel, el más pequeño)", "8x8 (2 bits/texel, o menor)");
+        put("bc5_t", "BC5 textures as ASTC", "Textures BC5 en ASTC", "BC5-Texturen als ASTC", "Texture BC5 in ASTC",
+                "Texturas BC5 en ASTC", "Texturas BC5 em ASTC");
+        put("bc5_n",
+                "Normal maps (BC5, 16 bits per texel once decoded) are re-encoded as ASTC at the block size above: half the memory at 4x4, an eighth at 8x8. Needs a GPU with ASTC, such as Mali.",
+                "Les normal maps (BC5, 16 bits par texel décodées) sont réencodées en ASTC à la taille de bloc ci-dessus : moitié de mémoire en 4x4, un huitième en 8x8. Nécessite un GPU avec ASTC, comme Mali.",
+                "Normal Maps (BC5, 16 Bit pro Texel decodiert) werden in der obigen Blockgröße als ASTC neu kodiert: halber Speicher bei 4x4, ein Achtel bei 8x8. Benötigt eine GPU mit ASTC, z. B. Mali.",
+                "Le normal map (BC5, 16 bit per texel decodificate) vengono ricodificate in ASTC con la dimensione di blocco sopra: metà memoria a 4x4, un ottavo a 8x8. Richiede una GPU con ASTC, come Mali.",
+                "Los mapas de normales (BC5, 16 bits por texel decodificados) se recodifican en ASTC con el tamaño de bloque de arriba: la mitad de memoria en 4x4, un octavo en 8x8. Requiere una GPU con ASTC, como Mali.",
+                "Os mapas de normais (BC5, 16 bits por texel decodificados) são recodificados em ASTC com o tamanho de bloco acima: metade da memória em 4x4, um oitavo em 8x8. Requer uma GPU com ASTC, como a Mali.");
         put("aniso_t", "Anisotropic filtering", "Filtrage anisotrope", "Anisotrope Filterung",
                 "Filtro anisotropico", "Filtrado anisotrópico", "Filtragem anisotrópica");
         put("aniso_n",
