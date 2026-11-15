@@ -532,6 +532,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "scale_filter")) cfg->scale_filter = std::clamp(v, 0, 1);
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
+            else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "fxaa")) {
