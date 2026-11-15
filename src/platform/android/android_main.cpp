@@ -383,6 +383,7 @@ bool SaveSetting(const std::string& path, const std::string& key, const std::str
 
 // settings.txt beside the game folder: "key = value" lines, '#' comments. Written with defaults if missing.
 void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
+    cfg->hud_full_res = true;  // on unless settings.txt says hud_full_res = 0
     FILE* f = fopen(path.c_str(), "r");
     if (!f) {
         if (FILE* w = fopen(path.c_str(), "w")) {
@@ -438,7 +439,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         }
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_gpu_driver = false, have_bc_enabler = false;
-        bool have_touch = false, have_aspect = false;
+        bool have_touch = false, have_aspect = false, have_hud_full_res = false;
         int settings_version = 1;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
@@ -461,7 +462,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "shader_depth_test")) cfg->shader_depth_test = v != 0;
             else if (!strcmp(key, "hole_test")) cfg->hole_test = v;
             else if (!strcmp(key, "hud_box")) cfg->hud_box = v != 0;
-            else if (!strcmp(key, "hud_full_res")) cfg->hud_full_res = v != 0;
+            else if (!strcmp(key, "hud_full_res")) {
+                cfg->hud_full_res = v != 0;
+                have_hud_full_res = true;
+            }
             else if (!strcmp(key, "compositor_scaling")) cfg->compositor_scaling = v != 0;
             else if (!strcmp(key, "max_anisotropy")) cfg->max_anisotropy = v;
             else if (!strcmp(key, "shadow_compare")) cfg->shadow_compare = std::clamp(v, 0, 3);
@@ -581,6 +585,14 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 fputs("\n" TOUCH_HELP TOUCH_DEFAULTS, w);
                 fclose(w);
                 LOGI(kTag, "settings: added the touch controls settings to %s", path.c_str());
+            }
+        if (!have_hud_full_res)
+            if (FILE* w = fopen(path.c_str(), "a")) {
+                fputs("\n# hud_full_res: 1 = the game's HUD, menus and text are drawn at the screen's full resolution\n"
+                      "# (sharp text at any render_scale); 0 = drawn in the game's own (smaller) frame\n"
+                      "hud_full_res = 1\n", w);
+                fclose(w);
+                LOGI(kTag, "settings: added hud_full_res to %s", path.c_str());
             }
         if (!have_gpu_driver)
             if (FILE* w = fopen(path.c_str(), "a")) {
