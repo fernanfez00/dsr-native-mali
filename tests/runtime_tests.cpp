@@ -693,6 +693,54 @@ static void TestAstcEncode() {
     }
 }
 
+// ASTC 6x6 / 8x8 and BC5 as luminance + alpha (settings astc_block, bc5_astc): every block is one this file's decoder
+// understands, sizes are as many bytes as 16 per block, and the pictures come back close to the source.
+static void TestAstcBlockSizes() {
+    using namespace dsr::hle::nvn;
+    CHECK(AstcBlockDim(6) == 6 && AstcBlockDim(8) == 8 && AstcBlockDim(5) == 4 && AstcBlockDim(0) == 4);
+    CHECK(AstcLevelBytes(37, 29, 1, 6) == size_t(7) * 5 * 16 && AstcLevelBytes(37, 29, 1, 8) == size_t(5) * 4 * 16);
+    CHECK(IsAstcLaEncodable(75) && !IsAstcLaEncodable(76) && !IsAstcLaEncodable(73));
+    const int W = 61, H = 45;
+    std::vector<uint8_t> rgba(size_t(W) * H * 4), rg(size_t(W) * H * 2);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint8_t* p = &rgba[(size_t(y) * W + x) * 4];
+            p[0] = uint8_t(x * 4);
+            p[1] = uint8_t(y * 5);
+            p[2] = uint8_t(100 + ((x + y) & 7));
+            p[3] = 255;
+            rg[(size_t(y) * W + x) * 2] = uint8_t(128 + 100 * std::sin(x * 0.2) * std::cos(y * 0.15));
+            rg[(size_t(y) * W + x) * 2 + 1] = uint8_t(128 + 100 * std::cos(x * 0.1 + y * 0.12));
+        }
+    for (int bw : {4, 6, 8}) {
+        const int bxn = (W + bw - 1) / bw, byn = (H + bw - 1) / bw;
+        for (int la = 0; la < 2; la++) {
+            std::vector<uint8_t> out(AstcLevelBytes(W, H, 1, bw));
+            if (la) EncodeAstcLA(out.data(), rg.data(), W, H, 1, bw);
+            else EncodeAstc(out.data(), rgba.data(), W, H, 1, bw);
+            double se = 0, n = 0;
+            bool understood = true;
+            for (int by = 0; by < byn; by++)
+                for (int bx = 0; bx < bxn; bx++) {
+                    uint8_t d[64][4];
+                    understood = understood && DecodeAstcBlock(&out[(size_t(by) * bxn + bx) * 16], bw, d);
+                    for (int y = 0; y < bw; y++)
+                        for (int x = 0; x < bw; x++) {
+                            const int sx = bx * bw + x, sy = by * bw + y;
+                            if (sx >= W || sy >= H) continue;
+                            for (int c = 0; c < (la ? 2 : 3); c++) {
+                                const double e = double(d[y * bw + x][la ? (c ? 3 : 0) : c]) - (la ? rg[(size_t(sy) * W + sx) * 2 + c] : rgba[(size_t(sy) * W + sx) * 4 + c]);
+                                se += e * e;
+                                n++;
+                            }
+                        }
+                }
+            CHECK(understood);
+            CHECK(n > 0 && se / n < 20.0 * 20.0);  // smooth pictures: well above 22 dB even in 8x8 blocks
+        }
+    }
+}
+
 // Cheat codes (Atmosphère format): parsing and the machine, on a fake memory with main at 0x1000 and the heap at
 // 0x100000.
 namespace {
@@ -816,6 +864,7 @@ int main() {
         {"block_linear", TestBlockLinear},
         {"etc_encode", TestEtcEncode},
         {"astc_encode", TestAstcEncode},
+        {"astc_block_sizes", TestAstcBlockSizes},
         {"cheats", TestCheats},
 #if defined(__aarch64__)
         {"abi_arm64", TestAbi},
