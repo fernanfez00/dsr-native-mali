@@ -414,6 +414,15 @@ final class Strings {
                 "Salta la catena di post-elaborazione dell'alone: più veloce sulle GPU deboli, ma senza l'alone attorno alle luci intense.",
                 "Omite la cadena de posprocesado del resplandor: más rápido en GPU modestas, pero sin el brillo alrededor de las luces intensas.",
                 "Pula a cadeia de pós-processamento do brilho: mais rápido em GPUs fracas, mas sem o brilho ao redor de luzes fortes.");
+        put("hidden_t", "Skip hidden objects", "Ignorer les objets cachés", "Verdeckte Objekte überspringen",
+                "Salta gli oggetti nascosti", "Omitir objetos ocultos", "Pular objetos ocultos");
+        put("hidden_n",
+                "Does not draw objects that covered no pixel in the last frames (retried every few frames). Faster on weak GPUs; an object coming into view can appear a few frames late.",
+                "Ne dessine pas les objets qui n'ont couvert aucun pixel ces dernières images (réessayés toutes les quelques images). Plus rapide sur les GPU modestes ; un objet qui apparaît peut arriver avec quelques images de retard.",
+                "Zeichnet keine Objekte, die in den letzten Bildern keinen Pixel abdeckten (alle paar Bilder erneut geprüft). Schneller auf schwachen GPUs; ein ins Bild tretendes Objekt kann einige Bilder zu spät erscheinen.",
+                "Non disegna gli oggetti che negli ultimi fotogrammi non hanno coperto alcun pixel (ritentati ogni pochi fotogrammi). Più veloce sulle GPU deboli; un oggetto che entra in vista può comparire con qualche fotogramma di ritardo.",
+                "No dibuja los objetos que no cubrieron ningún píxel en los últimos fotogramas (se reintentan cada pocos fotogramas). Más rápido en GPU modestas; un objeto que entra en vista puede aparecer con unos fotogramas de retraso.",
+                "Não desenha objetos que não cobriram nenhum pixel nos últimos quadros (testados de novo a cada poucos quadros). Mais rápido em GPUs fracas; um objeto que entra em vista pode aparecer com alguns quadros de atraso.");
         put("aniso_0", "Game's own", "Celui du jeu", "Wie im Spiel", "Quello del gioco", "El del juego", "O do jogo");
         put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
                 "Omitir mip de texturas", "Pular mip de texturas", "Пропуск MIP текстур", "テクスチャ MIP スキップ",
