@@ -421,6 +421,8 @@ public final class SettingsMenu {
                 new String[] {"15", "20", "30"}, new String[] {"15 fps", "20 fps", "30 fps"}, "20");
         choice("scale_filter", Strings.t("scalef_t"), Strings.t("scalef_n") + " " + Strings.t("changes_now"),
                 new String[] {"0", "1"}, new String[] {Strings.t("scalef_0"), Strings.t("scalef_1")}, "1");
+        toggle("hud_full_res", Strings.t("hudres_t"), Strings.t("hudres_n") + " " + Strings.t("changes_now"), "1", "0",
+                "1");
         choice("present_mode", Strings.t("present_t"), Strings.t("changes_next"),
                 new String[] {"fifo", "mailbox"},
                 new String[] {Strings.t("present_vsync") + " " + Strings.t("default_mark"), Strings.t("present_mailbox")},

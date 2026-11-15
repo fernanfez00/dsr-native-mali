@@ -232,6 +232,21 @@ final class Strings {
                 "확대된 화면을 부드럽게(바이리니어) 또는 픽셀을 선명하게(니어리스트) 유지합니다. 바이큐빅과 FXAA는 셰이더가 필요해 아직 없습니다.",
                 "平滑放大后的画面（双线性），或保持像素锐利（最近邻）。双三次和FXAA需要着色器，暂不可用。",
                 "平滑放大後的畫面（雙線性），或保持像素銳利（最近鄰）。雙三次和FXAA需要著色器，暫不可用。");
+        put("hudres_t", "Sharp HUD and menus", "HUD et menus nets", "Scharfes HUD und Menüs", "HUD e menu nitidi",
+                "HUD y menús nítidos", "HUD e menus nítidos", "Четкий HUD и меню", "HUDとメニューを鮮明に", "선명한 HUD와 메뉴",
+                "清晰的HUD和菜单", "清晰的HUD和選單");
+        put("hudres_n",
+                "Draws the game's HUD, menus and text at the screen's full resolution, whatever the render scale. Costs a little GPU time.",
+                "Dessine l'interface, les menus et les textes du jeu à la résolution complète de l'écran, quelle que soit l'échelle de rendu. Coûte un peu de GPU.",
+                "Zeichnet HUD, Menüs und Texte des Spiels in der vollen Bildschirmauflösung, unabhängig von der Render-Skalierung. Kostet etwas GPU-Zeit.",
+                "Disegna HUD, menu e testi del gioco alla risoluzione piena dello schermo, qualunque sia la scala di rendering. Costa un po' di GPU.",
+                "Dibuja el HUD, los menús y los textos del juego a la resolución completa de la pantalla, sea cual sea la escala de renderizado. Cuesta algo de GPU.",
+                "Desenha o HUD, os menus e os textos do jogo na resolução total da tela, seja qual for a escala de renderização. Custa um pouco de GPU.",
+                "Рисует HUD, меню и текст игры в полном разрешении экрана независимо от масштаба рендера. Немного нагружает GPU.",
+                "ゲームのHUD・メニュー・文字を、レンダースケールに関係なく画面の最大解像度で描画します。GPU負荷が少し増えます。",
+                "렌더 스케일과 관계없이 게임의 HUD, 메뉴, 텍스트를 화면 전체 해상도로 그립니다. GPU를 조금 더 사용합니다.",
+                "无论渲染比例如何，都以屏幕的完整分辨率绘制游戏的HUD、菜单和文字。会略微增加GPU负担。",
+                "無論渲染比例如何，都以螢幕的完整解析度繪製遊戲的HUD、選單和文字。會略微增加GPU負擔。");
         put("scalef_0", "Nearest", "Pixels nets", "Nächster Nachbar", "Vicino", "Vecino más cercano", "Vizinho mais próximo",
                 "Ближайший", "ニアレスト", "니어리스트", "最近邻", "最近鄰");
         put("scalef_1", "Bilinear", "Bilinéaire", "Bilinear", "Bilineare", "Bilineal", "Bilinear", "Билинейный",
