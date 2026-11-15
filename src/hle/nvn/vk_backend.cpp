@@ -3052,6 +3052,7 @@ private:
                 case 3: ci.compareOp = VK_COMPARE_OP_NEVER; break;
                 default: break;
             }
+            if (dsr::GetRuntime().config.shadow_quality == 0) ci.compareOp = VK_COMPARE_OP_NEVER;  // always lit
         }
         ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         VkSampler smp = VK_NULL_HANDLE;
@@ -4691,6 +4692,18 @@ private:
                                        HasDepth(depth_peek->nvn_format) && st_.depth.depth_test && !st_.depth.depth_write &&
                                        st_.program[1] && st_.depth.depth_func != 8 && !debug_fx;
         if (shader_depth_test) fopt.depth_test_func = st_.depth.depth_func;
+        // shadow_quality 0: the shadow map pass (depth only, square target, nothing else bound) is not drawn. The
+        // lookups are answered "lit" by the sampler (see Sampler), so the map's contents do not matter.
+        if (dsr::GetRuntime().config.shadow_quality == 0 && st_.num_rt == 0 && !st_.program[1] && depth_peek &&
+            depth_peek->width == depth_peek->height && depth_peek->width >= 256 && depth_peek->width <= 2048 &&
+            IsDepthFormat(depth_peek->nvn_format))
+        {
+            if (!shadow_skip_logged_) {
+                shadow_skip_logged_ = true;
+                LOGI(kTag, "shadow_quality 0: the shadow map pass (%dx%d) is not drawn", depth_peek->width, depth_peek->height);
+            }
+            return;
+        }
         Shader* vs = GetShader(*st_.program[0], vopt);
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
@@ -7012,6 +7025,7 @@ private:
     int win_w_ = 0, win_h_ = 0;     // the window's size (EnsureSwapchain)
     bool bc_patched_ = false, bc_forced_ = false;
     bool mip_skip_ = false;      // settings texture_mip_skip
+    bool shadow_skip_logged_ = false;
     uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
     std::unordered_set<uint64_t> hud_box_logged_;
