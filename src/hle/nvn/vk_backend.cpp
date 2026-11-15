@@ -7643,7 +7643,12 @@ private:
     uint64_t skipped_draws_ = 0;
     void ParseSkipList() {
         skip_parsed_ = true;
-        const std::string& s = dsr::GetRuntime().config.skip_fs;
+        // skip_bloom (settings): the glow chain of the post-processing (from a frame capture on a Mali-G57: a bright
+        // pass and the blurs at 192x108 / 96x54 that feed the final composite). The downsample shared with the depth
+        // of field (8801d1d8f9f8273b) is left alone.
+        std::string s = dsr::GetRuntime().config.skip_fs;
+        if (dsr::GetRuntime().config.skip_bloom)
+            s += ",c3d56b6401ccb572,512397bbc420f850,9b44066e84ff04c6,82aa25701a19c22b";
         size_t at = 0;
         while (at < s.size()) {
             size_t end = s.find_first_of(", ;", at);
