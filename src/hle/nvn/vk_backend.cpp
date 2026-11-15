@@ -61,6 +61,7 @@
 #include "hle/nvn/shader/translator.h"
 #include "hle/nvn/state.h"
 #include "hle/video.h"
+#include "hle/nvn/postfx_spv.h"
 
 namespace dsr::hle::nvn {
 #include "hle/nvn/vk_dispatch.h"
@@ -1567,6 +1568,8 @@ private:
         LOGI(kTag, "GPU: %s, Vulkan %u.%u.%u, driver 0x%x (%u.%u)", props_.deviceName, VK_VERSION_MAJOR(props_.apiVersion),
              VK_VERSION_MINOR(props_.apiVersion), VK_VERSION_PATCH(props_.apiVersion), props_.driverVersion,
              VK_VERSION_MAJOR(props_.driverVersion), VK_VERSION_MINOR(props_.driverVersion));
+        gpu_mali_ = strstr(props_.deviceName, "Mali") != nullptr || props_.vendorID == 0x13B5;  // Arm
+        if (gpu_mali_) LOGI(kTag, "Arm Mali GPU: tile-based, no BC textures (ETC2 re-encode), pipelines ~14 KB each");
         // Qualcomm's Adreno 6xx drivers (512.x before 512.514) do not expose the BC texture formats the GPU
         // supports; BCeNabler (libadrenotools) patches the driver in memory to expose them, which saves the
         // software decoding (and BC6H/BC7 then look right).
@@ -1841,15 +1844,31 @@ private:
     void WritePipelineCache() {
         const std::string path = PipelineCachePath();
         if (!pipeline_cache_ || path.empty()) return;
+        // The compiler threads may add pipelines between the size query and the data query: the second then returns
+        // VK_INCOMPLETE and (before) nothing was written. A Mali keeps ~14 KB a pipeline (a 1600-pipeline cache is
+        // ~20 MB), so a burst of new scenery easily outgrows the size asked for: ask again with room to spare
+        // (a quarter more and 1 MB), up to five tries (as gu-native does).
+        std::vector<uint8_t> data;
         size_t n = 0;
-        if (vkGetPipelineCacheData(device_, pipeline_cache_, &n, nullptr) != VK_SUCCESS || !n) return;
-        std::vector<uint8_t> data(n);
-        if (vkGetPipelineCacheData(device_, pipeline_cache_, &n, data.data()) != VK_SUCCESS) return;
+        VkResult res = VK_INCOMPLETE;
+        for (int tries = 0; tries < 5 && res == VK_INCOMPLETE; tries++) {
+            n = 0;
+            if (vkGetPipelineCacheData(device_, pipeline_cache_, &n, nullptr) != VK_SUCCESS || !n) return;
+            n += n / 4 + (size_t(1) << 20);
+            data.assign(n, 0);
+            res = vkGetPipelineCacheData(device_, pipeline_cache_, &n, data.data());
+        }
+        if (res != VK_SUCCESS) {
+            LOGW(kTag, "pipeline cache not saved: vkGetPipelineCacheData returned %d", int(res));
+            return;
+        }
         const std::string tmp = path + ".tmp";
         if (FILE* f = fopen(tmp.c_str(), "wb")) {
             const bool ok = fwrite(data.data(), 1, n, f) == n;
             fclose(f);
             if (ok) rename(tmp.c_str(), path.c_str());
+            else remove(tmp.c_str());
+            LOGI(kTag, "pipeline cache %s: %zu KB", ok ? "saved" : "NOT saved (write failed)", n >> 10);
         }
     }
 
@@ -6958,9 +6977,16 @@ private:
     // than the frame): the frame's aspect ratio fitted into the window.
     void HudUpdateSize(const Image& f) {
         int w = 0, h = 0;
-        if (dsr::GetRuntime().config.hud_full_res && win_w_ > 0 && win_h_ > 0 && f.width > 0 && f.height > 0) {
-            const double k = std::min(double(win_w_) / f.width, double(win_h_) / f.height);
-            if (k >= 1.2) {
+        const dsr::RuntimeConfig& cfg = dsr::GetRuntime().config;
+        if (cfg.hud_full_res && win_w_ > 0 && win_h_ > 0 && f.width > 0 && f.height > 0) {
+            double k = std::min(double(win_w_) / f.width, double(win_h_) / f.height);
+            // hud_max_height: the picture (and the HUD on it) is at most this many lines tall; the system compositor
+            // enlarges it to the screen. Fewer pixels for FSR, the HUD and the final pass on a weak GPU (Mali).
+            if (cfg.hud_max_height >= 360 && f.height * k > cfg.hud_max_height)
+                k = std::max(1.0, double(cfg.hud_max_height) / f.height);
+            // FXAA (settings fxaa) runs in the HUD path, so it is also used when the screen is barely bigger than the
+            // frame (a 720p phone at the game's own size); without it only from 1.2x on.
+            if (k >= (cfg.fxaa > 0 ? 1.0 : 1.2)) {
                 w = int(std::lround(f.width * k));
                 h = int(std::lround(f.height * k));
             }
@@ -7017,25 +7043,43 @@ private:
     bool HudStart(Image& f) {
         if (!HudEnsureImage(hud_img_, f)) return false;
         EndRendering();
+        // settings fxaa: FXAA 3.11 over the picture at the game's render size first (cheaper than at the screen's
+        // size); FSR 1 or the blit below then enlarge its result. Nothing to enlarge: it draws into the HUD image.
+        Image* src = &f;
+        bool done = false;
+        if (dsr::GetRuntime().config.fxaa > 0 && PostFxUsable(f)) {
+            const bool same_size = hud_w_ == f.width && hud_h_ == f.height;
+            Image* dst = same_size ? &hud_img_ : nullptr;
+            if (!dst && PostEnsureImage(post_fxaa_img_, f, f.width, f.height)) dst = &post_fxaa_img_;
+            if (dst && PostFxaa(f, *dst, dsr::GetRuntime().config.fxaa >= 2)) {
+                if (dst == &hud_img_) done = true;
+                else src = dst;
+            }
+        }
+        if (done) {
+            hud_img_.written = true;
+            hud_t_addr_ = f.addr;
+            return true;
+        }
 #ifdef DSR_HAVE_FSR1
-        if (Fsr1Upscale(f)) {
+        if (Fsr1Upscale(*src)) {
             hud_img_.written = true;
             hud_t_addr_ = f.addr;
             return true;
         }
 #endif
-        Transition(f, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(*src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(hud_img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkImageBlit b{};
-        b.srcSubresource = {f.aspect, 0, 0, 1};
-        b.srcOffsets[1] = {f.width, f.height, 1};
+        b.srcSubresource = {src->aspect, 0, 0, 1};
+        b.srcOffsets[1] = {src->width, src->height, 1};
         b.dstSubresource = {hud_img_.aspect, 0, 0, 1};
         b.dstOffsets[1] = {hud_w_, hud_h_, 1};
         const VkFilter filter = (dsr::GetRuntime().config.scale_filter == 0 ||
                                  !(f.features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
                                     ? VK_FILTER_NEAREST
                                     : VK_FILTER_LINEAR;
-        Rec([b, filter, si = f.image, di = hud_img_.image](VkCommandBuffer cb) {
+        Rec([b, filter, si = src->image, di = hud_img_.image](VkCommandBuffer cb) {
             vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, di, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                            filter);
         });
@@ -7043,6 +7087,289 @@ private:
         hud_t_addr_ = f.addr;
         return true;
     }
+    // ---- post-processing passes: FXAA 3.11 (from gu-native) (FSR 1 stays in Fsr1*) -------------
+    // All are fragment passes over a full-screen triangle (render pass objects, which every driver has), so no storage
+    // images, no compute and no capability beyond Shader / ImageQuery are needed: they run on a Mali-G57 as anywhere.
+    // The SPIR-V is compiled from shaders/*.{vert,frag} by tools/gen_postfx_shaders.py (postfx_spv.h).
+    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostKinds };
+    struct PostPipe {
+        VkPipeline pipe = VK_NULL_HANDLE;
+        VkRenderPass rp = VK_NULL_HANDLE;
+        VkFormat fmt = VK_FORMAT_UNDEFINED;
+        int kind = 0;
+    };
+    struct PostJob {  // one pass, as queued for the recorder
+        VkPipeline pipe;
+        VkRenderPass rp;
+        VkFramebuffer fb;
+        VkImageView src_view;
+        uint32_t w, h, push_size;
+        uint32_t push[20];
+    };
+    VkShaderModule post_vs_ = VK_NULL_HANDLE, post_fs_[kPostKinds] = {};
+    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
+    VkSampler post_sampler_ = VK_NULL_HANDLE;
+    std::vector<PostPipe> post_pipes_;
+    bool post_ready_ = false, post_failed_ = false;
+    Image post_fxaa_img_;  // FXAA's output at the game's render size
+
+    static uint32_t FloatBits(float v) {
+        uint32_t u;
+        memcpy(&u, &v, sizeof(u));
+        return u;
+    }
+    // Linear-light formats (sRGB views and float formats sample as linear values): the passes work in gamma 2.0 space.
+    static bool PostPerceptual(VkFormat f) {
+        switch (f) {
+            case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+            case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+            case VK_FORMAT_R32G32B32A32_SFLOAT:
+                return true;
+            default:
+                return false;
+        }
+    }
+    bool PostInit() {
+        if (post_ready_) return true;
+        if (post_failed_) return false;
+        post_failed_ = true;  // until everything below is made
+        if (props_.limits.maxPushConstantsSize < 80) {
+            LOGW(kTag, "post-processing off: push constants of %u bytes only", props_.limits.maxPushConstantsSize);
+            return false;
+        }
+        auto module = [&](const uint32_t* code, size_t bytes, VkShaderModule* out) {
+            VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            ci.codeSize = bytes;
+            ci.pCode = code;
+            return vkCreateShaderModule(device_, &ci, nullptr, out) == VK_SUCCESS;
+        };
+        namespace sp = postfx_spv;
+        if (!module(sp::kFullscreenVert, sp::kFullscreenVertSize, &post_vs_) ||
+            !module(sp::kFxaaFastFrag, sp::kFxaaFastFragSize, &post_fs_[kPostFxaaFast]) ||
+            !module(sp::kFxaaQualityFrag, sp::kFxaaQualityFragSize, &post_fs_[kPostFxaaQuality])) {
+            LOGW(kTag, "post-processing off: a shader module could not be made");
+            return false;
+        }
+        VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                          nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = 1;
+        li.pBindings = &bind;
+        if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &post_set_layout_) != VK_SUCCESS) return false;
+        VkPushConstantRange pr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 80};
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pl.setLayoutCount = 1;
+        pl.pSetLayouts = &post_set_layout_;
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &pr;
+        if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout_) != VK_SUCCESS) return false;
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        if (vkCreateSampler(device_, &sci, nullptr, &post_sampler_) != VK_SUCCESS) return false;
+        post_failed_ = false;
+        post_ready_ = true;
+        LOGI(kTag, "post-processing ready (FXAA fast / quality) on %s%s", props_.deviceName,
+             gpu_mali_ ? " (Mali)" : "");
+        return true;
+    }
+    // Whether the passes can run with `f` as the picture: the format must be filterable and drawable.
+    bool PostFxUsable(const Image& f) {
+        if (!PostInit()) return false;
+        constexpr VkFormatFeatureFlags kNeed =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        return f.type == VK_IMAGE_TYPE_2D && f.levels == 1 && f.layers == 1 && f.aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+               (f.features & kNeed) == kNeed;
+    }
+    // An image like `f` at w x h in `slot`, made (again) when its size or format changed; retired like any image.
+    bool PostEnsureImage(Image& slot, const Image& f, int w, int h) {
+        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == f.vk_format) return true;
+        if (slot.image) DestroyImage(slot);
+        Image n;
+        n.vk_format = f.vk_format;
+        n.nvn_format = f.nvn_format;
+        n.target = f.target;
+        n.type = VK_IMAGE_TYPE_2D;
+        n.width = w;
+        n.height = h;
+        n.aspect = f.aspect;
+        n.features = f.features;
+        if (!AllocImage(n, false, false, &n.image, &n.memory)) return false;
+        slot = std::move(n);
+        LOGI(kTag, "post-processing image %dx%d (format %d)", w, h, int(slot.vk_format));
+        return true;
+    }
+    VkPipeline PostPipeline(int kind, VkFormat fmt, VkRenderPass* rp_out) {
+        for (const PostPipe& pp : post_pipes_)
+            if (pp.kind == kind && pp.fmt == fmt) {
+                *rp_out = pp.rp;
+                return pp.pipe;
+            }
+        const VkAttachmentLoadOp dont_care = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every pass covers its whole target
+        VkRenderPass rp = MakeRenderPass(&fmt, 1, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, &dont_care,
+                                         VK_ATTACHMENT_LOAD_OP_LOAD);
+        if (!rp) return VK_NULL_HANDLE;
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = post_vs_;
+        stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = post_fs_[kind];
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState att{};
+        att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                             VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &att;
+        const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+        VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        ci.stageCount = 2;
+        ci.pStages = stages;
+        ci.pVertexInputState = &vi;
+        ci.pInputAssemblyState = &ia;
+        ci.pViewportState = &vp;
+        ci.pRasterizationState = &rs;
+        ci.pMultisampleState = &ms;
+        ci.pColorBlendState = &cb;
+        ci.pDynamicState = &dy;
+        ci.layout = post_layout_;
+        ci.renderPass = rp;
+        VkPipeline pipe = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
+            LOGW(kTag, "post-processing pipeline %d (format %d) failed", kind, int(fmt));
+            return VK_NULL_HANDLE;
+        }
+        post_pipes_.push_back({pipe, rp, fmt, kind});
+        *rp_out = rp;
+        return pipe;
+    }
+    VkFramebuffer PostFramebuffer(VkRenderPass rp, VkImageView view, uint32_t w, uint32_t h) {
+        // Cached like the draws' framebuffers (same key layout: they go when the view is destroyed with its image).
+        std::vector<uint64_t> key{reinterpret_cast<uint64_t>(rp), uint64_t(w) << 32 | h, reinterpret_cast<uint64_t>(view)};
+        {
+            std::lock_guard<std::mutex> lk(fb_mutex_);
+            auto it = fb_cache_.find(key);
+            if (it != fb_cache_.end()) return it->second;
+        }
+        VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fi.renderPass = rp;
+        fi.attachmentCount = 1;
+        fi.pAttachments = &view;
+        fi.width = w;
+        fi.height = h;
+        fi.layers = 1;
+        VkFramebuffer fb = VK_NULL_HANDLE;
+        if (vkCreateFramebuffer(device_, &fi, nullptr, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
+        std::lock_guard<std::mutex> lk(fb_mutex_);
+        fb_cache_.emplace(std::move(key), fb);
+        return fb;
+    }
+    // Recorder thread: a descriptor set of post_set_layout_ from the slot's pool (a full pool continues in another).
+    bool AllocPostSet(VkDescriptorSet* set) {
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &post_set_layout_;
+        for (int tries = 0; tries < 3; tries++) {
+            dai.descriptorPool = desc_pool_;
+            if (vkAllocateDescriptorSets(device_, &dai, set) == VK_SUCCESS) return true;
+            Slot& sl = slots_[rec_slot_];
+            if (sl.extra_used >= sl.extra_pools.size()) {
+                const VkDescriptorPool np = MakeDescriptorPool();
+                if (!np) return false;
+                sl.extra_pools.push_back(np);
+                desc_pools_added_++;
+            }
+            desc_pool_ = sl.extra_pools[sl.extra_used++];
+        }
+        return false;
+    }
+    // Recorder thread: one full-target pass sampling job.src_view.
+    void RecordPostPass(VkCommandBuffer cb, const PostJob& j) {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (!AllocPostSet(&set)) {
+            LogOnce("postfx_set", "post-processing: no descriptor set");
+            return;
+        }
+        VkDescriptorImageInfo ii{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = set;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+        const VkRect2D area{{0, 0}, {j.w, j.h}};
+        VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        bi.renderPass = j.rp;
+        bi.framebuffer = j.fb;
+        bi.renderArea = area;
+        vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout_, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
+        const VkViewport vp{0.0f, 0.0f, float(j.w), float(j.h), 0.0f, 1.0f};
+        vkCmdSetViewport(cb, 0, 1, &vp);
+        vkCmdSetScissor(cb, 0, 1, &area);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cb);
+        // The pass bound its own pipeline, sets, dynamic state and push constants: the draws' cached state is stale.
+        InvalidateBoundState();
+    }
+    // One pass: `src` (sampled) into `dst` (rendered), both whole. False (nothing recorded) when it cannot be done.
+    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words) {
+        VkRenderPass rp = VK_NULL_HANDLE;
+        const VkPipeline pipe = PostPipeline(kind, dst.vk_format, &rp);
+        if (!pipe) return false;
+        static const uint8_t kIdentity[4] = {2, 3, 4, 5};
+        Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        const VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src.aspect, kIdentity);
+        const VkImageView dv = AttachmentView(dst);
+        const VkFramebuffer fb = dv ? PostFramebuffer(rp, dv, uint32_t(dst.width), uint32_t(dst.height)) : VK_NULL_HANDLE;
+        if (!sv || !fb) return false;
+        PostJob j{};
+        j.pipe = pipe;
+        j.rp = rp;
+        j.fb = fb;
+        j.src_view = sv;
+        j.w = uint32_t(dst.width);
+        j.h = uint32_t(dst.height);
+        j.push_size = push_words * 4;
+        memcpy(j.push, push, push_words * 4);
+        Rec([this, j](VkCommandBuffer cb) { RecordPostPass(cb, j); });
+        dst.written = true;
+        // The next user of `dst` is either a sampling pass (readable by fragment shaders as soon as this pass ends) or,
+        // for the HUD image, the HUD's own render passes, which need a barrier after this one (BeginRendering).
+        if (&dst == &post_fxaa_img_) PassEndBarrier(dst);
+        else dst.attach_unsynced = true;
+        return true;
+    }
+    bool PostFxaa(Image& src, Image& dst, bool quality) {
+        const uint32_t push[1] = {PostPerceptual(src.vk_format) ? 1u : 0u};
+        return PostPass(quality ? kPostFxaaQuality : kPostFxaaFast, src, dst, push, 1);
+    }
+    bool gpu_mali_ = false;  // an Arm Mali (the device's name)
 #ifdef DSR_HAVE_FSR1
     // ---- FSR 1 (settings upscaler = 1: EASU, 2: EASU + RCAS) ---------------------------------------------------
     // Replaces the bilinear blit that enlarges the 3D picture into the screen-sized HUD image (HudStart): EASU
