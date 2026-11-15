@@ -380,6 +380,15 @@ final class Strings {
                 "Limite del filtraggio delle texture ad angoli obliqui. Più basso = più veloce sulle GPU deboli.",
                 "Límite del filtrado de texturas en ángulos oblicuos. Más bajo es más rápido en GPU modestas.",
                 "Limite da filtragem de texturas em ângulos oblíquos. Mais baixo é mais rápido em GPUs fracas.");
+        put("bloom_t", "Remove bloom", "Supprimer le bloom", "Bloom entfernen", "Rimuovi il bloom", "Quitar el bloom",
+                "Remover o bloom");
+        put("bloom_n",
+                "Skips the glow post-processing chain: faster on weak GPUs, but without the glow around bright lights.",
+                "Saute la chaîne de post-traitement du halo : plus rapide sur les GPU modestes, mais sans le halo autour des lumières vives.",
+                "Überspringt die Glühen-Nachbearbeitung: schneller auf schwachen GPUs, aber ohne Leuchten um helle Lichter.",
+                "Salta la catena di post-elaborazione dell'alone: più veloce sulle GPU deboli, ma senza l'alone attorno alle luci intense.",
+                "Omite la cadena de posprocesado del resplandor: más rápido en GPU modestas, pero sin el brillo alrededor de las luces intensas.",
+                "Pula a cadeia de pós-processamento do brilho: mais rápido em GPUs fracas, mas sem o brilho ao redor de luzes fortes.");
         put("aniso_0", "Game's own", "Celui du jeu", "Wie im Spiel", "Quello del gioco", "El del juego", "O do jogo");
         put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
                 "Omitir mip de texturas", "Pular mip de texturas", "Пропуск MIP текстур", "テクスチャ MIP スキップ",

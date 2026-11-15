@@ -456,6 +456,7 @@ public final class SettingsMenu {
                 new String[] {Strings.t("q_high"), Strings.t("q_medium"), Strings.t("q_low"), Strings.t("q_off")}, "3");
         toggle("low_effects", Strings.t("loweff_t"), Strings.t("loweff_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        toggle("skip_bloom", Strings.t("bloom_t"), Strings.t("bloom_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("max_anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "2", "4", "8", "16"},
                 new String[] {Strings.t("aniso_0"), "2x", "4x", "8x", "16x"}, "0");
