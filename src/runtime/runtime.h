@@ -41,6 +41,11 @@ struct RuntimeConfig {
     std::string aspect_ratio = "16:9";
     float screen_aspect = 0;  // width / height of the screen (Android: the window), 0 = unknown
     bool hud_box = true;      // other aspect ratios: keep the HUD and menus in a centred 16:9 box
+    // hud_full_res = 1: the game's HUD and menus (its blended 2D layer) are drawn into a screen-sized image on top of
+    // the enlarged 3D picture, instead of into the game's frame (render size) that the screen then stretches: text
+    // and icons stay sharp at any render_scale / aspect_ratio. Costs one enlarging blit and one screen-sized copy per
+    // frame; it only applies when the screen is at least 1.2x the game's frame.
+    bool hud_full_res = true;
     int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied
     int render_height = 720;
     float render_scale = 1.0f;  // settings render_scale: 0.5 - 1.0 of the game's 720-line resolution
