@@ -647,6 +647,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");
     LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d", int(cfg->hud_full_res),
          cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden));
+    LOGI(kTag, "settings: astc_block %d, bc_astc %d, bc5_astc %d, bc3_etc2 %d, skip_bloom %d, fxaa %d, upscaler %d, fsr_sharpness %d, "
+         "hud_max_height %d, max_anisotropy %d, fps %d%s",
+         cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), int(cfg->bc3_etc2), int(cfg->skip_bloom), cfg->fxaa,
+         cfg->upscaler, cfg->fsr_sharpness, cfg->hud_max_height, cfg->max_anisotropy, cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "");
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
