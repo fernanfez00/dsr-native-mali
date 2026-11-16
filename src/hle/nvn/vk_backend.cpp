@@ -973,6 +973,10 @@ public:
             capture_active_ = true;
             world_draws_logged_ = 0;
             capture_pass_ = 0;
+            pass_infos_.clear();
+            pass_fs_first_ = 0;
+            pass_distinct_fs_ = 0;
+            pass_target_.clear();
             pass_written_.clear();
             pass_draws_ = 0;
             query_pass_.clear();
@@ -1006,6 +1010,10 @@ public:
         capture_active_ = true;
         world_draws_logged_ = 0;
         capture_pass_ = 0;
+        pass_infos_.clear();
+        pass_fs_first_ = 0;
+        pass_distinct_fs_ = 0;
+        pass_target_.clear();
         if (!query_pool_) {
             VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             qi.queryType = VK_QUERY_TYPE_OCCLUSION;
@@ -1051,6 +1059,19 @@ public:
     }
     void CaptureEndOfPass() {
         WriteTimestamp();
+        {
+            PassInfo pi;
+            pi.pass = capture_pass_;
+            pi.draws = pass_draws_;
+            pi.fs_first = pass_fs_first_;
+            pi.fs_last = pass_fs_hash_;
+            pi.distinct_fs = pass_distinct_fs_;
+            pi.target = pass_target_.empty() ? "-" : pass_target_;
+            pass_infos_.push_back(pi);
+            pass_fs_first_ = 0;
+            pass_distinct_fs_ = 0;
+            pass_target_.clear();
+        }
         if (!pass_written_.empty())
             LOGI(kTag, "capture pass %u: %u draws, last fs %016llx (code @%llx, vs @%llx), last textures:%s", capture_pass_,
                  pass_draws_, (unsigned long long)pass_fs_hash_, (unsigned long long)pass_fs_addr_,
@@ -1202,17 +1223,37 @@ public:
                 const double ns = props_.limits.timestampPeriod;
                 std::string line;
                 double total = 0;
+                std::map<uint32_t, double> pass_ms;
                 for (uint32_t i = 1; i < ts_count_; i++) {
                     const double ms = double(ts[i] - ts[i - 1]) * ns / 1e6;
                     total += ms;
+                    pass_ms[ts_pass_[i]] += ms;
                     if (ms < 0.05) continue;
                     char d[48];
                     snprintf(d, sizeof(d), " p%u:%.2f", ts_pass_[i], ms);
                     line += d;
                 }
                 LOGI(kTag, "capture %d GPU ms per pass (total %.1f ms):%s", captures_done_ + 1, total, line.c_str());
+                // The same, one line per pass, slowest first: target, draws, fragment programs (first .. last).
+                std::vector<std::pair<double, size_t>> order;
+                for (size_t k = 0; k < pass_infos_.size(); k++) order.push_back({pass_ms[pass_infos_[k].pass], k});
+                std::sort(order.begin(), order.end(), [](auto& a, auto& b) { return a.first > b.first; });
+                LOGI(kTag, "capture %d pass table: %zu passes, %.1f ms of GPU time, slowest first (pass: ms, share | target | draws | "
+                     "fragment programs first..last, how many different)", captures_done_ + 1, pass_infos_.size(), total);
+                double shown = 0;
+                for (size_t r = 0; r < order.size() && r < 40; r++) {
+                    const PassInfo& pi = pass_infos_[order[r].second];
+                    shown += order[r].first;
+                    LOGI(kTag, "capture %d pass table: p%u: %.2f ms, %.0f%% | %s | %u draws | fs %016llx..%016llx (%u)",
+                         captures_done_ + 1, pi.pass, order[r].first, total > 0 ? 100.0 * order[r].first / total : 0.0,
+                         pi.target.c_str(), pi.draws, (unsigned long long)pi.fs_first, (unsigned long long)pi.fs_last,
+                         pi.distinct_fs);
+                }
+                if (order.size() > 40) LOGI(kTag, "capture %d pass table: %zu more passes, %.1f ms together", captures_done_ + 1,
+                                            order.size() - 40, total - shown);
             }
         }
+        pass_infos_.clear();
         captures_done_++;
         if (query_pool_ && !query_pass_.empty()) {
             std::vector<uint64_t> res(query_pass_.size());
@@ -3471,6 +3512,11 @@ private:
     std::unordered_map<uint64_t, OccState> occ_state_;
     uint32_t occ_frame_ = 0;
     uint64_t occ_skipped_ = 0, occ_queried_ = 0;
+    // Why draws were not judged (log line of skip_hidden): shader depth test, not indexed, not triangles, no depth
+    // target >= 256 wide, no depth test, stencil, blending, writes nothing, no vertex program / buffer, vertex
+    // constants unusable, query not recorded (pool missing or full); and the draws that were judged.
+    static constexpr int kOccReasons = 11;
+    uint64_t occ_reject_[kOccReasons] = {}, occ_judged_ = 0;
     // The result of a finished submission's queries (its fence has signalled): render thread.
     void CollectOcclusion(Slot& sl) {
         const uint32_t n = std::min<uint32_t>(sl.occ_used, uint32_t(sl.occ_keys.size()));
@@ -3495,15 +3541,25 @@ private:
         sl.occ_keys.clear();
     }
     std::vector<uint64_t> occ_results_;
+    std::unordered_set<int> unsupported_logged_;  // NVN formats already reported as having no Vulkan format
     // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles, depth tested, written
     // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
     // blends (effects) or uses stencil is always drawn.
     bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
-        if (shader_depth_test || p.index_type < 0 || p.mode != 4 || p.count < 3) return false;
-        if (!depth || depth->width < 256 || !st_.depth.depth_test || st_.depth.stencil_test) return false;
-        if (st_.color.blend_enable != 0) return false;
-        const bool writes_color = !colors.empty() && colors[0] && (st_.channel.mask & 0xF) != 0;
-        return st_.depth.depth_write || writes_color;
+        int why = -1;
+        if (shader_depth_test) why = 0;
+        else if (p.index_type < 0) why = 1;
+        else if (p.mode != 4 || p.count < 3) why = 2;
+        else if (!depth || depth->width < 256) why = 3;
+        else if (!st_.depth.depth_test) why = 4;
+        else if (st_.depth.stencil_test) why = 5;
+        else if (st_.color.blend_enable != 0) why = 6;
+        else if (!(st_.depth.depth_write || (!colors.empty() && colors[0] && (st_.channel.mask & 0xF) != 0))) why = 7;
+        if (why >= 0) {
+            occ_reject_[why]++;
+            return false;
+        }
+        return true;
     }
     // 0: draw, 1: draw with a query, 2: leave out.
     int OccDecide(uint64_t key) {
@@ -4842,10 +4898,16 @@ private:
     // The draw's identity across frames (false: not trackable). The first 128 bytes of the vertex constants hold the
     // camera, so only the part after them (the object's transforms) goes in.
     bool OccKey(const DrawParams& p, const VertexInput& vin, uint32_t target_w, uint64_t* out) {
-        if (!st_.program[0] || vin.bindings.empty()) return false;
+        if (!st_.program[0] || vin.bindings.empty()) {
+            occ_reject_[8]++;
+            return false;
+        }
         const BufferRange& c3 = st_.uniforms[0][0];
         constexpr uint64_t kFrom = 128, kLen = 96;
-        if (!c3.address || c3.size < kFrom + kLen || !GuestRangeValid(c3.address + kFrom, size_t(kLen))) return false;
+        if (!c3.address || c3.size < kFrom + kLen || !GuestRangeValid(c3.address + kFrom, size_t(kLen))) {
+            occ_reject_[9]++;
+            return false;
+        }
         uint64_t h = 1469598103934665603ull;
         const auto mix = [&h](uint64_t v) {
             h ^= v;
@@ -4991,6 +5053,7 @@ private:
         bool occ_query = false;
         if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
             OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
+            occ_judged_++;
             const int act = OccDecide(occ_key);
             if (act == 2) {
                 occ_skipped_++;
@@ -5061,6 +5124,9 @@ private:
                 if (!img) {
                     // Missing or unsupported texture: draw with a white stand-in rather than dropping the
                     // draw (one skipped pass can blank the whole frame).
+                    if (bt.valid && unsupported_logged_.insert(bt.texture.tex.format).second)
+                        LOGW(kTag, "texture of NVN format %d (%dx%d, %d levels) has no usable Vulkan format: white stand-in used",
+                             bt.texture.tex.format, bt.texture.tex.width, bt.texture.tex.height, bt.texture.tex.levels);
                     Skip(bt.valid ? "texture format not supported (white stand-in used)"
                                   : "texture handle not found (white stand-in used)");
                     img = Fallback(info.texture_dim[slot], info.texture_array[slot]);
@@ -5618,6 +5684,8 @@ private:
                 d.occ_q = osl.occ_used++;
                 osl.occ_keys.push_back(occ_key);
                 occ_queried_++;
+            } else {
+                occ_reject_[10]++;
             }
         }
         if (capture_active_ && query_pool_ && query_pass_.size() < kMaxQueries) {
@@ -5731,6 +5799,17 @@ private:
                      (unsigned long long)(st_.program[0] ? st_.program[0]->hash : 0), colors.size(), st_.color.alpha_func,
                      st_.alpha_ref, st_.color.blend_enable, st_.channel.mask, st_.polygon.cull, st_.polygon.front_face,
                      int(st_.depth.depth_test), int(st_.depth.depth_write), int(st_.depth.stencil_test));
+            if (pass_draws_ <= 1) {  // the first draw names the pass's target (for the pass table)
+                char tt[96];
+                if (!colors.empty() && colors[0])
+                    snprintf(tt, sizeof(tt), "%dx%d f%d%s", colors[0]->width, colors[0]->height, colors[0]->nvn_format,
+                             colors.size() > 1 ? "+MRT" : "");
+                else if (depth)
+                    snprintf(tt, sizeof(tt), "depth %dx%d f%d", depth->width, depth->height, depth->nvn_format);
+                else
+                    snprintf(tt, sizeof(tt), "-");
+                pass_target_ = tt;
+            }
             pass_state_desc_ = d;
             pass_state_desc_ += " | targets:";
             for (size_t i = 0; i < colors.size(); i++) {
@@ -5801,6 +5880,15 @@ private:
         if (st_.program[1]) {
             pass_fs_hash_ = st_.program[1]->hash;
             pass_fs_addr_ = st_.program[1]->address;
+            if (capture_active_) {
+                if (pass_draws_ == 1) pass_fs_first_ = pass_fs_hash_;
+                bool seen = false;
+                for (uint32_t i = 0; i < pass_distinct_fs_ && i < 8; i++) seen |= pass_fs_seen_[i] == pass_fs_hash_;
+                if (!seen) {
+                    if (pass_distinct_fs_ < 8) pass_fs_seen_[pass_distinct_fs_] = pass_fs_hash_;
+                    pass_distinct_fs_++;
+                }
+            }
         }
         if (st_.program[0]) pass_vs_addr_ = st_.program[0]->address;
         if (depth && st_.depth.depth_test && st_.depth.depth_write) depth_gen_++;
@@ -6727,7 +6815,15 @@ private:
         if (dsr::GetRuntime().config.skip_hidden) {
             LOGI(kTag, "skip_hidden: %llu draws left out and %llu drawn with a visibility query in the last 10 s, %zu draws tracked",
                  (unsigned long long)occ_skipped_, (unsigned long long)occ_queried_, occ_state_.size());
-            occ_skipped_ = occ_queried_ = 0;
+            LOGI(kTag, "skip_hidden: %llu draws judged; not judged because: shader depth test %llu, not indexed %llu, not triangles %llu, "
+                 "no depth target >= 256 wide %llu, no depth test %llu, stencil %llu, blending %llu, writes nothing %llu, no vertex program or "
+                 "buffer %llu, vertex constants unusable %llu; query not recorded %llu",
+                 (unsigned long long)occ_judged_, (unsigned long long)occ_reject_[0], (unsigned long long)occ_reject_[1],
+                 (unsigned long long)occ_reject_[2], (unsigned long long)occ_reject_[3], (unsigned long long)occ_reject_[4],
+                 (unsigned long long)occ_reject_[5], (unsigned long long)occ_reject_[6], (unsigned long long)occ_reject_[7],
+                 (unsigned long long)occ_reject_[8], (unsigned long long)occ_reject_[9], (unsigned long long)occ_reject_[10]);
+            occ_skipped_ = occ_queried_ = occ_judged_ = 0;
+            for (uint64_t& r : occ_reject_) r = 0;
         }
         Drain();  // the recorder's counters below
         if (rec_started_) {
@@ -7887,6 +7983,17 @@ private:
     int captures_done_ = 0;
     std::atomic<int64_t> capture_request_ms_{0};
     uint32_t capture_pass_ = 0, pass_draws_ = 0;
+    // One line per pass in the capture's "pass table" (GPU ms, target, draws, fragment programs).
+    struct PassInfo {
+        uint32_t pass = 0, draws = 0, distinct_fs = 0;
+        uint64_t fs_first = 0, fs_last = 0;
+        std::string target;
+    };
+    std::vector<PassInfo> pass_infos_;
+    uint64_t pass_fs_first_ = 0;
+    uint32_t pass_distinct_fs_ = 0;
+    uint64_t pass_fs_seen_[8] = {};
+    std::string pass_target_;
     uint64_t pass_fs_hash_ = 0, last_list_draws_ = 0, list_start_draws_ = 0;
     uint64_t pass_fs_addr_ = 0, pass_vs_addr_ = 0;
     std::chrono::steady_clock::time_point next_capture_;
