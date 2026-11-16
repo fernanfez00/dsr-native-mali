@@ -535,6 +535,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "scale_filter")) cfg->scale_filter = std::clamp(v, 0, 1);
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
             else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
+            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "fxaa")) {
@@ -644,8 +645,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");
-    LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d", int(cfg->hud_full_res), cfg->shadow_quality,
-         int(cfg->low_effects));
+    LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d", int(cfg->hud_full_res),
+         cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden));
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
@@ -1044,6 +1045,9 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
     } else if (key == "hud_max_height") {  // read with the HUD image's size, every frame
         const int v = atoi(value.c_str());
         c.hud_max_height = v >= 360 ? std::min(v, 4320) : 0;
+        now = true;
+    } else if (key == "skip_hidden") {  // read by every draw
+        c.skip_hidden = atoi(value.c_str()) != 0;
         now = true;
     } else if (key == "hud_full_res") {  // read by the presenter every frame
         c.hud_full_res = atoi(value.c_str()) != 0;
