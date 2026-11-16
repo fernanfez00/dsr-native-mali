@@ -424,6 +424,7 @@ final class Strings {
                 "No dibuja los objetos que no cubrieron ningún píxel en los últimos fotogramas (se reintentan cada pocos fotogramas). Más rápido en GPU modestas; un objeto que entra en vista puede aparecer con unos fotogramas de retraso.",
                 "Não desenha objetos que não cobriram nenhum pixel nos últimos quadros (testados de novo a cada poucos quadros). Mais rápido em GPUs fracas; um objeto que entra em vista pode aparecer com alguns quadros de atraso.");
         put("aniso_0", "Game's own", "Celui du jeu", "Wie im Spiel", "Quello del gioco", "El del juego", "O do jogo");
+        put("aniso_off", "Off", "Désactivé", "Aus", "Disattivato", "Desactivado", "Desativado");
         put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
                 "Omitir mip de texturas", "Pular mip de texturas", "Пропуск MIP текстур", "テクスチャ MIP スキップ",
                 "텍스처 밉 건너뛰기", "跳过纹理 Mip", "略過紋理 Mip");

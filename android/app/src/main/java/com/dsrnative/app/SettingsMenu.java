@@ -459,8 +459,8 @@ public final class SettingsMenu {
         toggle("skip_bloom", Strings.t("bloom_t"), Strings.t("bloom_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_now"), "1", "0", "0");
         choice("max_anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
-                new String[] {"0", "2", "4", "8", "16"},
-                new String[] {Strings.t("aniso_0"), "2x", "4x", "8x", "16x"}, "0");
+                new String[] {"0", "1", "2", "4", "8", "16"},
+                new String[] {Strings.t("aniso_0"), Strings.t("aniso_off"), "2x", "4x", "8x", "16x"}, "0");
 
         section(Strings.t("sec_gpu"));
         note(Strings.t("gpu_n"));
