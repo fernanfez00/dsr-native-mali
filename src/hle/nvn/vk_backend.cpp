@@ -1283,6 +1283,7 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         if (!EnsureDevice()) return;
         ReportDraws();
+        occ_frame_++;
         // The frame rate cap changed while the game runs (settings menu): tell the display.
         if (window_ && swapchain_ && window_fps_ && window_fps_ != std::clamp(dsr::GetRuntime().config.target_fps, 30, 60))
             SetWindowFrameRate();
@@ -1733,6 +1734,12 @@ private:
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
                 qi.queryCount = 2;
                 if (vkCreateQueryPool(device_, &qi, nullptr, &sl.ts) != VK_SUCCESS) sl.ts = VK_NULL_HANDLE;
+            }
+            {
+                VkQueryPoolCreateInfo oi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                oi.queryType = VK_QUERY_TYPE_OCCLUSION;
+                oi.queryCount = kOccQueries;
+                if (vkCreateQueryPool(device_, &oi, nullptr, &sl.occ) != VK_SUCCESS) sl.occ = VK_NULL_HANDLE;
             }
             desc_pool_ = MakeDescriptorPool();
             if (!CreateStream() || !desc_pool_) return false;
@@ -3189,6 +3196,8 @@ private:
         uint32_t count = 0, instances = 0, first_vertex = 0, base_instance = 0;
         int32_t vertex_offset = 0;
         uint32_t query = UINT32_MAX;  // occlusion query index (captures)
+        VkQueryPool occ_pool = VK_NULL_HANDLE;  // settings skip_hidden: the slot's occlusion pool and query index
+        uint32_t occ_q = UINT32_MAX;
         uint16_t n_vb = 0, n_tex = 0, n_ubo = 0;
     };
     // ======================================================================================================
@@ -3427,6 +3436,7 @@ private:
                 vkCmdResetQueryPool(cmd_, ts, 0, 2);
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts, 0);
             }
+            if (VkQueryPool occ = slots_[i].occ) vkCmdResetQueryPool(cmd_, occ, 0, kOccQueries);
         });
     }
     struct Slot;
@@ -3441,6 +3451,72 @@ private:
             gpu_busy_ms_ += ms;
             dsr::ReportGpuFrameTime(ms);  // fps = auto weighs it against the frame period
         }
+    }
+
+    // ---- skip_hidden: draws that covered no pixels in recent frames are not drawn again -------------------------
+    // Frame captures (Mali-G57) showed that most draws of the big world passes cover no pixel at all (131 of 223 in the
+    // lit pass) yet are still vertex-shaded and tiled, which is what limits the frame on this GPU. Draws of the world
+    // passes get an occlusion query; its result (read when the submission has finished) says whether the draw
+    // produced any sample. A draw that produced none twice running is left out, and is drawn again (with a query)
+    // every kOccRetest frames, so something that comes into view shows up after a few frames at most. A draw is
+    // recognised by its pass, shaders, index data, vertex buffer and the object's part of the vertex constants.
+    struct OccState {
+        uint32_t last_test = 0;  // frame of the last draw that had a query
+        uint32_t last_seen = 0;
+        uint8_t hidden = 0;      // consecutive tests with no samples
+    };
+    static constexpr uint32_t kOccQueries = 1024;
+    static constexpr uint8_t kOccHiddenTests = 2;
+    static constexpr uint32_t kOccRetest = 3;
+    std::unordered_map<uint64_t, OccState> occ_state_;
+    uint32_t occ_frame_ = 0;
+    uint64_t occ_skipped_ = 0, occ_queried_ = 0;
+    // The result of a finished submission's queries (its fence has signalled): render thread.
+    void CollectOcclusion(Slot& sl) {
+        const uint32_t n = std::min<uint32_t>(sl.occ_used, uint32_t(sl.occ_keys.size()));
+        sl.occ_used = 0;
+        if (!sl.occ || !n) {
+            sl.occ_keys.clear();
+            return;
+        }
+        std::vector<uint64_t>& res = occ_results_;
+        res.assign(size_t(n) * 2, 0);
+        const VkResult r = vkGetQueryPoolResults(device_, sl.occ, 0, n, res.size() * 8, res.data(), 16,
+                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (r == VK_SUCCESS || r == VK_NOT_READY) {
+            for (uint32_t i = 0; i < n; i++) {
+                if (!res[size_t(i) * 2 + 1]) continue;  // never ran (the draw was dropped later)
+                auto it = occ_state_.find(sl.occ_keys[i]);
+                if (it == occ_state_.end()) continue;
+                if (res[size_t(i) * 2] != 0) it->second.hidden = 0;
+                else if (it->second.hidden < 255) it->second.hidden++;
+            }
+        }
+        sl.occ_keys.clear();
+    }
+    std::vector<uint64_t> occ_results_;
+    // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles, depth tested, written
+    // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
+    // blends (effects) or uses stencil is always drawn.
+    bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
+        if (shader_depth_test || p.index_type < 0 || p.mode != 4 || p.count < 3) return false;
+        if (!depth || depth->width < 256 || !st_.depth.depth_test || st_.depth.stencil_test) return false;
+        if (st_.color.blend_enable != 0) return false;
+        const bool writes_color = !colors.empty() && colors[0] && (st_.channel.mask & 0xF) != 0;
+        return st_.depth.depth_write || writes_color;
+    }
+    // 0: draw, 1: draw with a query, 2: leave out.
+    int OccDecide(uint64_t key) {
+        if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat (moving camera data): start over
+        OccState& s = occ_state_[key];
+        s.last_seen = occ_frame_;
+        if (s.hidden >= kOccHiddenTests) {
+            if (occ_frame_ - s.last_test < kOccRetest) return 2;
+            s.last_test = occ_frame_;
+            return 1;
+        }
+        s.last_test = occ_frame_;
+        return 1;
     }
 
     // Submits the current slot's commands and moves to the other slot. The CPU waits only if that slot's
@@ -3567,6 +3643,7 @@ private:
             if (r != VK_SUCCESS) LogOnce("fence", "GPU did not finish within 5 s (%d)", r);
             DeliverReadbacks(sl);
             CollectGpuTime(sl);
+            CollectOcclusion(sl);
             vkResetFences(device_, 1, &sl.fence);
             sl.pending = false;
             completed_seq_ = std::max(completed_seq_, sl.seq);  // one queue: earlier submissions are done too
@@ -3587,6 +3664,7 @@ private:
             if (sl.pending) {
                 DeliverReadbacks(sl);
                 CollectGpuTime(sl);
+                CollectOcclusion(sl);
                 vkResetFences(device_, 1, &sl.fence);
                 sl.pending = false;
             }
@@ -4761,6 +4839,31 @@ private:
     std::vector<uint64_t> scratch_rendering_key_;
     VertexInput scratch_vin_;
 
+    // The draw's identity across frames (false: not trackable). The first 128 bytes of the vertex constants hold the
+    // camera, so only the part after them (the object's transforms) goes in.
+    bool OccKey(const DrawParams& p, const VertexInput& vin, uint32_t target_w, uint64_t* out) {
+        if (!st_.program[0] || vin.bindings.empty()) return false;
+        const BufferRange& c3 = st_.uniforms[0][0];
+        constexpr uint64_t kFrom = 128, kLen = 96;
+        if (!c3.address || c3.size < kFrom + kLen || !GuestRangeValid(c3.address + kFrom, size_t(kLen))) return false;
+        uint64_t h = 1469598103934665603ull;
+        const auto mix = [&h](uint64_t v) {
+            h ^= v;
+            h *= 1099511628211ull;
+            h ^= h >> 29;
+        };
+        mix(st_.program[0]->hash);
+        mix(st_.program[1] ? st_.program[1]->hash : 0);
+        mix(uint64_t(p.count) | (uint64_t(p.index_type) << 40) | (uint64_t(st_.depth.depth_write) << 48));
+        mix(p.index_address);
+        mix(uint64_t(int64_t(p.base_vertex)));
+        mix(st_.vertex_buffers[vin.bindings[0].binding].address);
+        mix(uint64_t(target_w));
+        const uint64_t* w = reinterpret_cast<const uint64_t*>(c3.address + kFrom);
+        for (uint64_t i = 0; i < kLen / 8; i++) mix(w[i]);
+        *out = h;
+        return true;
+    }
     void Draw(const DrawParams& p) {
         phase_timing_ = (drawn_ & 7) == 0;
         Phase(-1);
@@ -4881,6 +4984,19 @@ private:
             }
             for (Image* c : colors)
                 if (c) c->skip_zeroed = false;  // a real draw writes it now
+        }
+
+        // ---- skip_hidden: world draws that covered no pixel in recent frames are left out (see OccDecide) -------
+        uint64_t occ_key = 0;
+        bool occ_query = false;
+        if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
+            OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
+            const int act = OccDecide(occ_key);
+            if (act == 2) {
+                occ_skipped_++;
+                return;
+            }
+            occ_query = act == 1;
         }
 
         Begin();
@@ -5495,6 +5611,15 @@ private:
         for (const VkVertexInputBindingDescription& b : vin.bindings)
             instanced |= b.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
         d.base_instance = instanced ? 0 : uint32_t(p.base_instance);
+        if (occ_query && !capture_active_ && recording_) {
+            Slot& osl = slots_[slot_];
+            if (osl.occ && osl.occ_used < kOccQueries) {
+                d.occ_pool = osl.occ;
+                d.occ_q = osl.occ_used++;
+                osl.occ_keys.push_back(occ_key);
+                occ_queried_++;
+            }
+        }
         if (capture_active_ && query_pool_ && query_pass_.size() < kMaxQueries) {
             d.query = uint32_t(query_pass_.size());
             query_pass_.push_back(capture_pass_);
@@ -5847,6 +5972,7 @@ private:
         }
         ApplyDynamicState(d.dyn);
         if (d.query != UINT32_MAX) vkCmdBeginQuery(cb, query_pool_, d.query, 0);
+        if (d.occ_pool) vkCmdBeginQuery(cb, d.occ_pool, d.occ_q, 0);
         if (d.indexed) {
             if (bound_ib_.first != d.index_buf || bound_ib_.second != d.index_off || bound_ib_type_ != d.index_type) {
                 vkCmdBindIndexBuffer(cb, d.index_buf, d.index_off, d.index_type);
@@ -5858,6 +5984,7 @@ private:
             vkCmdDraw(cb, d.count, d.instances, d.first_vertex, d.base_instance);
         }
         if (d.query != UINT32_MAX) vkCmdEndQuery(cb, query_pool_, d.query);
+        if (d.occ_pool) vkCmdEndQuery(cb, d.occ_pool, d.occ_q);
     }
 
     // Viewport, scissor, blend constants and stencil values of the draw (render thread).
@@ -6597,6 +6724,11 @@ private:
         auto now = std::chrono::steady_clock::now();
         if (now - last_report_ < std::chrono::seconds(10)) return;
         last_report_ = now;
+        if (dsr::GetRuntime().config.skip_hidden) {
+            LOGI(kTag, "skip_hidden: %llu draws left out and %llu drawn with a visibility query in the last 10 s, %zu draws tracked",
+                 (unsigned long long)occ_skipped_, (unsigned long long)occ_queried_, occ_state_.size());
+            occ_skipped_ = occ_queried_ = 0;
+        }
         Drain();  // the recorder's counters below
         if (rec_started_) {
             LOGI(kTag, "recorder thread: busy %.0f ms in the last 10 s; render thread waited %.0f ms for it; %llu batches; "
@@ -7830,6 +7962,9 @@ private:
         bool pending = false;
         std::vector<Readback> readbacks;
         VkQueryPool ts = VK_NULL_HANDLE;  // GPU time of the submission (start, end)
+        VkQueryPool occ = VK_NULL_HANDLE;  // settings skip_hidden: one occlusion query per tracked draw
+        std::vector<uint64_t> occ_keys;    // render thread: the draw behind each query of this submission
+        uint32_t occ_used = 0;
         bool ts_written = false;
         VkDescriptorPool pool = VK_NULL_HANDLE;
         std::vector<VkDescriptorPool> extra_pools;  // when `pool` fills up (recorder thread)
