@@ -998,9 +998,11 @@ public:
             LOGI(kTag, "frame capture (requested): recording this frame's passes");
             return;
         }
-        if (captures_done_ >= 6 || !dsr::GetRuntime().config.auto_capture) return;
+        const RuntimeConfig& cc = dsr::GetRuntime().config;
+        if (captures_done_ >= 6 || (!cc.auto_capture && !cc.world_capture)) return;
+        if (!cc.auto_capture && captures_done_ >= 3) return;  // world_capture: three are enough
         if (!capture_clock_started_) {
-            if (last_list_draws_ < 100) return;  // wait for real 3D frames
+            if (last_list_draws_ < (cc.auto_capture ? 100u : 300u)) return;  // wait for real 3D frames
             capture_clock_started_ = true;
             next_capture_ = now + std::chrono::seconds(15);
             return;
