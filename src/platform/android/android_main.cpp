@@ -452,6 +452,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "min_fps")) cfg->min_fps = std::clamp(v, 15, 30);
             else if (!strcmp(key, "async_pipelines")) cfg->async_pipelines = v != 0;
             else if (!strcmp(key, "auto_capture")) cfg->auto_capture = v != 0;
+            else if (!strcmp(key, "world_capture")) cfg->world_capture = v != 0;
             else if (!strcmp(key, "profile")) cfg->profile = v != 0;
             else if (!strcmp(key, "pin_render_thread")) cfg->pin_render_thread = v != 0;
             else if (!strcmp(key, "record_thread")) cfg->record_thread = v != 0;
