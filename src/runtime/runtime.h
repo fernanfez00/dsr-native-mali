@@ -25,6 +25,9 @@ struct RuntimeConfig {
     bool dynamic_fps = false;
     int min_fps = 20;             // lowest rate fps = auto may use (15..30); also the longest game time step
     bool async_pipelines = true;  // compile new GPU pipelines off the render thread (no hitch; the draw waits a frame)
+    // world_capture: like auto_capture's frame captures (dsr_frame_*.bin and the "pass table" lines in the log) but only
+    // from frames with a lot of 3D (>= 300 draws), at most 3, and without auto_capture's shader dumps to disk.
+    bool world_capture = false;
     bool auto_capture = false;    // diagnostics: save a few frame captures automatically during play
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
     float gamma = 1.0f;           // extra display gamma applied through the game's brightness ramp (> 1 lifts shadows)
