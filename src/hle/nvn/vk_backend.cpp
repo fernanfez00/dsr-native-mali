@@ -4982,7 +4982,13 @@ private:
         if (shader_depth_test) fopt.depth_test_func = st_.depth.depth_func;
         // shadow_quality 0: the shadow map pass (depth only, square target, nothing else bound) is not drawn. The
         // lookups are answered "lit" by the sampler (see Sampler), so the map's contents do not matter.
-        if (dsr::GetRuntime().config.shadow_quality == 0 && st_.num_rt == 0 && !st_.program[1] && depth_peek &&
+        // (The game sets 4 colour target slots for every pass, the shadow pass's all empty, and its alpha-tested casters
+        // have a fragment program: neither "no colour targets" nor "no fragment program" can be asked for.)
+        bool no_colour_target = true;
+        if (dsr::GetRuntime().config.shadow_quality == 0 && depth_peek)
+            for (int i = 0; i < st_.num_rt && no_colour_target; i++)
+                if (GetImage(st_.rts[size_t(i)], false)) no_colour_target = false;
+        if (dsr::GetRuntime().config.shadow_quality == 0 && no_colour_target && depth_peek &&
             depth_peek->width == depth_peek->height && depth_peek->width >= 256 && depth_peek->width <= 2048 &&
             IsDepthFormat(depth_peek->nvn_format))
         {
