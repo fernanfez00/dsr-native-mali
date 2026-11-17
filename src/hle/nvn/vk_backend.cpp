@@ -3505,6 +3505,7 @@ private:
         uint32_t last_test = 0;  // frame of the last draw that had a query
         uint32_t last_seen = 0;
         uint8_t hidden = 0;      // consecutive tests with no samples
+        bool veto = false;       // a draw of this key was drawn without a query: its visibility is unknown
     };
     static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
@@ -3530,17 +3531,30 @@ private:
         const VkResult r = vkGetQueryPoolResults(device_, sl.occ, 0, n, res.size() * 8, res.data(), 16,
                                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
         if (r == VK_SUCCESS || r == VK_NOT_READY) {
+            // Several draws can share a key (the same mesh drawn for several objects): the key counts as visible if
+            // any of them produced a sample, and as hidden only when none did.
+            occ_agg_.clear();
             for (uint32_t i = 0; i < n; i++) {
                 if (!res[size_t(i) * 2 + 1]) continue;  // never ran (the draw was dropped later)
-                auto it = occ_state_.find(sl.occ_keys[i]);
+                const bool vis = res[size_t(i) * 2] != 0;
+                auto ins = occ_agg_.emplace(sl.occ_keys[i], vis);
+                if (!ins.second) ins.first->second = ins.first->second || vis;
+            }
+            for (const auto& kv : occ_agg_) {
+                auto it = occ_state_.find(kv.first);
                 if (it == occ_state_.end()) continue;
-                if (res[size_t(i) * 2] != 0) it->second.hidden = 0;
-                else if (it->second.hidden < 255) it->second.hidden++;
+                if (kv.second || it->second.veto) {
+                    it->second.hidden = 0;
+                    it->second.veto = false;
+                } else if (it->second.hidden < 255) {
+                    it->second.hidden++;
+                }
             }
         }
         sl.occ_keys.clear();
     }
     std::vector<uint64_t> occ_results_;
+    std::unordered_map<uint64_t, bool> occ_agg_;  // CollectOcclusion: key -> any draw of it produced samples
     std::unordered_set<int> unsupported_logged_;  // NVN formats already reported as having no Vulkan format
     // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles (lists or strips), depth tested, written
     // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
@@ -4924,8 +4938,9 @@ private:
         mix(uint64_t(int64_t(p.base_vertex)));
         mix(st_.vertex_buffers[vin.bindings[0].binding].address);
         mix(uint64_t(target_w));
-        const uint64_t* w = reinterpret_cast<const uint64_t*>(c3.address + kFrom);
-        for (uint64_t i = 0; i < kLen / 8; i++) mix(w[i]);
+        // The object's constants are not part of the key: while the camera moves they change every frame (tracked draws
+        // went from ~2000 standing still to 20-40k moving, and almost nothing was ever left out). Objects sharing a
+        // mesh share a key instead; CollectOcclusion treats the key as hidden only if none of them was visible.
         *out = h;
         return true;
     }
@@ -5691,6 +5706,7 @@ private:
                 occ_reject_[10]++;
             }
         }
+        if (occ_query && d.occ_pool == VK_NULL_HANDLE) occ_state_[occ_key].veto = true;  // drawn without a query
         if (capture_active_ && query_pool_ && query_pass_.size() < kMaxQueries) {
             d.query = uint32_t(query_pass_.size());
             query_pass_.push_back(capture_pass_);
