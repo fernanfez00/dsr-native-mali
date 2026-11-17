@@ -240,7 +240,9 @@ bool ProgramSetShaders(void* program, int count, const ShaderData* stages) {
             memcpy(hdr, stages[i].control, sizeof(hdr));
             if (hdr[0] == 0x98761234u && hdr[8] > n && hdr[8] <= 0x10000 && GuestRangeValid(a, hdr[8])) section = hdr[8];
         }
-        DumpShader(a, reinterpret_cast<const void*>(a), section, stages[i].control, control_size);
+        // The shader dump (hash + disk write per shader) is a diagnostics tool: only with auto_capture on.
+        if (dsr::GetRuntime().config.auto_capture)
+            DumpShader(a, reinterpret_cast<const void*>(a), section, stages[i].control, control_size);
         if (a && n >= 0x88) {
             auto sc = std::make_shared<ShaderCode>();
             const uint8_t* p = reinterpret_cast<const uint8_t*>(a);

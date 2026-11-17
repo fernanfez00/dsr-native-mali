@@ -3506,7 +3506,7 @@ private:
         uint32_t last_seen = 0;
         uint8_t hidden = 0;      // consecutive tests with no samples
     };
-    static constexpr uint32_t kOccQueries = 1024;
+    static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
     static constexpr uint32_t kOccRetest = 3;
     std::unordered_map<uint64_t, OccState> occ_state_;
@@ -3542,14 +3542,14 @@ private:
     }
     std::vector<uint64_t> occ_results_;
     std::unordered_set<int> unsupported_logged_;  // NVN formats already reported as having no Vulkan format
-    // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles, depth tested, written
+    // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles (lists or strips), depth tested, written
     // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
     // blends (effects) or uses stencil is always drawn.
     bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
         int why = -1;
         if (shader_depth_test) why = 0;
         else if (p.index_type < 0) why = 1;
-        else if (p.mode != 4 || p.count < 3) why = 2;
+        else if ((p.mode != 4 && p.mode != 5) || p.count < 3) why = 2;  // triangle lists and strips (most world draws are strips)
         else if (!depth || depth->width < 256) why = 3;
         else if (!st_.depth.depth_test) why = 4;
         else if (st_.depth.stencil_test) why = 5;
@@ -3567,7 +3567,9 @@ private:
         OccState& s = occ_state_[key];
         s.last_seen = occ_frame_;
         if (s.hidden >= kOccHiddenTests) {
-            if (occ_frame_ - s.last_test < kOccRetest) return 2;
+            // Hidden draws are re-tested on staggered frames (by key) rather than all on the same one: with every
+            // draw retested together, one frame in kOccRetest drew all the hidden geometry again (a periodic spike).
+            if (occ_frame_ - s.last_test < kOccRetest || (occ_frame_ + uint32_t(key >> 7)) % kOccRetest != 0) return 2;
             s.last_test = occ_frame_;
             return 1;
         }
@@ -4273,7 +4275,8 @@ private:
         *extent = {w, h};
         if (rendering_ && key == rendering_key_) return true;
         EndRendering();
-        if (depth && depth->depth_exported && dsr::GetRuntime().config.lrz_workaround) LrzTouch(*depth);
+        // LRZ is an Adreno feature: on Mali the refresh only adds two copies and a render pass break per depth buffer.
+        if (depth && depth->depth_exported && dsr::GetRuntime().config.lrz_workaround && !gpu_mali_) LrzTouch(*depth);
         // An image the previous pass rendered to, used again here in the same layout, gets no layout transition
         // and so had no barrier: without one the GPU may run the passes overlapped. On tiled GPUs (Adreno) a
         // bin of this pass then loads the image before the earlier pass stored that bin, and whatever it drew
