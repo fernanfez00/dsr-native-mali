@@ -416,6 +416,15 @@ final class Strings {
                 "Pula a cadeia de pós-processamento do brilho: mais rápido em GPUs fracas, mas sem o brilho ao redor de luzes fortes.");
         put("hidden_t", "Skip hidden objects", "Ignorer les objets cachés", "Verdeckte Objekte überspringen",
                 "Salta gli oggetti nascosti", "Omitir objetos ocultos", "Pular objetos ocultos");
+        put("prepass_t", "Skip depth prepass", "Ignorer le pré-passage de profondeur", "Tiefen-Vorpass überspringen",
+                "Salta il pre-pass di profondità", "Omitir prepaso de profundidad", "Pular pré-passe de profundidade");
+        put("prepass_n",
+                "Leaves out the game's depth-only pass and lets the colour pass write the depth: half the vertex work and one render pass less per frame. Experimental; compare the frame times.",
+                "Ignore le passage de profondeur seule du jeu et laisse le passage couleur écrire la profondeur : moitié moins de travail de sommets et un passage de moins par image. Expérimental ; comparez les temps d'image.",
+                "Lässt den reinen Tiefenpass des Spiels aus; der Farbpass schreibt die Tiefe: halb so viel Vertexarbeit und ein Renderpass weniger pro Bild. Experimentell; Bildzeiten vergleichen.",
+                "Salta il passaggio di sola profondità del gioco e fa scrivere la profondità al passaggio colore: metà lavoro sui vertici e un render pass in meno per fotogramma. Sperimentale; confronta i tempi di frame.",
+                "Omite el pase de solo profundidad del juego y deja que el pase de color escriba la profundidad: la mitad del trabajo de vértices y un render pass menos por fotograma. Experimental; compara los tiempos de fotograma.",
+                "Pula o passe só de profundidade do jogo e deixa o passe de cor gravar a profundidade: metade do trabalho de vértices e um render pass a menos por quadro. Experimental; compare os tempos de quadro.");
         put("hidden_std", "Normal", "Normal", "Normal", "Normale", "Normal", "Normal");
         put("hidden_ext", "Extended (effects too)", "Étendu (effets inclus)", "Erweitert (inkl. Effekte)",
                 "Esteso (anche effetti)", "Ampliado (con efectos)", "Ampliado (com efeitos)");
