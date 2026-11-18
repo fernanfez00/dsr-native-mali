@@ -457,6 +457,7 @@ public final class SettingsMenu {
         toggle("low_effects", Strings.t("loweff_t"), Strings.t("loweff_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         toggle("skip_bloom", Strings.t("bloom_t"), Strings.t("bloom_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        toggle("skip_post", Strings.t("post_t"), Strings.t("post_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_now"),
                 new String[] {"0", "1", "2"},
                 new String[] {Strings.t("q_off"), Strings.t("hidden_std"), Strings.t("hidden_ext")}, "0");

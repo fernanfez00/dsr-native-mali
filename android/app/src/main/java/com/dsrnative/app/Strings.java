@@ -414,6 +414,16 @@ final class Strings {
                 "Salta la catena di post-elaborazione dell'alone: più veloce sulle GPU deboli, ma senza l'alone attorno alle luci intense.",
                 "Omite la cadena de posprocesado del resplandor: más rápido en GPU modestas, pero sin el brillo alrededor de las luces intensas.",
                 "Pula a cadeia de pós-processamento do brilho: mais rápido em GPUs fracas, mas sem o brilho ao redor de luzes fortes.");
+        put("post_t", "Remove extra post-processing (experimental)", "Supprimer le post-traitement supplémentaire (expérimental)",
+                "Zusätzliche Nachbearbeitung entfernen (experimentell)", "Rimuovi la post-elaborazione extra (sperimentale)",
+                "Quitar el posprocesado extra (experimental)", "Remover o pós-processamento extra (experimental)");
+        put("post_n",
+                "Skips more small post-processing passes: fewer render passes and faster on weak GPUs, but some effects may look wrong or dark. Turn it off if so.",
+                "Saute d'autres petites passes de post-traitement : moins de passes de rendu et plus rapide sur les GPU modestes, mais certains effets peuvent paraître faux ou sombres. Désactivez-le dans ce cas.",
+                "Überspringt weitere kleine Nachbearbeitungs-Durchgänge: weniger Render-Durchgänge und schneller auf schwachen GPUs, aber manche Effekte können falsch oder dunkel aussehen. Dann ausschalten.",
+                "Salta altre piccole passate di post-elaborazione: meno passate di rendering e più veloce sulle GPU deboli, ma alcuni effetti possono apparire sbagliati o scuri. In tal caso disattivalo.",
+                "Omite más pasadas pequeñas de posprocesado: menos pasadas de render y más rápido en GPU modestas, pero algunos efectos pueden verse mal u oscuros. Desactívalo si ocurre.",
+                "Pula mais passes pequenos de pós-processamento: menos passes de renderização e mais rápido em GPUs fracas, mas alguns efeitos podem ficar errados ou escuros. Desative se isso acontecer.");
         put("hidden_t", "Skip hidden objects", "Ignorer les objets cachés", "Verdeckte Objekte überspringen",
                 "Salta gli oggetti nascosti", "Omitir objetos ocultos", "Pular objetos ocultos");
         put("prepass_t", "Skip depth prepass", "Ignorer le pré-passage de profondeur", "Tiefen-Vorpass überspringen",
