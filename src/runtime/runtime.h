@@ -107,6 +107,7 @@ struct RuntimeConfig {
     // the "capture pass" lines of a frame capture for the hashes). Their targets are cleared to zero instead.
     std::string skip_fs;
     bool skip_bloom = false;  // leaves out the bloom / glow chain (its fragment programs are added to skip_fs)
+    bool skip_post = false;   // experimental: also leaves out the other small full-screen post passes (added to skip_fs)
     // skip_hidden = 1: world draws that covered no pixel in the last frames (found with occlusion queries) are not
     // drawn, and are tried again every few frames. Fewer vertices to shade and tile on a weak GPU (Mali).
     // skip_hidden = 2 (extended) also judges blended draws that are depth tested (effects, needing one more hidden test
