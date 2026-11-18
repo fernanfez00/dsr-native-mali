@@ -3561,15 +3561,19 @@ private:
     // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles (lists or strips), depth tested, written
     // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
     // blends (effects) or uses stencil is always drawn.
+    // skip_hidden = 2 (extended) also judges non-indexed draws, every primitive type, depth targets from 128 pixels wide
+    // and blended draws (they still need a depth test, and never a shader depth test or stencil).
     bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
+        const bool ext = dsr::GetRuntime().config.skip_hidden >= 2;
         int why = -1;
         if (shader_depth_test) why = 0;
-        else if (p.index_type < 0) why = 1;
-        else if ((p.mode != 4 && p.mode != 5) || p.count < 3) why = 2;  // triangle lists and strips (most world draws are strips)
-        else if (!depth || depth->width < 256) why = 3;
+        else if (p.index_type < 0 && !ext) why = 1;
+        else if (!ext && ((p.mode != 4 && p.mode != 5) || p.count < 3)) why = 2;  // triangle lists and strips (most world draws are strips)
+        else if (ext && p.count < 1) why = 2;
+        else if (!depth || depth->width < (ext ? 128 : 256)) why = 3;
         else if (!st_.depth.depth_test) why = 4;
         else if (st_.depth.stencil_test) why = 5;
-        else if (st_.color.blend_enable != 0) why = 6;
+        else if (st_.color.blend_enable != 0 && !ext) why = 6;
         else if (!(st_.depth.depth_write || (!colors.empty() && colors[0] && (st_.channel.mask & 0xF) != 0))) why = 7;
         if (why >= 0) {
             occ_reject_[why]++;
@@ -3578,11 +3582,13 @@ private:
         return true;
     }
     // 0: draw, 1: draw with a query, 2: leave out.
-    int OccDecide(uint64_t key) {
+    // `soft`: a blended draw (extended mode): one more hidden test before it is left out, so an effect that flickers
+    // in and out is not dropped on a single empty frame.
+    int OccDecide(uint64_t key, bool soft = false) {
         if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat (moving camera data): start over
         OccState& s = occ_state_[key];
         s.last_seen = occ_frame_;
-        if (s.hidden >= kOccHiddenTests) {
+        if (s.hidden >= kOccHiddenTests + (soft ? 1 : 0)) {
             // Hidden draws are re-tested on staggered frames (by key) rather than all on the same one: with every
             // draw retested together, one frame in kOccRetest drew all the hidden geometry again (a periodic spike).
             if (occ_frame_ - s.last_test < kOccRetest || (occ_frame_ + uint32_t(key >> 7)) % kOccRetest != 0) return 2;
@@ -4938,6 +4944,8 @@ private:
         mix(uint64_t(p.count) | (uint64_t(p.index_type) << 40) | (uint64_t(st_.depth.depth_write) << 48));
         mix(p.index_address);
         mix(uint64_t(int64_t(p.base_vertex)));
+        mix(uint64_t(uint32_t(p.mode)) | (uint64_t(st_.color.blend_enable != 0) << 8));  // type and blending (extended mode)
+        if (p.index_type < 0) mix(uint64_t(int64_t(p.first)));  // non-indexed: the range is what tells draws apart
         mix(st_.vertex_buffers[vin.bindings[0].binding].address);
         mix(uint64_t(target_w));
         // The object's constants are not part of the key: while the camera moves they change every frame (tracked draws
@@ -5080,7 +5088,7 @@ private:
         if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
             OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
             occ_judged_++;
-            const int act = OccDecide(occ_key);
+            const int act = OccDecide(occ_key, st_.color.blend_enable != 0);
             if (act == 2) {
                 occ_skipped_++;
                 return;
