@@ -3496,6 +3496,17 @@ private:
         }
     }
 
+    // ---- skip_prepass: the game's depth-only pass is left out, the colour pass writes the depth ------------------
+    // Frame captures: the world is drawn twice on the same depth buffer, first without colour (depth func LEQUAL,
+    // write on), then with colour (LEQUAL, write off), the same 147 draws. On a tile-based GPU the second pass needs no
+    // prepass (hidden surface removal), so the first one only repeats the vertex work and the binning. A depth buffer
+    // that had >= 16 depth-only and >= 16 colour draws last frame is treated this way this frame.
+    struct PrepassStat {
+        uint32_t frame = 0, pre = 0, main = 0;
+        bool learned = false;
+    };
+    std::unordered_map<uint64_t, PrepassStat> prepass_;
+    uint64_t prepass_skipped_ = 0, prepass_converted_ = 0;
     // ---- skip_hidden: draws that covered no pixels in recent frames are not drawn again -------------------------
     // Frame captures (Mali-G57) showed that most draws of the big world passes cover no pixel at all (131 of 223 in the
     // lit pass) yet are still vertex-shaded and tiled, which is what limits the frame on this GPU. Draws of the world
@@ -5080,6 +5091,46 @@ private:
             }
             for (Image* c : colors)
                 if (c) c->skip_zeroed = false;  // a real draw writes it now
+        }
+
+        // ---- skip_prepass (see PrepassStat) -----------------------------------------------------------------------
+        struct ForceDepthWrite {
+            bool* p = nullptr;
+            ~ForceDepthWrite() {
+                if (p) *p = false;
+            }
+        } force_depth_write;
+        if (dsr::GetRuntime().config.skip_prepass && !capture_active_ && depth && depth->width >= 256 &&
+            st_.depth.depth_test && !st_.depth.stencil_test && !shader_depth_test && (st_.depth.depth_func == 2 || st_.depth.depth_func == 4) &&
+            !(st_.program[1] && fs->info.writes_depth)) {
+            bool any_color = false;
+            for (Image* c : colors) any_color |= c != nullptr;
+            const bool colour_writes = any_color && (st_.channel.mask & 0xF) != 0;
+            const bool depth_only = !colour_writes && st_.depth.depth_write;
+            const bool main_like = colour_writes && !st_.depth.depth_write && st_.color.blend_enable == 0;
+            if (depth_only || main_like) {
+                PrepassStat& s = prepass_[depth->addr];
+                if (s.frame != occ_frame_) {
+                    s.learned = s.pre >= 16 && s.main >= 16;
+                    s.frame = occ_frame_;
+                    s.pre = s.main = 0;
+                }
+                if (depth_only) {
+                    s.pre++;
+                    if (s.learned) {
+                        prepass_skipped_++;
+                        skipped_draws_++;
+                        return;
+                    }
+                } else {
+                    s.main++;
+                    if (s.learned) {
+                        st_.depth.depth_write = true;  // restored when this draw is done (ForceDepthWrite)
+                        force_depth_write.p = &st_.depth.depth_write;
+                        prepass_converted_++;
+                    }
+                }
+            }
         }
 
         // ---- skip_hidden: world draws that covered no pixel in recent frames are left out (see OccDecide) -------
@@ -6859,6 +6910,11 @@ private:
                  (unsigned long long)occ_reject_[8], (unsigned long long)occ_reject_[9], (unsigned long long)occ_reject_[10]);
             occ_skipped_ = occ_queried_ = occ_judged_ = 0;
             for (uint64_t& r : occ_reject_) r = 0;
+        }
+        if (dsr::GetRuntime().config.skip_prepass) {
+            LOGI(kTag, "skip_prepass: %llu depth-only draws left out, %llu colour draws writing the depth, %zu depth buffers tracked (last 10 s)",
+                 (unsigned long long)prepass_skipped_, (unsigned long long)prepass_converted_, prepass_.size());
+            prepass_skipped_ = prepass_converted_ = 0;
         }
         Drain();  // the recorder's counters below
         if (rec_started_) {
