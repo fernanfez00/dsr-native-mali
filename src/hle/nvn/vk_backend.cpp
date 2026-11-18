@@ -8060,6 +8060,15 @@ private:
         std::string s = dsr::GetRuntime().config.skip_fs;
         if (dsr::GetRuntime().config.skip_bloom)
             s += ",c3d56b6401ccb572,512397bbc420f850,9b44066e84ff04c6,82aa25701a19c22b";
+        // skip_post (settings, experimental): the other post-processing programs that run about once per frame on
+        // the small targets (356x164 / 178x82 at render scale 0.45), taken from the census in a gameplay log on a
+        // Mali-G57. Left alone: the exposure passes (16x16), the downsample shared with the depth of field
+        // (8801d1d8f9f8273b) and the programs drawn many times per frame (probably geometry, not full-screen passes).
+        // A skipped pass leaves its target black, so some effect may turn out dark: switch the option off then.
+        if (dsr::GetRuntime().config.skip_post)
+            s += ",8ca165723b7765a5,3fc1b1baa8114318,0b082f0dfd18387b,de34cd7d8f37f809,e9bc8856f5b546f7,"
+                 "9c792fa36fbc2835,c62deccbdaa68d0a,fcb25d171a89d84a,f503d9c09783ac14,4f821636b20a5c3c,"
+                 "cdeb232ada05c0af,cb9cc6ab42dc6039,9f81cfa55dca6f0d,7a6ad6744d3bc95b";
         size_t at = 0;
         while (at < s.size()) {
             size_t end = s.find_first_of(", ;", at);
