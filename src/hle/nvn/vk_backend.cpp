@@ -8078,12 +8078,13 @@ private:
         // the small targets (356x164 / 178x82 at render scale 0.45), taken from the census in a gameplay log on a
         // Mali-G57. Left alone: the exposure passes (16x16), the downsample shared with the depth of field
         // (8801d1d8f9f8273b) and the programs drawn many times per frame (probably geometry, not full-screen passes).
-        // A skipped pass leaves its target black, so some effect may turn out dark: switch the option off then.
+        // Tested on a Mali-G57 (A15): these 7 passes (all on 178x82 targets) can be left out with the picture intact.
+        // fcb25d171a89d84a and 7a6ad6744d3bc95b (356x164) turn the picture black, as do the programs that also run
+        // at full size (3fc1b1baa8114318, cb9cc6ab42dc6039), so they are no longer in the list.
         std::string post;
         if (dsr::GetRuntime().config.skip_post)
-            post += "8ca165723b7765a5,3fc1b1baa8114318,0b082f0dfd18387b,de34cd7d8f37f809,e9bc8856f5b546f7,"
-                 "9c792fa36fbc2835,c62deccbdaa68d0a,fcb25d171a89d84a,f503d9c09783ac14,4f821636b20a5c3c,"
-                 "cdeb232ada05c0af,cb9cc6ab42dc6039,9f81cfa55dca6f0d,7a6ad6744d3bc95b";
+            post += "9f81cfa55dca6f0d,cdeb232ada05c0af,f503d9c09783ac14,8ca165723b7765a5,"
+                    "e9bc8856f5b546f7,4f821636b20a5c3c,de34cd7d8f37f809";
         auto parse = [&](const std::string& list, std::unordered_set<uint64_t>& out) {
             size_t at = 0;
             while (at < list.size()) {
