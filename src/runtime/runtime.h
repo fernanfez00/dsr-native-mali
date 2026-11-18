@@ -112,6 +112,11 @@ struct RuntimeConfig {
     // skip_hidden = 2 (extended) also judges blended draws that are depth tested (effects, needing one more hidden test
     // before they are left out), non-indexed draws, every primitive type and depth targets from 128 pixels wide.
     int skip_hidden = 0;
+    // skip_prepass = 1: the game draws its world twice, a depth-only pass and then the colour pass testing against it
+    // (depth func LEQUAL, no depth write). The depth-only draws are left out and the colour draws write the depth
+    // themselves: half the vertex work and one render pass less per frame. Learned from the previous frame (a depth
+    // buffer with >= 16 depth-only and >= 16 colour draws).
+    bool skip_prepass = false;
     int fsr_sharpness = 70;
     // Post-processing at the game's render size, in the HUD path (needs hud_full_res = 1; read every frame):
     // fxaa: 0 = off, 1 = FXAA 3.11 fast (6 steps; for a Mali), 2 = quality (12 steps; from gu-native).
