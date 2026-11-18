@@ -8085,6 +8085,9 @@ private:
         if (dsr::GetRuntime().config.skip_post)
             post += "9f81cfa55dca6f0d,cdeb232ada05c0af,f503d9c09783ac14,8ca165723b7765a5,"
                     "e9bc8856f5b546f7,4f821636b20a5c3c,de34cd7d8f37f809";
+        // skip_post_extra (settings): more hashes with the same small-targets-only rule, to try passes from the
+        // "post census" log line without rebuilding.
+        if (!dsr::GetRuntime().config.skip_post_extra.empty()) post += "," + dsr::GetRuntime().config.skip_post_extra;
         auto parse = [&](const std::string& list, std::unordered_set<uint64_t>& out) {
             size_t at = 0;
             while (at < list.size()) {
