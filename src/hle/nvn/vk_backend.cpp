@@ -5095,6 +5095,14 @@ private:
                 if (c) c->skip_zeroed = false;  // a real draw writes it now
         }
 
+        // ---- post-processing census (diagnostics) -----------------------------------------------------------------
+        if (dsr::GetRuntime().config.profile && st_.program[1] && !colors.empty() && colors[0]) {
+            const uint64_t area = uint64_t(colors[0]->width) * uint64_t(colors[0]->height);
+            if (area > census_max_area_) census_max_area_ = area;
+            if (area * 2 <= census_max_area_)
+                post_census_[{st_.program[1]->hash, uint64_t(colors[0]->width) << 16 | uint64_t(colors[0]->height)}]++;
+        }
+
         // ---- skip_prepass (see PrepassStat) -----------------------------------------------------------------------
         struct ForceDepthWrite {
             bool* p = nullptr;
@@ -6996,6 +7004,25 @@ private:
             LOGI(kTag, "textures that broke a render pass to become readable:%s", top.c_str());
             sampled_breaks_.clear();
         }
+        if (!post_census_.empty()) {
+            // Draws on small targets by fragment program: ones near the number of lists (frames) in this window are
+            // post-processing passes that run every frame; put their hash in settings skip_fs to leave them out.
+            std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v;
+            for (auto& [k, n] : post_census_) v.push_back({n, k});
+            std::sort(v.rbegin(), v.rend());
+            std::string top;
+            char buf[96];
+            for (size_t i = 0; i < v.size() && i < 14; i++) {
+                snprintf(buf, sizeof(buf), " %016llx %ux%u x%llu;", (unsigned long long)v[i].second.first,
+                         unsigned(v[i].second.second >> 16), unsigned(v[i].second.second & 0xFFFF),
+                         (unsigned long long)v[i].first);
+                top += buf;
+            }
+            LOGI(kTag, "post census (fragment program, target, draws; %llu lists):%s",
+                 (unsigned long long)(list_counter_ - stat_lists_), top.c_str());
+            post_census_.clear();
+            census_max_area_ = 0;
+        }
         LOGI(kTag, "last 10 s: %.0f ms executing lists (%.0f ms of it waiting for the GPU), %.1f MB streamed, %llu cached uploads",
              exec_ms_, wait_ms_, upload_bytes_ / 1048576.0, (unsigned long long)upload_hits_);
         LOGI(kTag, "GPU busy %.0f ms in the last 10 s (%.1f ms per list); geometry hashed ahead: %llu of %llu checks",
@@ -8100,6 +8127,10 @@ private:
     uint64_t render_passes_ = 0, barriers_ = 0;
     std::map<int, uint64_t> pass_breaks_;
     std::map<std::string, uint64_t> sampled_breaks_;
+    // Post-processing census (diagnostics, settings profile): draws per (fragment program, target size) on targets
+    // clearly smaller than the biggest one drawn to, so the passes of a post chain can be picked for skip_fs.
+    std::map<std::pair<uint64_t, uint64_t>, uint64_t> post_census_;
+    uint64_t census_max_area_ = 0;
     std::vector<uint32_t> query_pass_;
     uint64_t ubo_desc_draw_ = ~0ull;
     int world_draws_logged_ = 0;
