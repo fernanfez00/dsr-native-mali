@@ -537,6 +537,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
             else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "fxaa")) {
@@ -646,8 +647,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");
-    LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d", int(cfg->hud_full_res),
-         cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden));
+    LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d, skip_prepass %d",
+         int(cfg->hud_full_res), cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden),
+         int(cfg->skip_prepass));
     LOGI(kTag, "settings: astc_block %d, bc_astc %d, bc5_astc %d, bc3_etc2 %d, skip_bloom %d, fxaa %d, upscaler %d, fsr_sharpness %d, "
          "hud_max_height %d, max_anisotropy %d, fps %d%s",
          cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), int(cfg->bc3_etc2), int(cfg->skip_bloom), cfg->fxaa,
@@ -1053,6 +1055,9 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         now = true;
     } else if (key == "skip_hidden") {  // read by every draw
         c.skip_hidden = std::clamp(atoi(value.c_str()), 0, 2);
+        now = true;
+    } else if (key == "skip_prepass") {  // read by every draw
+        c.skip_prepass = atoi(value.c_str()) != 0;
         now = true;
     } else if (key == "hud_full_res") {  // read by the presenter every frame
         c.hud_full_res = atoi(value.c_str()) != 0;
