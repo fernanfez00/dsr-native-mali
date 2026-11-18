@@ -5080,8 +5080,18 @@ private:
         // drawn; the target it would have written is cleared to zero (once, until some other draw writes it) so that
         // what samples it later (the tone mapping adding the bloom) reads black instead of whatever the memory held.
         if (!skip_parsed_) ParseSkipList();
-        if (!skip_fs_.empty() && !colors.empty()) {
-            if (st_.program[1] && skip_fs_.count(st_.program[1]->hash)) {
+        // The 3D world's target size (a colour target drawn with a depth buffer): skip_post passes are only left out
+        // on targets at most half that area, never on the full-size passes that make up the picture itself.
+        if (depth && !colors.empty() && colors[0]) {
+            const uint64_t a = uint64_t(colors[0]->width) * uint64_t(colors[0]->height);
+            if (a > world_max_area_) world_max_area_ = a;
+        }
+        bool post_small = false;
+        if (!skip_post_.empty() && world_max_area_ && !colors.empty() && colors[0] && st_.program[1] &&
+            skip_post_.count(st_.program[1]->hash))
+            post_small = uint64_t(colors[0]->width) * uint64_t(colors[0]->height) * 2 <= world_max_area_;
+        if ((!skip_fs_.empty() || post_small) && !colors.empty()) {
+            if (st_.program[1] && (post_small || skip_fs_.count(st_.program[1]->hash))) {
                 for (size_t i = 0; i < colors.size(); i++)
                     if (colors[i]) ZeroSkippedTarget(*colors[i], i);
                 if (skip_logged_.insert(st_.program[1]->hash).second)
@@ -8051,6 +8061,10 @@ private:
     // skip_fs (settings): hex fragment-program hashes separated by commas
     bool skip_parsed_ = false;
     std::unordered_set<uint64_t> skip_fs_, skip_logged_;
+    // skip_post hashes: only left out on small targets (see the skip_fs block of the draw); a full-size pass is the
+    // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
+    std::unordered_set<uint64_t> skip_post_;
+    uint64_t world_max_area_ = 0;  // biggest colour target drawn together with a depth buffer (the 3D world)
     uint64_t skipped_draws_ = 0;
     void ParseSkipList() {
         skip_parsed_ = true;
@@ -8065,24 +8079,31 @@ private:
         // Mali-G57. Left alone: the exposure passes (16x16), the downsample shared with the depth of field
         // (8801d1d8f9f8273b) and the programs drawn many times per frame (probably geometry, not full-screen passes).
         // A skipped pass leaves its target black, so some effect may turn out dark: switch the option off then.
+        std::string post;
         if (dsr::GetRuntime().config.skip_post)
-            s += ",8ca165723b7765a5,3fc1b1baa8114318,0b082f0dfd18387b,de34cd7d8f37f809,e9bc8856f5b546f7,"
+            post += "8ca165723b7765a5,3fc1b1baa8114318,0b082f0dfd18387b,de34cd7d8f37f809,e9bc8856f5b546f7,"
                  "9c792fa36fbc2835,c62deccbdaa68d0a,fcb25d171a89d84a,f503d9c09783ac14,4f821636b20a5c3c,"
                  "cdeb232ada05c0af,cb9cc6ab42dc6039,9f81cfa55dca6f0d,7a6ad6744d3bc95b";
-        size_t at = 0;
-        while (at < s.size()) {
-            size_t end = s.find_first_of(", ;", at);
-            if (end == std::string::npos) end = s.size();
-            if (end > at) {
-                char* stop = nullptr;
-                const std::string tok = s.substr(at, end - at);
-                const unsigned long long h = std::strtoull(tok.c_str(), &stop, 16);
-                if (stop && *stop == 0 && h) skip_fs_.insert(h);
-                else LOGW(kTag, "skip_fs: '%s' is not a hash", tok.c_str());
+        auto parse = [&](const std::string& list, std::unordered_set<uint64_t>& out) {
+            size_t at = 0;
+            while (at < list.size()) {
+                size_t end = list.find_first_of(", ;", at);
+                if (end == std::string::npos) end = list.size();
+                if (end > at) {
+                    char* stop = nullptr;
+                    const std::string tok = list.substr(at, end - at);
+                    const unsigned long long h = std::strtoull(tok.c_str(), &stop, 16);
+                    if (stop && *stop == 0 && h) out.insert(h);
+                    else LOGW(kTag, "skip_fs: '%s' is not a hash", tok.c_str());
+                }
+                at = end + 1;
             }
-            at = end + 1;
-        }
-        if (!skip_fs_.empty()) LOGI(kTag, "skip_fs: %zu fragment programs are left out", skip_fs_.size());
+        };
+        parse(s, skip_fs_);
+        parse(post, skip_post_);
+        if (!skip_fs_.empty() || !skip_post_.empty())
+            LOGI(kTag, "skip_fs: %zu fragment programs are left out (+%zu skip_post, small targets only)", skip_fs_.size(),
+                 skip_post_.size());
     }
     void ZeroSkippedTarget(Image& img, size_t i) {
         if (img.skip_zeroed) return;
