@@ -109,7 +109,9 @@ struct RuntimeConfig {
     bool skip_bloom = false;  // leaves out the bloom / glow chain (its fragment programs are added to skip_fs)
     // skip_hidden = 1: world draws that covered no pixel in the last frames (found with occlusion queries) are not
     // drawn, and are tried again every few frames. Fewer vertices to shade and tile on a weak GPU (Mali).
-    bool skip_hidden = false;
+    // skip_hidden = 2 (extended) also judges blended draws that are depth tested (effects, needing one more hidden test
+    // before they are left out), non-indexed draws, every primitive type and depth targets from 128 pixels wide.
+    int skip_hidden = 0;
     int fsr_sharpness = 70;
     // Post-processing at the game's render size, in the HUD path (needs hud_full_res = 1; read every frame):
     // fxaa: 0 = off, 1 = FXAA 3.11 fast (6 steps; for a Mali), 2 = quality (12 steps; from gu-native).
