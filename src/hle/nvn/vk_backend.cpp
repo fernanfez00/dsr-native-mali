@@ -2683,7 +2683,9 @@ private:
     // background thread converts it (WorkPool helps), and the render thread records the copy a few frames later
     // (PumpBcUploads), at most kBcFrameBudget bytes per frame. Until the copy is recorded the texture is not drawn.
     static constexpr size_t kBcFrameBudget = size_t(24) << 20;
-    static constexpr size_t kBcSyncBytes = size_t(2) << 20;  // converted textures up to this size are not queued
+    // Converted textures up to this size are not queued. Frame logs (Mali, BC3 -> ETC2) show about 200-400 ms per MB on
+    // the render thread: a 2 MB texture converted here was a 400-600 ms hitch, so only HUD-sized ones are done inline.
+    static constexpr size_t kBcSyncBytes = size_t(128) << 10;
 
     struct PendingLevel {
         size_t src_off = 0, n = 0, out_off = 0, out_bytes = 0;
