@@ -536,7 +536,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "scale_filter")) cfg->scale_filter = std::clamp(v, 0, 1);
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
             else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
-            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = v != 0;
+            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "fxaa")) {
@@ -1052,7 +1052,7 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         c.hud_max_height = v >= 360 ? std::min(v, 4320) : 0;
         now = true;
     } else if (key == "skip_hidden") {  // read by every draw
-        c.skip_hidden = atoi(value.c_str()) != 0;
+        c.skip_hidden = std::clamp(atoi(value.c_str()), 0, 2);
         now = true;
     } else if (key == "hud_full_res") {  // read by the presenter every frame
         c.hud_full_res = atoi(value.c_str()) != 0;
