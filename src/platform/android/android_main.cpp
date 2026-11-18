@@ -537,6 +537,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_fs")) cfg->skip_fs = value;
             else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
             else if (!strcmp(key, "skip_post")) cfg->skip_post = v != 0;
+            else if (!strcmp(key, "skip_post_extra")) cfg->skip_post_extra = value;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
@@ -656,6 +657,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), int(cfg->bc3_etc2), int(cfg->skip_bloom), cfg->fxaa,
          cfg->upscaler, cfg->fsr_sharpness, cfg->hud_max_height, cfg->max_anisotropy, cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "");
     if (cfg->skip_post) LOGI(kTag, "settings: skip_post on");
+    if (!cfg->skip_post_extra.empty()) LOGI(kTag, "settings: skip_post_extra %s", cfg->skip_post_extra.c_str());
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
