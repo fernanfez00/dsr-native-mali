@@ -416,6 +416,9 @@ final class Strings {
                 "Pula a cadeia de pós-processamento do brilho: mais rápido em GPUs fracas, mas sem o brilho ao redor de luzes fortes.");
         put("hidden_t", "Skip hidden objects", "Ignorer les objets cachés", "Verdeckte Objekte überspringen",
                 "Salta gli oggetti nascosti", "Omitir objetos ocultos", "Pular objetos ocultos");
+        put("hidden_std", "Normal", "Normal", "Normal", "Normale", "Normal", "Normal");
+        put("hidden_ext", "Extended (effects too)", "Étendu (effets inclus)", "Erweitert (inkl. Effekte)",
+                "Esteso (anche effetti)", "Ampliado (con efectos)", "Ampliado (com efeitos)");
         put("hidden_n",
                 "Does not draw objects that covered no pixel in the last frames (retried every few frames). Faster on weak GPUs; an object coming into view can appear a few frames late.",
                 "Ne dessine pas les objets qui n'ont couvert aucun pixel ces dernières images (réessayés toutes les quelques images). Plus rapide sur les GPU modestes ; un objet qui apparaît peut arriver avec quelques images de retard.",
