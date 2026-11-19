@@ -2728,6 +2728,7 @@ private:
         if (bc_thread_.joinable()) bc_thread_.join();
     }
     void BcThreadLoop() {
+        setpriority(PRIO_PROCESS, 0, 10);  // background conversion yields to the game and render threads (see WorkPool)
         for (;;) {
             std::shared_ptr<PendingBc> p;
             {
