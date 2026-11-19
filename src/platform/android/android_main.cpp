@@ -441,10 +441,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         bool have_present_mode = false, have_face_buttons = false, have_gpu_driver = false, have_bc_enabler = false;
         bool have_touch = false, have_aspect = false, have_hud_full_res = false, have_fxaa = false;
         int settings_version = 1;
-        char line[256];
+        char line[2048];  // (skip_fs / skip_post_extra list many 16-digit hashes: a line longer than the buffer was cut)
         while (fgets(line, sizeof(line), f)) {
-            char key[64], value[256];  // (skip_fs lists several 16-digit hashes)
-            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %255s", key, value) != 2) continue;
+            char key[64], value[1024];
+            if (line[0] == '#' || sscanf(line, " %63[a-z_0-9] = %1023s", key, value) != 2) continue;
             const int v = atoi(value);
             if (!strcmp(key, "fps")) {  // e.g. 45: a steady cap below 60; auto: dynamic (60 / 30 / 20)
                 cfg->dynamic_fps = !strcmp(value, "auto");
