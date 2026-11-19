@@ -3577,7 +3577,7 @@ private:
     // skip_hidden = 2 (extended) also judges non-indexed draws, every primitive type, depth targets from 128 pixels wide
     // and blended draws (they still need a depth test, and never a shader depth test or stencil).
     bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
-        const bool ext = dsr::GetRuntime().config.skip_hidden >= 2;
+        const bool ext = dsr::GetRuntime().config.skip_hidden >= 2;  // 2 and 3
         int why = -1;
         if (shader_depth_test) why = 0;
         else if (p.index_type < 0 && !ext) why = 1;
@@ -3604,7 +3604,16 @@ private:
         if (s.hidden >= kOccHiddenTests + (soft ? 1 : 0)) {
             // Hidden draws are re-tested on staggered frames (by key) rather than all on the same one: with every
             // draw retested together, one frame in kOccRetest drew all the hidden geometry again (a periodic spike).
-            if (occ_frame_ - s.last_test < kOccRetest || (occ_frame_ + uint32_t(key >> 7)) % kOccRetest != 0) return 2;
+            // skip_hidden = 3: the longer a draw has stayed hidden, the less often it is retested (3, 6, then 12
+            // frames). With a retest every 3 frames the hidden draws (about 3 of 4 in the world passes) cost nearly as
+            // much vertex/tiler work as the visible ones; geometry hidden for a long time (rooms behind walls) is now
+            // drawn about 4 times less. A draw that shows samples again goes back to being drawn every frame.
+            uint32_t retest = kOccRetest;
+            if (dsr::GetRuntime().config.skip_hidden >= 3) {
+                const uint32_t extra = s.hidden - kOccHiddenTests - (soft ? 1 : 0);  // retests that found nothing
+                retest = extra >= 4 ? kOccRetest * 4 : extra >= 2 ? kOccRetest * 2 : kOccRetest;
+            }
+            if (occ_frame_ - s.last_test < retest || (occ_frame_ + uint32_t(key >> 7)) % retest != 0) return 2;
             s.last_test = occ_frame_;
             return 1;
         }
