@@ -1328,6 +1328,14 @@ public:
         ReportDraws();
         occ_frame_++;
         if (dsr::GetRuntime().config.skip_hidden >= 3) PollOcclusion();
+        // Keys of draws the game no longer issues (streamed geometry gets a new address all the time) piled up until the
+        // 40000 limit emptied the whole table, and every draw then started again from "unknown" at once. Old ones go now.
+        if (occ_state_.size() > 12000 && (occ_frame_ & 127) == 0) {
+            for (auto it = occ_state_.begin(); it != occ_state_.end();) {
+                if (it->second.last_seen + 600 < occ_frame_) it = occ_state_.erase(it);
+                else ++it;
+            }
+        }
         if (occ_seen_ >= 8) occ_moving_ = occ_moved_ * 4 > occ_seen_;  // more than a quarter of the draws moved
         occ_still_ = occ_moving_ ? 0 : occ_still_ + 1;
         occ_moved_ = occ_seen_ = 0;
@@ -3560,6 +3568,7 @@ private:
         uint32_t cst_frame = 0;
         uint64_t test_seq = 0;     // skip_hidden 3: submission whose query result settles the last retest of this key
         uint32_t kept_frame = 0;   // skip_hidden 3: last frame this key was drawn only because its retest was pending
+        uint16_t big = 0;          // skip_hidden 3: results left until a key that covered a large part of the target may be left out
     };
     static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
@@ -3583,6 +3592,12 @@ private:
     // retests are further apart to pay for it, and results are collected as soon as the GPU is done (PollOcclusion).
     uint64_t occ_done_seq_ = 0;   // submissions whose queries have been collected
     uint64_t occ_kept_ = 0;       // draws drawn only because their retest was pending (log)
+    // skip_hidden = 3, large surfaces: a draw that covered at least 1/16 of its target (sky, backdrop, fog, big walls)
+    // is never left out for kOccBigKeep results after that (about 8 s). Leaving it out saves little (few draws) and
+    // when it comes back into view a whole piece of the background would be missing for several frames.
+    static constexpr uint64_t kOccBigDiv = 16;
+    static constexpr uint16_t kOccBigKeep = 240;
+    uint64_t occ_big_ = 0;        // draws kept in because of it (log)
     // Why draws were not judged (log line of skip_hidden): shader depth test, not indexed, not triangles, no depth
     // target >= 256 wide, no depth test, stencil, blending, writes nothing, no vertex program / buffer, vertex
     // constants unusable, query not recorded (pool missing or full); and the draws that were judged.
@@ -3595,6 +3610,7 @@ private:
         sl.occ_used = 0;
         if (!sl.occ || !n) {
             sl.occ_keys.clear();
+            sl.occ_area.clear();
             return;
         }
         std::vector<uint64_t>& res = occ_results_;
@@ -3607,15 +3623,21 @@ private:
             occ_agg_.clear();
             for (uint32_t i = 0; i < n; i++) {
                 if (!res[size_t(i) * 2 + 1]) continue;  // never ran (the draw was dropped later)
-                const bool vis = res[size_t(i) * 2] != 0;
-                auto ins = occ_agg_.emplace(sl.occ_keys[i], vis);
-                if (!ins.second) ins.first->second = ins.first->second || vis;
+                const uint64_t smp = res[size_t(i) * 2];
+                const bool vis = smp != 0;
+                const uint32_t area = i < sl.occ_area.size() ? sl.occ_area[i] : 0;
+                const bool big = vis && area && smp * kOccBigDiv >= area;
+                const uint8_t bits = uint8_t((vis ? 1 : 0) | (big ? 2 : 0));
+                auto ins = occ_agg_.emplace(sl.occ_keys[i], bits);
+                if (!ins.second) ins.first->second |= bits;
             }
             for (const auto& kv : occ_agg_) {
                 auto it = occ_state_.find(kv.first);
                 if (it == occ_state_.end()) continue;
-                if (kv.second || it->second.veto) {
-                    if (kv.second && it->second.hidden >= kOccHiddenTests) occ_woke_++;
+                if (kv.second & 2) it->second.big = kOccBigKeep;
+                else if (it->second.big) it->second.big--;
+                if ((kv.second & 1) || it->second.veto) {
+                    if ((kv.second & 1) && it->second.hidden >= kOccHiddenTests) occ_woke_++;
                     it->second.hidden = 0;
                     it->second.veto = false;
                 } else if (it->second.hidden < 255) {
@@ -3624,6 +3646,7 @@ private:
             }
         }
         sl.occ_keys.clear();
+        sl.occ_area.clear();
     }
     // Once per frame (skip_hidden 3): reads the queries of the submissions the GPU has already finished instead of
     // waiting until their slot is reused, which is ~2 frames later. Nothing else of the slot is touched (its fence is
@@ -3637,7 +3660,7 @@ private:
         }
     }
     std::vector<uint64_t> occ_results_;
-    std::unordered_map<uint64_t, bool> occ_agg_;  // CollectOcclusion: key -> any draw of it produced samples
+    std::unordered_map<uint64_t, uint8_t> occ_agg_;  // CollectOcclusion: key -> bit 0: any draw of it produced samples, bit 1: a large share of the target
     std::unordered_set<int> unsupported_logged_;  // NVN formats already reported as having no Vulkan format
     // Is this draw one that skip_hidden may judge? Only opaque world geometry: indexed triangles (lists or strips), depth tested, written
     // to a colour or depth target of at least 256 pixels. Anything that writes nothing (the game's own visibility tests),
@@ -3685,6 +3708,11 @@ private:
             // instance that had come into view stayed missing while the first one was still hidden.
             if (s.last_test == occ_frame_) return 1;
             const bool l3 = dsr::GetRuntime().config.skip_hidden >= 3;
+            if (l3 && s.big) {  // covered a large part of its target lately: always drawn, with a query so that this can expire
+                s.last_test = occ_frame_;
+                occ_big_++;
+                return 1;
+            }
             // skip_hidden = 3: the retest's result is not known yet, so the draw stays in (no query) until it is.
             if (l3 && s.test_seq > occ_done_seq_) {
                 s.kept_frame = occ_frame_;
@@ -5913,6 +5941,7 @@ private:
                 d.occ_pool = osl.occ;
                 d.occ_q = osl.occ_used++;
                 osl.occ_keys.push_back(occ_key);
+                osl.occ_area.push_back(depth ? uint32_t(std::min<uint64_t>(uint64_t(depth->width) * uint64_t(depth->height), 0xFFFFFFFFull)) : 0u);
                 occ_queried_++;
             } else {
                 occ_reject_[10]++;
@@ -7054,9 +7083,9 @@ private:
                  (unsigned long long)occ_reject_[5], (unsigned long long)occ_reject_[6], (unsigned long long)occ_reject_[7],
                  (unsigned long long)occ_reject_[8], (unsigned long long)occ_reject_[9], (unsigned long long)occ_reject_[10]);
             if (dsr::GetRuntime().config.skip_hidden >= 3)
-                LOGI(kTag, "skip_hidden: %llu hidden draws came back into view, %llu kept in while their retest was pending; view %s (still for %u frames)",
-                     (unsigned long long)occ_woke_, (unsigned long long)occ_kept_, occ_moving_ ? "moving" : "still", occ_still_);
-            occ_skipped_ = occ_queried_ = occ_judged_ = occ_woke_ = occ_kept_ = 0;
+                LOGI(kTag, "skip_hidden: %llu hidden draws came back into view, %llu kept in while their retest was pending, %llu kept in as large surfaces; view %s (still for %u frames)",
+                     (unsigned long long)occ_woke_, (unsigned long long)occ_kept_, (unsigned long long)occ_big_, occ_moving_ ? "moving" : "still", occ_still_);
+            occ_skipped_ = occ_queried_ = occ_judged_ = occ_woke_ = occ_kept_ = occ_big_ = 0;
             for (uint64_t& r : occ_reject_) r = 0;
         }
         if (dsr::GetRuntime().config.skip_prepass) {
@@ -8366,6 +8395,7 @@ private:
         VkQueryPool ts = VK_NULL_HANDLE;  // GPU time of the submission (start, end)
         VkQueryPool occ = VK_NULL_HANDLE;  // settings skip_hidden: one occlusion query per tracked draw
         std::vector<uint64_t> occ_keys;    // render thread: the draw behind each query of this submission
+        std::vector<uint32_t> occ_area;    // render thread: the pixels of the depth target of each of those draws
         uint32_t occ_used = 0;
         bool ts_written = false;
         VkDescriptorPool pool = VK_NULL_HANDLE;
