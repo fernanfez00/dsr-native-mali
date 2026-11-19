@@ -609,7 +609,8 @@ public:
                                 clears_in_pass_++;
                             } else {
                                 if (InOpenPass(img)) EndRendering();  // draws after the clear must see it
-                                if (img->clear_pending) FlushClear(*img);
+                                if (img->clear_pending && !DeadClear(*img, VK_IMAGE_ASPECT_COLOR_BIT, layer, level))
+                                    FlushClear(*img);
                                 img->clear_pending = true;
                                 img->clear_value = v;
                                 img->clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4021,6 +4022,17 @@ private:
     // ======================================================================================================
     // clears / copies
     // ======================================================================================================
+    // A pending clear that a new clear of the same aspect, layer and level replaces before anything has used the
+    // image (any use consumes it: a pass loads it, a read or copy flushes it) never has to run: dropping it saves
+    // a render pass break and a separate clear. The skipped passes' targets are zeroed again after every real
+    // draw on them, so this was a large share of the "performed separately" clears (log of 2026-11-19).
+    bool DeadClear(const Image& img, VkImageAspectFlags aspect, int layer, int level) {
+        if (!img.clear_pending || img.clear_aspect != aspect || img.clear_layer != layer || img.clear_level != level)
+            return false;
+        clears_dropped_++;
+        return true;
+    }
+    uint64_t clears_dropped_ = 0;
     // Performs a deferred clear (outside a render pass).
     void FlushClear(Image& img) {
         img.clear_pending = false;
@@ -4103,7 +4115,7 @@ private:
                 clears_in_pass_++;
             } else {
                 if (InOpenPass(img)) EndRendering();
-                if (img->clear_pending) FlushClear(*img);
+                if (img->clear_pending && !DeadClear(*img, a, rr.layer, rr.level)) FlushClear(*img);
                 img->clear_pending = true;
                 img->clear_value = v;
                 img->clear_aspect = a;
@@ -7283,6 +7295,11 @@ private:
              "in the shader",
              (unsigned long long)clears_deferred_, (unsigned long long)clears_in_pass_, (unsigned long long)clears_flushed_,
              (unsigned long long)pass_barriers_, (unsigned long long)lrz_touches_, (unsigned long long)shader_depth_draws_);
+        if (clears_dropped_) {
+            LOGI(kTag, "clears: %llu pending clears replaced by a newer one before use (not performed)",
+                 (unsigned long long)clears_dropped_);
+            clears_dropped_ = 0;
+        }
         clears_deferred_ = clears_in_pass_ = clears_flushed_ = pass_barriers_ = lrz_touches_ = shader_depth_draws_ = 0;
         if (rt_writebacks_ || reports_done_) {
             LOGI(kTag, "small render targets written back to game memory: %llu; reports written: %llu",
@@ -8347,7 +8364,8 @@ private:
         img.skip_zeroed = true;
         const auto sub_rt = RtSub(i);
         if (InOpenPass(&img)) EndRendering();
-        if (img.clear_pending) FlushClear(img);
+        if (img.clear_pending && !DeadClear(img, VK_IMAGE_ASPECT_COLOR_BIT, sub_rt.first, sub_rt.second))
+            FlushClear(img);
         img.clear_pending = true;
         img.clear_value = {};
         img.clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
