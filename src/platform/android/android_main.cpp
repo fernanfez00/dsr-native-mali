@@ -539,7 +539,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_post")) cfg->skip_post = v != 0;
             else if (!strcmp(key, "skip_post_extra")) cfg->skip_post_extra = value;
             else if (!strcmp(key, "skip_post_plus")) cfg->skip_post_plus = v != 0;
-            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
@@ -1060,7 +1060,7 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         c.hud_max_height = v >= 360 ? std::min(v, 4320) : 0;
         now = true;
     } else if (key == "skip_hidden") {  // read by every draw
-        c.skip_hidden = std::clamp(atoi(value.c_str()), 0, 2);
+        c.skip_hidden = std::clamp(atoi(value.c_str()), 0, 3);
         now = true;
     } else if (key == "skip_prepass") {  // read by every draw
         c.skip_prepass = atoi(value.c_str()) != 0;
