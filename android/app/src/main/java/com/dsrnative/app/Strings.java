@@ -424,6 +424,16 @@ final class Strings {
                 "Salta altre piccole passate di post-elaborazione: meno passate di rendering e più veloce sulle GPU deboli, ma alcuni effetti possono apparire sbagliati o scuri. In tal caso disattivalo.",
                 "Omite más pasadas pequeñas de posprocesado: menos pasadas de render y más rápido en GPU modestas, pero algunos efectos pueden verse mal u oscuros. Desactívalo si ocurre.",
                 "Pula mais passes pequenos de pós-processamento: menos passes de renderização e mais rápido em GPUs fracas, mas alguns efeitos podem ficar errados ou escuros. Desative se isso acontecer.");
+        put("postplus_t", "Remove low-resolution effects (experimental)", "Supprimer les effets basse résolution (expérimental)",
+                "Effekte in niedriger Auflösung entfernen (experimentell)", "Rimuovi gli effetti a bassa risoluzione (sperimentale)",
+                "Quitar los efectos de baja resolución (experimental)", "Remover os efeitos de baixa resolução (experimental)");
+        put("postplus_n",
+                "Leaves out 16 more small effect passes (low-resolution smoke, glow and similar): about half the draws on a weak GPU, but some effects may disappear. Turn on after Remove extra post-processing.",
+                "Saute 16 passes d'effets supplémentaires (fumée, halo et similaires en basse résolution) : environ la moitié des dessins en moins sur un GPU modeste, mais certains effets peuvent disparaître. À activer après le post-traitement supplémentaire.",
+                "Überspringt 16 weitere kleine Effekt-Durchgänge (Rauch, Leuchten u. Ä. in niedriger Auflösung): etwa die Hälfte der Zeichenaufrufe weniger auf schwachen GPUs, aber manche Effekte können verschwinden. Nach der zusätzlichen Nachbearbeitung einschalten.",
+                "Salta altre 16 passate di effetti (fumo, alone e simili a bassa risoluzione): circa la metà dei disegni in meno su una GPU debole, ma alcuni effetti possono sparire. Attivalo dopo la post-elaborazione extra.",
+                "Omite 16 pasadas de efectos más (humo, brillo y similares en baja resolución): cerca de la mitad de los dibujos menos en una GPU modesta, pero algunos efectos pueden desaparecer. Actívalo después del posprocesado extra.",
+                "Pula mais 16 passes de efeitos (fumaça, brilho e similares em baixa resolução): cerca de metade dos desenhos a menos em uma GPU fraca, mas alguns efeitos podem desaparecer. Ative depois do pós-processamento extra.");
         put("hidden_t", "Skip hidden objects", "Ignorer les objets cachés", "Verdeckte Objekte überspringen",
                 "Salta gli oggetti nascosti", "Omitir objetos ocultos", "Pular objetos ocultos");
         put("prepass_t", "Skip depth prepass", "Ignorer le pré-passage de profondeur", "Tiefen-Vorpass überspringen",
