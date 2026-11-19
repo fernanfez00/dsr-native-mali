@@ -1695,7 +1695,11 @@ private:
         en.fragmentStoresAndAtomics = have.features.fragmentStoresAndAtomics;
         en.geometryShader = have.features.geometryShader;  // gl_PrimitiveID in fragment shaders
         en.shaderStorageImageWriteWithoutFormat = have.features.shaderStorageImageWriteWithoutFormat;
+        // skip_hidden 3 counts the samples of a draw (large surfaces are never left out); without this the occlusion
+        // queries only say "some sample / none" (a non-precise query returns 1).
+        en.occlusionQueryPrecise = have.features.occlusionQueryPrecise;
         features_ = en;
+        LOGI(kTag, "occlusion queries: precise %d", int(en.occlusionQueryPrecise));
         VkPhysicalDeviceVulkan13Features en13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         en13.dynamicRendering = have13.dynamicRendering;
         VkPhysicalDeviceFeatures2 en2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -6320,7 +6324,10 @@ private:
         }
         ApplyDynamicState(d.dyn);
         if (d.query != UINT32_MAX) vkCmdBeginQuery(cb, query_pool_, d.query, 0);
-        if (d.occ_pool) vkCmdBeginQuery(cb, d.occ_pool, d.occ_q, 0);
+        if (d.occ_pool)
+            vkCmdBeginQuery(cb, d.occ_pool, d.occ_q,
+                            features_.occlusionQueryPrecise && dsr::GetRuntime().config.skip_hidden >= 3
+                                ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
         if (d.indexed) {
             if (bound_ib_.first != d.index_buf || bound_ib_.second != d.index_off || bound_ib_type_ != d.index_type) {
                 vkCmdBindIndexBuffer(cb, d.index_buf, d.index_off, d.index_type);
