@@ -461,8 +461,8 @@ public final class SettingsMenu {
         toggle("skip_post_plus", Strings.t("postplus_t"), Strings.t("postplus_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_now"),
-                new String[] {"0", "1", "2"},
-                new String[] {Strings.t("q_off"), Strings.t("hidden_std"), Strings.t("hidden_ext")}, "0");
+                new String[] {"0", "1", "2", "3"},
+                new String[] {Strings.t("q_off"), Strings.t("hidden_std"), Strings.t("hidden_ext"), Strings.t("hidden_max")}, "0");
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_now"), "1", "0", "0");
         choice("max_anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2", "4", "8", "16"},

@@ -448,6 +448,8 @@ final class Strings {
         put("hidden_std", "Normal", "Normal", "Normal", "Normale", "Normal", "Normal");
         put("hidden_ext", "Extended (effects too)", "Étendu (effets inclus)", "Erweitert (inkl. Effekte)",
                 "Esteso (anche effetti)", "Ampliado (con efectos)", "Ampliado (com efeitos)");
+        put("hidden_max", "Maximum (rare retests)", "Maximum (tests espacés)", "Maximal (seltene Tests)",
+                "Massimo (test rari)", "Máximo (pruebas espaciadas)", "Máximo (testes espaçados)");
         put("hidden_n",
                 "Does not draw objects that covered no pixel in the last frames (retried every few frames). Faster on weak GPUs; an object coming into view can appear a few frames late.",
                 "Ne dessine pas les objets qui n'ont couvert aucun pixel ces dernières images (réessayés toutes les quelques images). Plus rapide sur les GPU modestes ; un objet qui apparaît peut arriver avec quelques images de retard.",
