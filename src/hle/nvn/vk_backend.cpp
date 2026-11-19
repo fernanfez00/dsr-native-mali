@@ -2706,6 +2706,7 @@ private:
     // textures at once and every conversion costs ~25 ms here (log of 2026-11-19: 3.4 s and 2.4 s stalls with 0 ms
     // waiting for the GPU); past this budget the rest go to the background thread like the big ones.
     static constexpr double kBcSyncFrameMs = 6.0;
+    static constexpr double kBcMaxWaitMs = 3000.0;  // a queued conversion waiting this long is taken next
     double bc_sync_ms_ = 0;  // render thread: milliseconds spent on spot conversions in the current frame
 
     struct PendingLevel {
@@ -2727,6 +2728,7 @@ private:
         size_t result_bytes = 0;
         std::vector<uint8_t> result;             // converted levels, back to back (filled by the background thread)
         uint64_t cache_hits = 0;
+        std::chrono::steady_clock::time_point queued_at = std::chrono::steady_clock::now();
         std::atomic<bool> done{false};
     };
     std::deque<std::shared_ptr<PendingBc>> bc_queue_;     // to the background thread (under bc_mutex_)
@@ -2749,15 +2751,37 @@ private:
         if (bc_thread_.joinable()) bc_thread_.join();
     }
     void BcThreadLoop() {
-        setpriority(PRIO_PROCESS, 0, 10);  // background conversion yields to the game and render threads (see WorkPool)
+        int nice_now = 10;
+        setpriority(PRIO_PROCESS, 0, nice_now);  // background conversion yields to the game and render threads (see WorkPool)
         for (;;) {
             std::shared_ptr<PendingBc> p;
             {
                 std::unique_lock<std::mutex> lk(bc_mutex_);
                 bc_cv_.wait(lk, [this] { return bc_stop_ || !bc_queue_.empty(); });
                 if (bc_queue_.empty()) return;  // stop requested and nothing left to convert
-                p = bc_queue_.front();
-                bc_queue_.pop_front();
+                // Smallest texture first: HUD, icons and small props become visible long before one big texture
+                // is done (each queued texture is drawn as a white stand-in until its copy lands). A job that
+                // has waited kBcMaxWaitMs goes first so big ones are not starved by a stream of small ones.
+                const auto now = std::chrono::steady_clock::now();
+                size_t best = 0;
+                bool aged = false;
+                for (size_t i = 0; i < bc_queue_.size(); i++) {
+                    if (std::chrono::duration<double, std::milli>(now - bc_queue_[i]->queued_at).count() > kBcMaxWaitMs) {
+                        best = i;
+                        aged = true;
+                        break;
+                    }
+                    if (bc_queue_[i]->result_bytes < bc_queue_[best]->result_bytes) best = i;
+                }
+                (void)aged;
+                p = bc_queue_[best];
+                bc_queue_.erase(bc_queue_.begin() + std::ptrdiff_t(best));
+                // A deep queue is a zone load: convert at normal priority; back to background when it drains.
+                const int want = bc_queue_.size() >= 8 ? 0 : 10;
+                if (want != nice_now) {
+                    nice_now = want;
+                    setpriority(PRIO_PROCESS, 0, nice_now);
+                }
             }
             ConvertPending(*p);
             p->done.store(true, std::memory_order_release);
@@ -2957,16 +2981,25 @@ private:
         if (bc_inflight_.empty()) return;
         size_t budget = kBcFrameBudget;
         bool ended = false;
-        while (!bc_inflight_.empty() && bc_inflight_.front()->done.load(std::memory_order_acquire)) {
-            std::shared_ptr<PendingBc> p = bc_inflight_.front();
+        // Any finished result is recorded, not just the oldest: the thread finishes small textures first, and a
+        // big one at the head of the queue must not hold them back.
+        for (auto qi = bc_inflight_.begin(); qi != bc_inflight_.end();) {
+            if (!(*qi)->done.load(std::memory_order_acquire)) {
+                ++qi;
+                continue;
+            }
+            std::shared_ptr<PendingBc> p = *qi;
             auto it = images_.find(p->addr);
             if (it == images_.end() || !it->second.pending || it->second.serial != p->serial) {
-                bc_inflight_.pop_front();
+                qi = bc_inflight_.erase(qi);
                 continue;
             }
             const size_t bytes = p->result_bytes;
-            if (bytes > budget && budget < kBcFrameBudget) break;  // the rest waits for the next frame
-            if (StreamRemaining() < bytes + 1024) break;           // the stream is reset next frame
+            if (bytes > budget && budget < kBcFrameBudget) {  // does not fit in what is left: a smaller one may
+                ++qi;
+                continue;
+            }
+            if (StreamRemaining() < bytes + 1024) break;  // the stream is reset next frame
             if (!ended) {
                 EndRendering();
                 ended = true;
@@ -2988,7 +3021,7 @@ private:
             bc_cache_hits_ += p->cache_hits;
             budget = budget > bytes ? budget - bytes : 0;
             std::vector<uint8_t>().swap(p->result);  // free the CPU copy of the converted texels
-            bc_inflight_.pop_front();
+            qi = bc_inflight_.erase(qi);
         }
     }
 
@@ -5384,13 +5417,16 @@ private:
                     img = bt.valid ? GetImage(bt.texture, true) : nullptr;
                 }
                 if (!img) {
-                    // Missing or unsupported texture: draw with a white stand-in rather than dropping the
-                    // draw (one skipped pass can blank the whole frame).
-                    if (bt.valid && unsupported_logged_.insert(bt.texture.tex.format).second)
+                    // Missing, still converting or unsupported texture: draw with a white stand-in rather than
+                    // dropping the draw (one skipped pass can blank the whole frame).
+                    const Image* conv = bt.valid ? FindImage(bt.texture) : nullptr;
+                    const bool converting = conv && conv->pending && !conv->written;
+                    if (bt.valid && !converting && unsupported_logged_.insert(bt.texture.tex.format).second)
                         LOGW(kTag, "texture of NVN format %d (%dx%d, %d levels) has no usable Vulkan format: white stand-in used",
                              bt.texture.tex.format, bt.texture.tex.width, bt.texture.tex.height, bt.texture.tex.levels);
-                    Skip(bt.valid ? "texture format not supported (white stand-in used)"
-                                  : "texture handle not found (white stand-in used)");
+                    Skip(converting ? "texture still converting in the background (white stand-in used)"
+                         : bt.valid ? "texture format not supported (white stand-in used)"
+                                    : "texture handle not found (white stand-in used)");
                     img = Fallback(info.texture_dim[slot], info.texture_array[slot]);
                     bt.texture.tex.swizzle[0] = 2;
                     bt.texture.tex.swizzle[1] = 3;
