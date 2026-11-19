@@ -597,6 +597,7 @@ public:
                         Begin();
                         const int layer = st_.rts[c.index].layer, level = st_.rts[c.index].level;
                         if (!IsDepthFormat(img->nvn_format) && !capture_active_) {
+                            img->skip_zeroed = false;  // the game writes it: no longer the skipped pass's zero
                             VkClearValue v{};
                             memcpy(v.color.uint32, c.color, sizeof(v.color.uint32));
                             if (rendering_ && size_t(c.index) < pass_color_count_ && pass_colors_[c.index] == img &&
@@ -4127,6 +4128,7 @@ private:
     }
 
     void CopyImage(Image& src, const CopyRegion& sr, Image& dst, const CopyRegion& dr, int flags) {
+        dst.skip_zeroed = false;  // written by a copy: no longer the skipped pass's zero
         if (IsDepthFormat(src.nvn_format) != IsDepthFormat(dst.nvn_format)) return;
         auto clampw = [](int v, int def) { return v > 0 ? v : def; };
         int sw = clampw(sr.width, src.width), sh = clampw(sr.height, src.height);
@@ -4995,8 +4997,8 @@ private:
 
     // 1x1 stand-in of a dimension: white (missing textures) or opaque black (`black`: placeholders of the wrong
     // dimension, like the game's 16x16 black texture bound where a cube map is sampled).
-    Image* Fallback(shader::TexDim dim, bool array, bool black = false) {
-        const int key = int(dim) * 2 + (array ? 1 : 0) + (black ? 64 : 0);
+    Image* Fallback(shader::TexDim dim, bool array, bool black = false, bool alpha0 = false) {
+        const int key = int(dim) * 2 + (array ? 1 : 0) + (black ? 64 : 0) + (alpha0 ? 128 : 0);
         auto it = fallbacks_.find(key);
         if (it != fallbacks_.end()) return it->second;
         TexRef t;
@@ -5017,7 +5019,7 @@ private:
             Transition(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkClearColorValue white;
             white.float32[0] = white.float32[1] = white.float32[2] = black ? 0.0f : 1.0f;
-            white.float32[3] = 1.0f;
+            white.float32[3] = alpha0 ? 0.0f : 1.0f;
             VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, uint32_t(img->layers)};
             Rec([white, range, image = img->image](VkCommandBuffer cb) {
                 vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
@@ -5403,6 +5405,7 @@ private:
                 if (!plain && !shadow) continue;
                 BoundTexture bt = st_.textures[stage][slot];
                 Image* img = nullptr;
+                bool zero_standin = false;
                 if (shader_depth_test && stage == 1 && slot == 31 && depth) {
                     // The depth copy the shader tests against (TranslateOptions::depth_test_func).
                     bt = BoundTexture{};
@@ -5454,6 +5457,22 @@ private:
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
                 }
+                // skip_fs: what a skipped pass would have written still holds the zero clear (nothing has written
+                // it since: the flag is reset by every real draw, clear and copy). Reading it as it is meant ending
+                // the open render pass, a transition and a separate clear for a texture that is all zeros; a 1x1
+                // transparent black stand-in reads the same and costs none of that.
+                if (img->skip_zeroed && img->written && img->levels == 1 && img->layers == 1 &&
+                    img->type == VK_IMAGE_TYPE_2D && !IsDepthFormat(img->nvn_format) && img != depth &&
+                    img != &hud_img_ && img != &hud2_img_ && info.texture_dim[slot] == shader::TexDim::D2 &&
+                    !info.texture_array[slot] && !capture_active_) {
+                    // the alpha of formats without alpha is read as one, as for the image itself
+                    Image* z = Fallback(info.texture_dim[slot], false, true, !IgnoresAlpha(img->nvn_format));
+                    if (z) {
+                        img = z;
+                        zero_standin = true;
+                        zero_standins_++;
+                    }
+                }
                 if (stage == 0 && img->frag_only_sync && img->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
                     !img->clear_pending) {  // mali_barriers: released to fragment shaders only
                     EndRendering();
@@ -5497,7 +5516,7 @@ private:
                     draw_images_.push_back({int(stage), int(slot), img});
                 }
                 VkImageView view = SampledView(*img, info.texture_dim[slot], info.texture_array[slot], swz,
-                                               bt.valid ? &bt.texture : nullptr);
+                                               bt.valid && !zero_standin ? &bt.texture : nullptr);
                 if (!view) {
                     char k[160];
                     snprintf(k, sizeof(k), "view: shader %s%d dim %d array %d | image type %d %dx%dx%d layers %d fmt %d",
@@ -7278,6 +7297,11 @@ private:
                  (unsigned long long)geo_rechecks_);
             list_b2b_copies_ = list_updates_ = geo_rechecks_ = 0;
         }
+        if (zero_standins_) {
+            LOGI(kTag, "skip_fs: %llu reads of skipped-pass targets served by a black stand-in (no pass break)",
+                 (unsigned long long)zero_standins_);
+            zero_standins_ = 0;
+        }
         if (padded_fetches_ || view_standins_) {
             LOGI(kTag, "draws reading vertex data past their bound buffer: %llu; with a stand-in for a "
                  "texture of the wrong dimension: %llu", (unsigned long long)padded_fetches_,
@@ -8394,6 +8418,7 @@ private:
     std::unordered_set<uint64_t> viewport_keys_;
     std::set<std::string> view_mismatch_logged_;
     uint64_t view_standins_ = 0;
+    uint64_t zero_standins_ = 0;  // skip_fs: reads of a zeroed skipped-pass target served by a black stand-in
     int capture_draws_logged_ = 0;
     int geo_dumps_ = 0;
     std::unordered_map<uint64_t, uint64_t> snapshot_gen_;
