@@ -119,8 +119,10 @@ struct RuntimeConfig {
     // drawn, and are tried again every few frames. Fewer vertices to shade and tile on a weak GPU (Mali).
     // skip_hidden = 2 (extended) also judges blended draws that are depth tested (effects, needing one more hidden test
     // before they are left out), non-indexed draws, every primitive type and depth targets from 128 pixels wide.
-    // skip_hidden = 3 is level 2 with retests of hidden draws that get rarer the longer they stay hidden (every 3, 6,
-    // then 12 frames): less vertex/tiler work, at the price of objects coming into view up to ~0.4 s late at 30 fps.
+    // skip_hidden = 3 is level 2 without the blink of objects coming into view: a retested hidden draw stays drawn until
+    // the result of its query is in (it used to disappear again for 1-3 frames), the results are read as soon as the
+    // GPU has finished, and the retests get rarer the longer a draw stays hidden (4, 6, then 8 frames while the view
+    // moves; 6, 9, then 12 when it is still). An object that comes into view can appear a few frames late, never twice.
     int skip_hidden = 0;
     // skip_prepass = 1: the game draws its world twice, a depth-only pass and then the colour pass testing against it
     // (depth func LEQUAL, no depth write). The depth-only draws are left out and the colour draws write the depth
