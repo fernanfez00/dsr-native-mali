@@ -112,6 +112,9 @@ struct RuntimeConfig {
     // on targets at most half the 3D world's area, never on full-size passes (so they cannot black out the picture).
     // Works without skip_post; the hashes come from the "post census" log line (settings profile 1).
     std::string skip_post_extra;
+    // skip_post_plus (menu toggle): leaves out 16 more post-processing / low-resolution effect programs, with the
+    // skip_post rule (small targets only). Tested on a Mali-G57 (A15) with the picture intact.
+    bool skip_post_plus = false;
     // skip_hidden = 1: world draws that covered no pixel in the last frames (found with occlusion queries) are not
     // drawn, and are tried again every few frames. Fewer vertices to shade and tile on a weak GPU (Mali).
     // skip_hidden = 2 (extended) also judges blended draws that are depth tested (effects, needing one more hidden test
