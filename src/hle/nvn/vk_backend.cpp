@@ -1327,6 +1327,9 @@ public:
         if (!EnsureDevice()) return;
         ReportDraws();
         occ_frame_++;
+        if (occ_seen_ >= 8) occ_moving_ = occ_moved_ * 4 > occ_seen_;  // more than a quarter of the draws moved
+        occ_still_ = occ_moving_ ? 0 : occ_still_ + 1;
+        occ_moved_ = occ_seen_ = 0;
         // The frame rate cap changed while the game runs (settings menu): tell the display.
         if (window_ && swapchain_ && window_fps_ && window_fps_ != std::clamp(dsr::GetRuntime().config.target_fps, 30, 60))
             SetWindowFrameRate();
@@ -3552,6 +3555,8 @@ private:
         uint32_t last_seen = 0;
         uint8_t hidden = 0;      // consecutive tests with no samples
         bool veto = false;       // a draw of this key was drawn without a query: its visibility is unknown
+        uint64_t cst = 0;        // skip_hidden 3: hash of the first draw's object constants in cst_frame (camera motion)
+        uint32_t cst_frame = 0;
     };
     static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
@@ -3559,6 +3564,14 @@ private:
     std::unordered_map<uint64_t, OccState> occ_state_;
     uint32_t occ_frame_ = 0;
     uint64_t occ_skipped_ = 0, occ_queried_ = 0;
+    // skip_hidden = 3, camera motion: the share of drawn keys whose object constants changed since the previous frame.
+    // While the view moves (or just started to) hidden draws are retested every kOccRetest frames, never less often, so
+    // nothing that comes into view stays missing for up to 12 frames (the texture flicker of the old level 3). The
+    // longer retest intervals only apply once the view has been still for kOccStillFrames frames.
+    static constexpr uint32_t kOccStillFrames = 8;
+    uint32_t occ_moved_ = 0, occ_seen_ = 0, occ_still_ = 0;
+    bool occ_moving_ = false;
+    uint64_t occ_woke_ = 0;  // hidden keys that showed samples again (log)
     // Why draws were not judged (log line of skip_hidden): shader depth test, not indexed, not triangles, no depth
     // target >= 256 wide, no depth test, stencil, blending, writes nothing, no vertex program / buffer, vertex
     // constants unusable, query not recorded (pool missing or full); and the draws that were judged.
@@ -3590,6 +3603,7 @@ private:
                 auto it = occ_state_.find(kv.first);
                 if (it == occ_state_.end()) continue;
                 if (kv.second || it->second.veto) {
+                    if (kv.second && it->second.hidden >= kOccHiddenTests) occ_woke_++;
                     it->second.hidden = 0;
                     it->second.veto = false;
                 } else if (it->second.hidden < 255) {
@@ -3628,10 +3642,18 @@ private:
     // 0: draw, 1: draw with a query, 2: leave out.
     // `soft`: a blended draw (extended mode): one more hidden test before it is left out, so an effect that flickers
     // in and out is not dropped on a single empty frame.
-    int OccDecide(uint64_t key, bool soft = false) {
+    int OccDecide(uint64_t key, bool soft = false, uint64_t cst = 0) {
         if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat (moving camera data): start over
         OccState& s = occ_state_[key];
         s.last_seen = occ_frame_;
+        if (cst && s.cst_frame != occ_frame_) {  // first draw of this key this frame: did its constants change?
+            if (s.cst && s.cst_frame + 1 == occ_frame_) {
+                occ_seen_++;
+                if (s.cst != cst) occ_moved_++;
+            }
+            s.cst = cst;
+            s.cst_frame = occ_frame_;
+        }
         if (s.hidden >= kOccHiddenTests + (soft ? 1 : 0)) {
             // Hidden draws are re-tested on staggered frames (by key) rather than all on the same one: with every
             // draw retested together, one frame in kOccRetest drew all the hidden geometry again (a periodic spike).
@@ -3640,7 +3662,11 @@ private:
             // much vertex/tiler work as the visible ones; geometry hidden for a long time (rooms behind walls) is now
             // drawn about 4 times less. A draw that shows samples again goes back to being drawn every frame.
             uint32_t retest = kOccRetest;
-            if (dsr::GetRuntime().config.skip_hidden >= 3) {
+            // Every draw sharing this key (several objects with the same mesh) is retested on the frame the key is
+            // retested: the first one used to mark the key as tested, so the others stayed out of the frame, and an
+            // instance that had come into view stayed missing while the first one was still hidden.
+            if (s.last_test == occ_frame_) return 1;
+            if (dsr::GetRuntime().config.skip_hidden >= 3 && !occ_moving_ && occ_still_ >= kOccStillFrames) {
                 const uint32_t extra = s.hidden - kOccHiddenTests - (soft ? 1 : 0);  // retests that found nothing
                 retest = extra >= 4 ? kOccRetest * 4 : extra >= 2 ? kOccRetest * 2 : kOccRetest;
             }
@@ -4975,7 +5001,7 @@ private:
 
     // The draw's identity across frames (false: not trackable). The first 128 bytes of the vertex constants hold the
     // camera, so only the part after them (the object's transforms) goes in.
-    bool OccKey(const DrawParams& p, const VertexInput& vin, uint32_t target_w, uint64_t* out) {
+    bool OccKey(const DrawParams& p, const VertexInput& vin, uint32_t target_w, uint64_t* out, uint64_t* cst_out = nullptr) {
         if (!st_.program[0] || vin.bindings.empty()) {
             occ_reject_[8]++;
             return false;
@@ -5005,6 +5031,18 @@ private:
         // went from ~2000 standing still to 20-40k moving, and almost nothing was ever left out). Objects sharing a
         // mesh share a key instead; CollectOcclusion treats the key as hidden only if none of them was visible.
         *out = h;
+        if (cst_out) {  // the object's constants (not part of the key): only used to tell whether the view is moving
+            uint64_t ch = 1469598103934665603ull;
+            const uint64_t* w = reinterpret_cast<const uint64_t*>(c3.address + kFrom);
+            for (uint64_t i = 0; i < kLen / 8; i++) {
+                uint64_t v;
+                memcpy(&v, w + i, 8);
+                ch ^= v;
+                ch *= 1099511628211ull;
+                ch ^= ch >> 29;
+            }
+            *cst_out = ch ? ch : 1;
+        }
         return true;
     }
     void Draw(const DrawParams& p) {
@@ -5206,12 +5244,13 @@ private:
         }
 
         // ---- skip_hidden: world draws that covered no pixel in recent frames are left out (see OccDecide) -------
-        uint64_t occ_key = 0;
+        uint64_t occ_key = 0, occ_cst = 0;
         bool occ_query = false;
         if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
-            OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
+            OccKey(p, vin, uint32_t(depth->width), &occ_key,
+                   dsr::GetRuntime().config.skip_hidden >= 3 ? &occ_cst : nullptr)) {
             occ_judged_++;
-            const int act = OccDecide(occ_key, st_.color.blend_enable != 0);
+            const int act = OccDecide(occ_key, st_.color.blend_enable != 0, occ_cst);
             if (act == 2) {
                 occ_skipped_++;
                 return;
@@ -6980,7 +7019,10 @@ private:
                  (unsigned long long)occ_reject_[2], (unsigned long long)occ_reject_[3], (unsigned long long)occ_reject_[4],
                  (unsigned long long)occ_reject_[5], (unsigned long long)occ_reject_[6], (unsigned long long)occ_reject_[7],
                  (unsigned long long)occ_reject_[8], (unsigned long long)occ_reject_[9], (unsigned long long)occ_reject_[10]);
-            occ_skipped_ = occ_queried_ = occ_judged_ = 0;
+            if (dsr::GetRuntime().config.skip_hidden >= 3)
+                LOGI(kTag, "skip_hidden: %llu hidden draws came back into view; view %s (still for %u frames)",
+                     (unsigned long long)occ_woke_, occ_moving_ ? "moving" : "still", occ_still_);
+            occ_skipped_ = occ_queried_ = occ_judged_ = occ_woke_ = 0;
             for (uint64_t& r : occ_reject_) r = 0;
         }
         if (dsr::GetRuntime().config.skip_prepass) {
