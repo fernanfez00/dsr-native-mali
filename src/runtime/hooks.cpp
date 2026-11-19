@@ -2,6 +2,7 @@
 // build id): 1.0.0 and the 1.0.3 update. They replace engine functions whose output is useful to us but goes
 // nowhere in a retail build, and patch the frame rate and resolution. The places were found in 1.0.0 and matched
 // in 1.0.3 by their code (the same instructions around them, with addresses masked).
+#include <sys/resource.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -312,11 +313,15 @@ void EnginePanic(const char* file, int line, const char* fmt, ...) {
 // scene keeps a 16:9 aspect ratio. Cameras keep {fov, aspect, near, far} at +0x50..+0x5c (main+0xfa7f4 reads
 // fov and aspect for the view frustum). This scans the guest heap and the game's data for such blocks with a
 // 16:9 aspect, logs them (with the owner's vtable, to find the code that sets it) and writes the wanted aspect
-// into them, again every second (rescanning every 2 s until cameras are found, then every 10 s).
+// into them, again every second (rescanning every 2 s until cameras are found, then every 10 s). While nothing is
+// found the pause between scans doubles (2, 4, 8 ... up to 30 s): a scan walks the whole guest heap (1-1.6 s on a
+// phone), and repeating it every 2-3 s kept ~30 % of a core busy for the whole session (log of 2026-11-19).
 float g_aspect = 0;
 void CameraAspectThread() {
     pthread_setname_np(pthread_self(), "dsr-aspect");
+    setpriority(PRIO_PROCESS, 0, 10);  // a background scan must not compete with the game and render threads
     const loader::Module& m = GetRuntime().main;
+    int empty_pause = 2;  // seconds between scans while no camera has been found (doubles up to 30)
     std::vector<float*> found;
     int scans = 0;
     auto plausible = [](const float* a) {  // a = &aspect: fov before it, near and far after
@@ -359,7 +364,13 @@ void CameraAspectThread() {
         if (new_found || scans <= 3 || scans % 60 == 0)
             LOGI("hooks", "camera aspect: scan %d (%.0f ms): %d new 16:9 cameras, %zu in all; setting them to %.3f", scans,
                  scan_ms, new_found, found.size(), g_aspect);
-        const int rewrites = found.empty() ? 2 : 10;  // 2 s, then 10 s between scans
+        int rewrites = 10;  // 10 s between scans once cameras are known
+        if (found.empty()) {
+            rewrites = empty_pause;
+            empty_pause = std::min(empty_pause * 2, 30);
+        } else {
+            empty_pause = 2;
+        }
         for (int k = 0; k < rewrites; k++) {
             for (float* a : found)
                 if (*a > 1.7777f && *a < 1.7779f && plausible(a)) *a = g_aspect;
