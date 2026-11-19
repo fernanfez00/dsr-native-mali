@@ -8085,6 +8085,14 @@ private:
         if (dsr::GetRuntime().config.skip_post)
             post += "9f81cfa55dca6f0d,cdeb232ada05c0af,f503d9c09783ac14,8ca165723b7765a5,"
                     "e9bc8856f5b546f7,4f821636b20a5c3c,de34cd7d8f37f809";
+        // skip_post_plus (menu): 16 more programs found with the "post census" log line and checked on a Mali-G57:
+        // the picture stays intact. NOT in the list (they damage the picture when left out): e4eb576b6a6d76cb,
+        // 0fbd542ccb790473 (many draws at half size) and 8801d1d8f9f8273b (the depth of field's reduction chain).
+        if (dsr::GetRuntime().config.skip_post_plus)
+            post += ",e0501de054200176,8cb790d204a0b39b,ae56562970def45d,863999b2a21dc90c,55a19a4b0e538174,"
+                    "6442da6e33db1cda,c6fe85bf3e29c5ac,445192121db07e80,a4224b32af5663fb,b678984deebf8b58,"
+                    "aac88c6f83f5d42d,9a14cd3d05151bb4,695ae6e55b830962,6a340d1cf0e6ed13,587cd12af99567bb,"
+                    "527cbc3c4a0d722b";
         // skip_post_extra (settings): more hashes with the same small-targets-only rule, to try passes from the
         // "post census" log line without rebuilding.
         if (!dsr::GetRuntime().config.skip_post_extra.empty()) post += "," + dsr::GetRuntime().config.skip_post_extra;
