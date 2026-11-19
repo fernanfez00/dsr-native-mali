@@ -1329,7 +1329,15 @@ public:
         if (!EnsureDevice()) return;
         ReportDraws();
         occ_frame_++;
-        if (dsr::GetRuntime().config.skip_hidden >= 3) PollOcclusion();
+        if (dsr::GetRuntime().config.skip_hidden >= 3) {
+            occ_order_prev_.swap(occ_order_);  // the draw order of the frame that has just ended
+            occ_order_.clear();
+            for (size_t i = 0; i < occ_order_prev_.size(); i++) {
+                auto it = occ_state_.find(occ_order_prev_[i]);
+                if (it != occ_state_.end()) it->second.pos = uint32_t(i);
+            }
+            PollOcclusion();
+        }
         // Keys of draws the game no longer issues (streamed geometry gets a new address all the time) piled up until the
         // 40000 limit emptied the whole table, and every draw then started again from "unknown" at once. Old ones go now.
         if (occ_state_.size() > 12000 && (occ_frame_ & 127) == 0) {
@@ -3608,6 +3616,9 @@ private:
         uint64_t test_seq = 0;     // skip_hidden 3: submission whose query result settles the last retest of this key
         uint32_t kept_frame = 0;   // skip_hidden 3: last frame this key was drawn only because its retest was pending
         uint16_t big = 0;          // skip_hidden 3: results left until a key that covered a large part of the target may be left out
+        uint8_t flaps = 0;         // skip_hidden 3: times it came back into view after being left out (late appearances)
+        bool force = false;        // skip_hidden 3: a neighbour in the draw order came back into view: retest on its next draw
+        uint32_t pos = 0;          // skip_hidden 3: index in occ_order_prev_ (draw order of the last finished frame)
     };
     static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
@@ -3623,6 +3634,29 @@ private:
     uint32_t occ_moved_ = 0, occ_seen_ = 0, occ_still_ = 0;
     bool occ_moving_ = false;
     uint64_t occ_woke_ = 0;  // hidden keys that showed samples again (log)
+    // skip_hidden = 3, late appearances: whatever is drawn after a hidden draw was left out is retested only every few
+    // frames, so when the camera turns, geometry came into view up to 8 frames late. Two things shorten that without
+    // retesting everything more often: (1) the draws that sit next to a draw that has just come back into view in the
+    // draw order (the game draws the map in spatial order: the next wall, floor tile or piece of sky) are retested on
+    // their next draw, as one batch with it; (2) a key that came back into view once is at the edge of what is visible,
+    // so it needs more empty results before it is left out and is retested every 3-4 frames while it stays hidden. Keys
+    // that never came back keep the long intervals, which is where the saving is.
+    std::vector<uint64_t> occ_order_, occ_order_prev_;  // judged keys in draw order: this frame / the last finished one
+    static constexpr int kOccNeighbours = 6;
+    uint64_t occ_pulled_ = 0;  // hidden keys retested early because of a neighbour (log)
+    void OccPullNeighbours(const OccState& woke, uint64_t key) {
+        const size_t n = occ_order_prev_.size();
+        if (woke.pos >= n || occ_order_prev_[woke.pos] != key) return;  // its position is from an older frame
+        const size_t lo = woke.pos > kOccNeighbours ? woke.pos - kOccNeighbours : 0;
+        const size_t hi = std::min(n - 1, woke.pos + kOccNeighbours);
+        for (size_t j = lo; j <= hi; j++) {
+            if (j == woke.pos) continue;
+            auto it = occ_state_.find(occ_order_prev_[j]);
+            if (it == occ_state_.end() || it->second.hidden < kOccHiddenTests || it->second.force) continue;
+            it->second.force = true;
+            occ_pulled_++;
+        }
+    }
     // skip_hidden = 3, no blinking: the result of a query arrives ~2 frames after the draw (the GPU has to finish the
     // submission first). A hidden draw that is retested is really drawn on the retest frame, so if it is visible the
     // player sees it for one frame, then it is left out again until the result arrives (1-3 frames), then it is drawn
@@ -3676,11 +3710,16 @@ private:
                 if (kv.second & 2) it->second.big = kOccBigKeep;
                 else if (it->second.big) it->second.big--;
                 if ((kv.second & 1) || it->second.veto) {
-                    if ((kv.second & 1) && it->second.hidden >= kOccHiddenTests) occ_woke_++;
+                    if ((kv.second & 1) && it->second.hidden >= kOccHiddenTests) {
+                        occ_woke_++;
+                        if (it->second.flaps < 3) it->second.flaps++;
+                        OccPullNeighbours(it->second, kv.first);
+                    }
                     it->second.hidden = 0;
                     it->second.veto = false;
                 } else if (it->second.hidden < 255) {
                     it->second.hidden++;
+                    if (it->second.hidden >= 12) it->second.flaps = 0;  // hidden for a long time: really hidden
                 }
             }
         }
@@ -3730,6 +3769,7 @@ private:
     int OccDecide(uint64_t key, bool soft = false, uint64_t cst = 0) {
         if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat (moving camera data): start over
         OccState& s = occ_state_[key];
+        if (s.last_seen != occ_frame_) occ_order_.push_back(key);
         s.last_seen = occ_frame_;
         if (cst && s.cst_frame != occ_frame_) {  // first draw of this key this frame: did its constants change?
             if (s.cst && s.cst_frame + 1 == occ_frame_) {
@@ -3739,7 +3779,9 @@ private:
             s.cst = cst;
             s.cst_frame = occ_frame_;
         }
-        if (s.hidden >= kOccHiddenTests + (soft ? 1 : 0)) {
+        const bool adapt = dsr::GetRuntime().config.skip_hidden >= 3;
+        const uint32_t need = kOccHiddenTests + (soft ? 1 : 0) + (adapt ? std::min<uint32_t>(s.flaps, 2) : 0);
+        if (s.hidden >= need) {
             // Hidden draws are re-tested on staggered frames (by key) rather than all on the same one: with every
             // draw retested together, one frame in kOccRetest drew all the hidden geometry again (a periodic spike).
             // Every draw sharing this key (several objects with the same mesh) is retested on the frame the key is
@@ -3750,6 +3792,12 @@ private:
             if (l3 && s.big) {  // covered a large part of its target lately: always drawn, with a query so that this can expire
                 s.last_test = occ_frame_;
                 occ_big_++;
+                return 1;
+            }
+            if (l3 && s.force) {  // a neighbour in the draw order has just come back into view: retest together with it
+                s.force = false;
+                s.last_test = occ_frame_;
+                s.test_seq = submit_seq_ + 1;
                 return 1;
             }
             // skip_hidden = 3: the retest's result is not known yet, so the draw stays in (no query) until it is.
@@ -3764,9 +3812,10 @@ private:
                 // until its result is in, so the intervals are longer than the 3 frames of levels 1 and 2: a draw that
                 // has just gone hidden (likely to be back: screen edges, animation) is retested sooner than one that
                 // has been hidden for a long time, and while the view moves nothing waits more than 8 frames.
-                const uint32_t extra = s.hidden - kOccHiddenTests - (soft ? 1 : 0);  // retests that found nothing
+                const uint32_t extra = s.hidden - need;  // retests that found nothing
                 const bool still = !occ_moving_ && occ_still_ >= kOccStillFrames;
-                if (still) retest = extra >= 4 ? 12 : extra >= 2 ? 9 : 6;
+                if (s.flaps) retest = still ? 4 : 3;  // at the edge of what is visible: it has come back before
+                else if (still) retest = extra >= 4 ? 12 : extra >= 2 ? 9 : 6;
                 else retest = extra >= 4 ? 8 : extra >= 2 ? 6 : 4;
             }
             const uint32_t since = occ_frame_ - std::max(s.last_test, s.kept_frame);
@@ -7159,7 +7208,10 @@ private:
             if (dsr::GetRuntime().config.skip_hidden >= 3)
                 LOGI(kTag, "skip_hidden: %llu hidden draws came back into view, %llu kept in while their retest was pending, %llu kept in as large surfaces; view %s (still for %u frames)",
                      (unsigned long long)occ_woke_, (unsigned long long)occ_kept_, (unsigned long long)occ_big_, occ_moving_ ? "moving" : "still", occ_still_);
-            occ_skipped_ = occ_queried_ = occ_judged_ = occ_woke_ = occ_kept_ = occ_big_ = 0;
+            if (dsr::GetRuntime().config.skip_hidden >= 3)
+                LOGI(kTag, "skip_hidden: %llu hidden draws retested early because a neighbour came back into view",
+                     (unsigned long long)occ_pulled_);
+            occ_skipped_ = occ_queried_ = occ_judged_ = occ_woke_ = occ_kept_ = occ_big_ = occ_pulled_ = 0;
             for (uint64_t& r : occ_reject_) r = 0;
         }
         if (dsr::GetRuntime().config.skip_prepass) {
