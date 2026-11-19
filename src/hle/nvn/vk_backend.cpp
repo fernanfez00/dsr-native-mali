@@ -3512,12 +3512,34 @@ private:
     // write on), then with colour (LEQUAL, write off), the same 147 draws. On a tile-based GPU the second pass needs no
     // prepass (hidden surface removal), so the first one only repeats the vertex work and the binning. A depth buffer
     // that had >= 16 depth-only and >= 16 colour draws last frame is treated this way this frame.
+    // Only the colour draws that have a twin in the depth-only pass (same mesh: index buffer, count, base vertex) are
+    // made to write the depth. Colour draws without a twin (decals, sky, overlays: blend off, depth write off) keep the
+    // game's state, so they cannot occlude the draws that come after them; and the prepass is only left out while at
+    // least 80% of its draws were matched by a colour draw last frame, so no depth is lost when the pairing is poor.
     struct PrepassStat {
-        uint32_t frame = 0, pre = 0, main = 0;
+        uint32_t frame = 0, pre = 0, main = 0, matched = 0;
         bool learned = false;
     };
     std::unordered_map<uint64_t, PrepassStat> prepass_;
-    uint64_t prepass_skipped_ = 0, prepass_converted_ = 0;
+    std::unordered_set<uint64_t> prepass_keys_;  // this frame's depth-only draws (mesh identity + depth buffer)
+    uint32_t prepass_keys_frame_ = ~0u;
+    uint64_t prepass_skipped_ = 0, prepass_converted_ = 0, prepass_unmatched_ = 0;
+    static uint64_t PrepassKey(const DrawParams& p, uint64_t depth_addr) {
+        uint64_t h = 1469598103934665603ull;
+        const auto mix = [&h](uint64_t v) {
+            h ^= v;
+            h *= 1099511628211ull;
+            h ^= h >> 29;
+        };
+        mix(depth_addr);
+        mix(p.index_address);
+        mix(uint64_t(p.count) | (uint64_t(p.index_type) << 40));
+        mix(uint64_t(int64_t(p.base_vertex)));
+        mix(uint64_t(uint32_t(p.mode)));
+        mix(uint64_t(int64_t(p.first)));
+        mix(uint64_t(uint32_t(p.instances)));
+        return h;
+    }
     // ---- skip_hidden: draws that covered no pixels in recent frames are not drawn again -------------------------
     // Frame captures (Mali-G57) showed that most draws of the big world passes cover no pixel at all (131 of 223 in the
     // lit pass) yet are still vertex-shaded and tiled, which is what limits the frame on this GPU. Draws of the world
@@ -5149,12 +5171,18 @@ private:
             if (depth_only || main_like) {
                 PrepassStat& s = prepass_[depth->addr];
                 if (s.frame != occ_frame_) {
-                    s.learned = s.pre >= 16 && s.main >= 16;
+                    s.learned = s.pre >= 16 && s.matched >= 16 && uint64_t(s.matched) * 10 >= uint64_t(s.pre) * 8;
                     s.frame = occ_frame_;
-                    s.pre = s.main = 0;
+                    s.pre = s.main = s.matched = 0;
                 }
+                if (prepass_keys_frame_ != occ_frame_) {
+                    prepass_keys_.clear();
+                    prepass_keys_frame_ = occ_frame_;
+                }
+                const uint64_t pkey = PrepassKey(p, depth->addr);
                 if (depth_only) {
                     s.pre++;
+                    if (prepass_keys_.size() < 8192) prepass_keys_.insert(pkey);
                     if (s.learned) {
                         prepass_skipped_++;
                         skipped_draws_++;
@@ -5162,10 +5190,16 @@ private:
                     }
                 } else {
                     s.main++;
+                    const bool twin = prepass_keys_.count(pkey) != 0;
+                    if (twin) s.matched++;
                     if (s.learned) {
-                        st_.depth.depth_write = true;  // restored when this draw is done (ForceDepthWrite)
-                        force_depth_write.p = &st_.depth.depth_write;
-                        prepass_converted_++;
+                        if (twin) {
+                            st_.depth.depth_write = true;  // restored when this draw is done (ForceDepthWrite)
+                            force_depth_write.p = &st_.depth.depth_write;
+                            prepass_converted_++;
+                        } else {
+                            prepass_unmatched_++;
+                        }
                     }
                 }
             }
@@ -6950,9 +6984,10 @@ private:
             for (uint64_t& r : occ_reject_) r = 0;
         }
         if (dsr::GetRuntime().config.skip_prepass) {
-            LOGI(kTag, "skip_prepass: %llu depth-only draws left out, %llu colour draws writing the depth, %zu depth buffers tracked (last 10 s)",
-                 (unsigned long long)prepass_skipped_, (unsigned long long)prepass_converted_, prepass_.size());
-            prepass_skipped_ = prepass_converted_ = 0;
+            LOGI(kTag, "skip_prepass: %llu depth-only draws left out, %llu colour draws writing the depth, %llu colour draws without a twin (unchanged), %zu depth buffers tracked (last 10 s)",
+                 (unsigned long long)prepass_skipped_, (unsigned long long)prepass_converted_,
+                 (unsigned long long)prepass_unmatched_, prepass_.size());
+            prepass_skipped_ = prepass_converted_ = prepass_unmatched_ = 0;
         }
         Drain();  // the recorder's counters below
         if (rec_started_) {
