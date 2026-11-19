@@ -2686,6 +2686,11 @@ private:
     // Converted textures up to this size are not queued. Frame logs (Mali, BC3 -> ETC2) show about 200-400 ms per MB on
     // the render thread: a 2 MB texture converted here was a 400-600 ms hitch, so only HUD-sized ones are done inline.
     static constexpr size_t kBcSyncBytes = size_t(128) << 10;
+    // Time the render thread may spend per frame converting small textures on the spot. A zone load brings 100+
+    // textures at once and every conversion costs ~25 ms here (log of 2026-11-19: 3.4 s and 2.4 s stalls with 0 ms
+    // waiting for the GPU); past this budget the rest go to the background thread like the big ones.
+    static constexpr double kBcSyncFrameMs = 6.0;
+    double bc_sync_ms_ = 0;  // render thread: milliseconds spent on spot conversions in the current frame
 
     struct PendingLevel {
         size_t src_off = 0, n = 0, out_off = 0, out_bytes = 0;
@@ -2893,8 +2898,10 @@ private:
         p->result_bytes = out;
         // Small conversions are done right here and recorded now: a texture that is queued is drawn with a white
         // stand-in until its copy lands, and those few frames read as flicker. Only big ones go to the thread.
-        if (out <= kBcSyncBytes && StreamRemaining() >= out + 1024) {
+        if (out <= kBcSyncBytes && bc_sync_ms_ < kBcSyncFrameMs && StreamRemaining() >= out + 1024) {
+            const auto sync_t0 = std::chrono::steady_clock::now();
             ConvertPending(*p);
+            bc_sync_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sync_t0).count();
             p->done.store(true, std::memory_order_release);
             Begin();
             EndRendering();
@@ -2930,6 +2937,7 @@ private:
     // Render thread, once per frame: records the copies of converted textures, in the order they were queued,
     // at most kBcFrameBudget bytes per frame. A result whose texture was replaced or released is dropped.
     void PumpBcUploads() {
+        bc_sync_ms_ = 0;
         if (bc_inflight_.empty()) return;
         size_t budget = kBcFrameBudget;
         bool ended = false;
