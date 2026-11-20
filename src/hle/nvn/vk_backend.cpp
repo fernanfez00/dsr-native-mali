@@ -646,9 +646,13 @@ public:
                     Image* dst = GetImage(c.copy->dst, false);
                     if (!src || !dst || src == dst) break;
                     {
-                        char k[112];
-                        snprintf(k, sizeof(k), "fmt %d %dx%d -> fmt %d %dx%d", src->nvn_format, src->width, src->height,
-                                 dst->nvn_format, dst->width, dst->height);
+                        // Whether the copy touches the open pass's attachments: a copy of two images the pass does not
+                        // use could wait for the pass to end; one of its own targets cannot.
+                        char k[144];
+                        snprintf(k, sizeof(k), "fmt %d %dx%d -> fmt %d %dx%d%s%s%s", src->nvn_format, src->width,
+                                 src->height, dst->nvn_format, dst->width, dst->height,
+                                 !rendering_ ? " (no pass open)" : "", InOpenPass(src) ? " (src is a target of the pass)" : "",
+                                 InOpenPass(dst) ? " (dst is a target of the pass)" : "");
                         copy_counts_[k]++;
                     }
                     Begin();
@@ -4503,6 +4507,8 @@ private:
             });
             rendering_ = false;
             pass_breaks_[line]++;
+            last_end_key_ = rendering_key_;  // resumed_same_: a pass that restarts on the same targets
+            last_end_line_ = line;
             if (mali_barriers_)
                 for (size_t i = 0; i < pass_color_count_; i++) {
                     Image* c = pass_colors_[i];
@@ -4670,6 +4676,8 @@ private:
         pass_depth_ = depth;
         pass_extent_ = {w, h};
         render_passes_++;
+        if (!last_end_key_.empty() && key == last_end_key_) resumed_same_[last_end_line_]++;
+        last_end_key_.clear();
         rendering_ = true;
         rendering_key_ = key;
         return true;
@@ -7363,6 +7371,17 @@ private:
             LOGI(kTag, "render passes ended by (source line: count):%s", top.c_str());
             pass_breaks_.clear();
         }
+        {
+            std::vector<std::pair<uint64_t, int>> v;
+            for (auto& [line, n] : resumed_same_) v.push_back({n, line});
+            std::sort(v.rbegin(), v.rend());
+            std::string top;
+            for (size_t i = 0; i < v.size() && i < 8; i++)
+                top += " line " + std::to_string(v[i].second) + ": " + std::to_string(v[i].first) + ";";
+            LOGI(kTag, "passes restarted on the same targets they had just left (avoidable breaks, by ending line):%s",
+                 top.empty() ? " none" : top.c_str());
+            resumed_same_.clear();
+        }
         if (!sampled_breaks_.empty()) {
             std::vector<std::pair<uint64_t, std::string>> v;
             for (auto& [k, n] : sampled_breaks_) v.push_back({n, k});
@@ -7697,6 +7716,12 @@ private:
     }
     bool recording_ = false, rendering_ = false;
     std::vector<uint64_t> rendering_key_;
+    // Diagnostics: the targets of the pass that ended last and the source line that ended it. A pass that starts
+    // again on exactly those targets paid a store and a reload of its whole tile memory for nothing (a break that a
+    // different order of the game's work could have spared); counted per ending line.
+    std::vector<uint64_t> last_end_key_;
+    int last_end_line_ = 0;
+    std::map<int, uint64_t> resumed_same_;
 
     VkBuffer stream_ = VK_NULL_HANDLE;
     VkDeviceMemory stream_memory_ = VK_NULL_HANDLE;
