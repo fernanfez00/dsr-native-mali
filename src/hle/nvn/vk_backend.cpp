@@ -1356,6 +1356,7 @@ public:
         if (src && !(src->written && !IsDepthFormat(src->nvn_format))) src = nullptr;
         if (src) {
             presented_addrs_.insert(src->addr);  // the textures the game presents: hud_full_res only redirects draws to them
+            game_frame_area_ = uint64_t(src->width) * uint64_t(src->height);  // skip_post: the 3D world is at most this big
             HudUpdateSize(*src);
         }
         // The swapchain is sized for the game's frame (see EnsureSwapchain): a frame of another size remakes it. With
@@ -5323,9 +5324,13 @@ private:
         if (!skip_parsed_) ParseSkipList();
         // The 3D world's target size (a colour target drawn with a depth buffer): skip_post passes are only left out
         // on targets at most half that area, never on the full-size passes that make up the picture itself.
+        // Targets bigger than the game's presented frame are not the world (a 1024x1024 colour target drawn with a depth
+        // buffer made every world-size pass count as "small" and left out the skip_post programs that also run at
+        // full size: black parts of the picture in some places and camera angles).
         if (depth && !colors.empty() && colors[0]) {
             const uint64_t a = uint64_t(colors[0]->width) * uint64_t(colors[0]->height);
-            if (a > world_max_area_) world_max_area_ = a;
+            if (game_frame_area_ && world_max_area_ > game_frame_area_) world_max_area_ = 0;
+            if (a > world_max_area_ && (!game_frame_area_ || a <= game_frame_area_)) world_max_area_ = a;
         }
         bool post_small = false;
         if (!skip_post_.empty() && world_max_area_ && !colors.empty() && colors[0] && st_.program[1] &&
@@ -8404,6 +8409,7 @@ private:
     // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
     std::unordered_set<uint64_t> skip_post_;
     uint64_t world_max_area_ = 0;  // biggest colour target drawn together with a depth buffer (the 3D world)
+    uint64_t game_frame_area_ = 0;  // pixels of the frame the game presents (the world is never bigger)
     uint64_t skipped_draws_ = 0;
     void ParseSkipList() {
         skip_parsed_ = true;
