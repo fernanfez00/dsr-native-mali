@@ -5449,6 +5449,7 @@ private:
             const int act = OccDecide(occ_key, st_.color.blend_enable != 0, occ_cst);
             if (act == 2) {
                 occ_skipped_++;
+                if (post_depth_only) post_depth_hidden_++;
                 return;
             }
             occ_query = act == 1;
@@ -7256,9 +7257,9 @@ private:
             prepass_skipped_ = prepass_converted_ = prepass_unmatched_ = 0;
         }
         if (post_depth_draws_) {
-            LOGI(kTag, "skip_post: %llu draws made without colour (they write a depth that others sample) in the last 10 s",
-                 (unsigned long long)post_depth_draws_);
-            post_depth_draws_ = 0;
+            LOGI(kTag, "skip_post: %llu draws without colour (they write a depth that others sample) reached the draw, %llu of them left out by skip_hidden (last 10 s)",
+                 (unsigned long long)post_depth_draws_, (unsigned long long)post_depth_hidden_);
+            post_depth_draws_ = post_depth_hidden_ = 0;
         }
         Drain();  // the recorder's counters below
         if (rec_started_) {
@@ -8398,6 +8399,7 @@ private:
     std::unordered_set<uint64_t> depth_sampled_;     // depth images (by address) some draw has read as a texture
     std::unordered_set<uint64_t> skip_kept_logged_;  // skip_post programs kept because they write such a depth
     uint64_t post_depth_draws_ = 0;                  // ... and their draws made without colour (log)
+    uint64_t post_depth_hidden_ = 0;                 // ... of those, left out by skip_hidden (not visible)
     // skip_post hashes: only left out on small targets (see the skip_fs block of the draw); a full-size pass is the
     // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
     std::unordered_set<uint64_t> skip_post_;
