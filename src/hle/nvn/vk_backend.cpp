@@ -4148,6 +4148,13 @@ private:
         if (st_.rts.size() <= size_t(st_.num_rt)) return;
         Image* img = GetImage(st_.rts[size_t(st_.num_rt)], false);
         if (!img) return;
+        // shadow_quality 0: nothing is drawn into the shadow map and the sampler answers "lit" whatever it holds, so
+        // the game's clear of it each frame is pointless. Left pending it made the next draw that samples the map
+        // end the open world pass (a full-frame store and reload on a tiling GPU) to flush a clear and transition
+        // the map ("fmt 54 512x512 from layout 5" in the log, once per frame).
+        if (dsr::GetRuntime().config.shadow_quality == 0 && !shadow_maps_.empty() &&
+            shadow_maps_.count(ShadowMapKey(*img)))
+            return;
         depth_gen_++;
         VkImageAspectFlags a = 0;
         if (c.depth_mask && HasDepth(img->nvn_format)) a |= VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -5261,6 +5268,7 @@ private:
                 shadow_skip_logged_ = true;
                 LOGI(kTag, "shadow_quality 0: the shadow map pass (%dx%d) is not drawn", depth_peek->width, depth_peek->height);
             }
+            shadow_maps_.insert(ShadowMapKey(*depth_peek));  // its per-frame clear is left out too (ClearDepth)
             return;
         }
         Shader* vs = GetShader(*st_.program[0], vopt);
@@ -8406,6 +8414,10 @@ private:
     bool bc_patched_ = false, bc_forced_ = false;
     bool mip_skip_ = false;      // settings texture_mip_skip
     bool shadow_skip_logged_ = false;
+    // Depth images whose pass was left out as a shadow map (shadow_quality 0): address and size, so a different image
+    // that later lands on the same memory is not taken for one.
+    std::unordered_set<uint64_t> shadow_maps_;
+    static uint64_t ShadowMapKey(const Image& i) { return i.addr | (uint64_t(i.width) << 44); }
     int astc_ui_kept_ = 0;
     // skip_fs (settings): hex fragment-program hashes separated by commas
     bool skip_parsed_ = false;
