@@ -525,6 +525,11 @@ struct Image {
     VkClearValue clear_value{};
     VkImageAspectFlags clear_aspect = 0;
     int clear_layer = 0, clear_level = 0;
+    // Changes whenever this depth image is cleared or drawn into (value of a global counter, so never repeated): a
+    // snapshot of it (DepthSnapshot) is current while this is what it was taken at. A global counter made a clear or
+    // a depth write in ANY other depth buffer (the 196x90 and 392x180 ones) throw the world's snapshot away, and each
+    // new snapshot ends the open pass.
+    uint64_t content_gen = 0;
     bool skip_zeroed = false;  // settings skip_fs: a skipped pass's target, cleared to zero (until a draw writes it)
 };
 
@@ -640,6 +645,12 @@ public:
                     Image* src = GetImage(c.copy->src, true);  // a CPU-written source (video frames) is refreshed
                     Image* dst = GetImage(c.copy->dst, false);
                     if (!src || !dst || src == dst) break;
+                    {
+                        char k[112];
+                        snprintf(k, sizeof(k), "fmt %d %dx%d -> fmt %d %dx%d", src->nvn_format, src->width, src->height,
+                                 dst->nvn_format, dst->width, dst->height);
+                        copy_counts_[k]++;
+                    }
                     Begin();
                     EndRendering();
                     CopyImage(*src, c.copy->src_region, *dst, c.copy->dst_region, c.flags);
@@ -4155,7 +4166,7 @@ private:
         if (dsr::GetRuntime().config.shadow_quality == 0 && !shadow_maps_.empty() &&
             shadow_maps_.count(ShadowMapKey(*img)))
             return;
-        depth_gen_++;
+        img->content_gen = ++depth_gen_;
         VkImageAspectFlags a = 0;
         if (c.depth_mask && HasDepth(img->nvn_format)) a |= VK_IMAGE_ASPECT_DEPTH_BIT;
         if (c.stencil_mask && HasStencil(img->nvn_format)) a |= VK_IMAGE_ASPECT_STENCIL_BIT;
@@ -5051,11 +5062,11 @@ private:
             snap = CreateImage(snap_ref);
         if (!snap) return nullptr;
         auto& gen = snapshot_gen_[snap_ref.addr];
-        if (gen != depth_gen_ + 1) {
+        if (gen != depth.content_gen + 1) {
             EndRendering();
             CopyImage(depth, CopyRegion{}, *snap, CopyRegion{}, 0);
             snap->written = true;
-            gen = depth_gen_ + 1;
+            gen = depth.content_gen + 1;
             Transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         }
         if (snap->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
@@ -6329,7 +6340,7 @@ private:
             }
         }
         if (st_.program[0]) pass_vs_addr_ = st_.program[0]->address;
-        if (depth && st_.depth.depth_test && st_.depth.depth_write) depth_gen_++;
+        if (depth && st_.depth.depth_test && st_.depth.depth_write) depth->content_gen = ++depth_gen_;
         if (drawn_ == 1) LOGI(kTag, "first draw recorded");
     }
 
@@ -7360,6 +7371,15 @@ private:
             for (size_t i = 0; i < v.size() && i < 8; i++) top += " [" + v[i].second + "]: " + std::to_string(v[i].first) + ";";
             LOGI(kTag, "textures that broke a render pass to become readable:%s", top.c_str());
             sampled_breaks_.clear();
+        }
+        if (!copy_counts_.empty()) {
+            std::vector<std::pair<uint64_t, std::string>> v;
+            for (auto& [k, n] : copy_counts_) v.push_back({n, k});
+            std::sort(v.rbegin(), v.rend());
+            std::string top;
+            for (size_t i = 0; i < v.size() && i < 6; i++) top += " [" + v[i].second + "]: " + std::to_string(v[i].first) + ";";
+            LOGI(kTag, "image copies that ended the render pass (last 10 s):%s", top.c_str());
+            copy_counts_.clear();
         }
         if (!post_census_.empty()) {
             // Draws on small targets by fragment program: ones near the number of lists (frames) in this window are
@@ -8519,6 +8539,20 @@ private:
         if (img.skip_zeroed) return;
         img.skip_zeroed = true;
         const auto sub_rt = RtSub(i);
+        // The target is an attachment of the open pass: zero it inside the pass (as the game's own clears of an open
+        // pass's target are done) instead of ending the pass for it. A pass ended just to zero a skipped pass's
+        // target was one of the most frequent breaks in the log (the line of this EndRendering).
+        if (rendering_ && !capture_active_ && i < pass_color_count_ && pass_colors_[i] == &img &&
+            pass_color_sub_[i] == std::make_pair(sub_rt.first, sub_rt.second)) {
+            VkClearValue zero{};
+            VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, uint32_t(i), zero};
+            const VkClearRect rect{{{0, 0}, pass_extent_}, 0, 1};
+            Rec([ca, rect](VkCommandBuffer cb) { vkCmdClearAttachments(cb, 1, &ca, 1, &rect); });
+            clears_in_pass_++;
+            img.written = true;
+            img.cpu_source = false;
+            return;
+        }
         if (InOpenPass(&img)) EndRendering();
         if (img.clear_pending && !DeadClear(img, VK_IMAGE_ASPECT_COLOR_BIT, sub_rt.first, sub_rt.second))
             FlushClear(img);
@@ -8568,6 +8602,7 @@ private:
     uint64_t render_passes_ = 0, barriers_ = 0;
     std::map<int, uint64_t> pass_breaks_;
     std::map<std::string, uint64_t> sampled_breaks_;
+    std::map<std::string, uint64_t> copy_counts_;  // image copies (each ends the open pass), by formats and sizes
     // Post-processing census (diagnostics, settings profile): draws per (fragment program, target size) on targets
     // clearly smaller than the biggest one drawn to, so the passes of a post chain can be picked for skip_fs.
     std::map<std::pair<uint64_t, uint64_t>, uint64_t> post_census_;
