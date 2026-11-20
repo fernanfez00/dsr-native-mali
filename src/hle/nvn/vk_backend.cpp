@@ -5367,8 +5367,17 @@ private:
         }
         if ((!skip_fs_.empty() || post_small) && !colors.empty()) {
             if (st_.program[1] && (post_small || skip_fs_.count(st_.program[1]->hash))) {
-                for (size_t i = 0; i < colors.size(); i++)
-                    if (colors[i]) ZeroSkippedTarget(*colors[i], i);
+                // A blended draw (particles, fog) only adds to what its target already holds. Leaving it out must not
+                // zero the target: that threw away the game's own clear (an "empty" value that is not always zero, so
+                // the composition turned parts of the picture black depending on the camera angle: 9a14cd3d05151bb4 in
+                // the last area) and whatever other draws had already written there. The target keeps what the game
+                // gave it; it is zeroed only when nothing has defined it yet (no clear pending, never written).
+                const bool overlay = st_.color.blend_enable != 0;
+                for (size_t i = 0; i < colors.size(); i++) {
+                    if (!colors[i]) continue;
+                    if (overlay && (colors[i]->clear_pending || colors[i]->written)) continue;
+                    ZeroSkippedTarget(*colors[i], i);
+                }
                 if (dsr::GetRuntime().config.profile) SkipDiag(p, colors, depth, fs, true);
                 if (skip_logged_.insert(st_.program[1]->hash).second)
                     LOGI(kTag, "skip_fs: fragment program %016llx is not drawn (%dx%d target)",
