@@ -5435,7 +5435,8 @@ private:
                 if (p) *p = false;
             }
         } force_depth_write;
-        if (dsr::GetRuntime().config.skip_prepass && !capture_active_ && !post_depth_only && depth && depth->width >= 256 &&
+        // (also during frame captures: with the skips off the pass table timed a frame the game never draws)
+        if (dsr::GetRuntime().config.skip_prepass && !post_depth_only && depth && depth->width >= 256 &&
             st_.depth.depth_test && !st_.depth.stencil_test && !shader_depth_test && (st_.depth.depth_func == 2 || st_.depth.depth_func == 4) &&
             !(st_.program[1] && fs->info.writes_depth)) {
             bool any_color = false;
@@ -5483,7 +5484,7 @@ private:
         // ---- skip_hidden: world draws that covered no pixel in recent frames are left out (see OccDecide) -------
         uint64_t occ_key = 0, occ_cst = 0;
         bool occ_query = false;
-        if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
+        if (dsr::GetRuntime().config.skip_hidden && OccCandidate(p, colors, depth, shader_depth_test) &&
             OccKey(p, vin, uint32_t(depth->width), &occ_key,
                    dsr::GetRuntime().config.skip_hidden >= 3 ? &occ_cst : nullptr)) {
             occ_judged_++;
@@ -5493,7 +5494,9 @@ private:
                 if (post_depth_only) post_depth_hidden_++;
                 return;
             }
-            occ_query = act == 1;
+            // A frame capture records no visibility queries (it uses the pool for its own sample counts): such a draw
+            // is drawn as it is, without vetoing its key.
+            occ_query = act == 1 && !capture_active_;
         }
 
         Begin();
