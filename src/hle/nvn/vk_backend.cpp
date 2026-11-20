@@ -5331,6 +5331,18 @@ private:
         if (!skip_post_.empty() && world_max_area_ && !colors.empty() && colors[0] && st_.program[1] &&
             skip_post_.count(st_.program[1]->hash))
             post_small = uint64_t(colors[0]->width) * uint64_t(colors[0]->height) * 2 <= world_max_area_;
+        // A skip_post program that writes depth into a depth image some other draw samples as a texture (the half-size
+        // depth of the soft particles, fog and depth of field) is not left out: nothing would write that depth, so what
+        // reads it afterwards gets the objects missing or the previous frame's depth (ghosts). From a log with
+        // skip_post_extra = e4eb576b6a6d76cb,0fbd542ccb790473: both draw into 356x164 @..8000 with depth write on the
+        // 356x164 depth that the particle and depth-of-field passes then sample (as f54 textures) and test against.
+        if (post_small && depth && st_.depth.depth_write && depth_sampled_.count(depth->addr)) {
+            if (skip_kept_logged_.insert(st_.program[1]->hash).second)
+                LOGI(kTag, "skip_post: fragment program %016llx is drawn: it writes the %dx%d depth @%llx that other draws sample",
+                     (unsigned long long)st_.program[1]->hash, depth->width, depth->height,
+                     (unsigned long long)depth->addr);
+            post_small = false;
+        }
         if ((!skip_fs_.empty() || post_small) && !colors.empty()) {
             if (st_.program[1] && (post_small || skip_fs_.count(st_.program[1]->hash))) {
                 for (size_t i = 0; i < colors.size(); i++)
@@ -5510,6 +5522,7 @@ private:
                 } else if (hud_cand_addr_ && !hud_started_ && img->addr == hud_cand_addr_) {
                     sampled_cand = true;
                 }
+                if (IsDepthFormat(img->nvn_format)) depth_sampled_.insert(img->addr);  // (see skip_post_)
                 for (Image* c : colors)
                     if (c == img) return Skip("texture is also a render target");
                 if (img != depth && IsDepthFormat(img->nvn_format) && (dsr::GetRuntime().config.hole_test & 16)) {
@@ -8360,6 +8373,8 @@ private:
     // skip_fs (settings): hex fragment-program hashes separated by commas
     bool skip_parsed_ = false;
     std::unordered_set<uint64_t> skip_fs_, skip_logged_;
+    std::unordered_set<uint64_t> depth_sampled_;     // depth images (by address) some draw has read as a texture
+    std::unordered_set<uint64_t> skip_kept_logged_;  // skip_post programs kept because they write such a depth
     // skip_post hashes: only left out on small targets (see the skip_fs block of the draw); a full-size pass is the
     // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
     std::unordered_set<uint64_t> skip_post_;
