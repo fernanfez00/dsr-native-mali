@@ -5336,12 +5336,29 @@ private:
         // reads it afterwards gets the objects missing or the previous frame's depth (ghosts). From a log with
         // skip_post_extra = e4eb576b6a6d76cb,0fbd542ccb790473: both draw into 356x164 @..8000 with depth write on the
         // 356x164 depth that the particle and depth-of-field passes then sample (as f54 textures) and test against.
+        // What is left out is the colour they would have written; the depth is still written (the draw goes on with every
+        // colour channel masked off, in the same render pass, so no pass is broken), which keeps what reads it right.
+        bool post_depth_only = false;
         if (post_small && depth && st_.depth.depth_write && depth_sampled_.count(depth->addr)) {
             if (skip_kept_logged_.insert(st_.program[1]->hash).second)
-                LOGI(kTag, "skip_post: fragment program %016llx is drawn: it writes the %dx%d depth @%llx that other draws sample",
+                LOGI(kTag, "skip_post: fragment program %016llx is drawn without colour: it writes the %dx%d depth @%llx that other draws sample",
                      (unsigned long long)st_.program[1]->hash, depth->width, depth->height,
                      (unsigned long long)depth->addr);
             post_small = false;
+            post_depth_only = true;
+        }
+        struct RestoreMask {
+            decltype(st_.channel.mask)* p = nullptr;
+            decltype(st_.channel.mask) v{};
+            ~RestoreMask() {
+                if (p) *p = v;
+            }
+        } restore_mask;
+        if (post_depth_only) {
+            restore_mask.p = &st_.channel.mask;
+            restore_mask.v = st_.channel.mask;
+            st_.channel.mask = 0;
+            post_depth_draws_++;
         }
         if ((!skip_fs_.empty() || post_small) && !colors.empty()) {
             if (st_.program[1] && (post_small || skip_fs_.count(st_.program[1]->hash))) {
@@ -5377,7 +5394,7 @@ private:
                 if (p) *p = false;
             }
         } force_depth_write;
-        if (dsr::GetRuntime().config.skip_prepass && !capture_active_ && depth && depth->width >= 256 &&
+        if (dsr::GetRuntime().config.skip_prepass && !capture_active_ && !post_depth_only && depth && depth->width >= 256 &&
             st_.depth.depth_test && !st_.depth.stencil_test && !shader_depth_test && (st_.depth.depth_func == 2 || st_.depth.depth_func == 4) &&
             !(st_.program[1] && fs->info.writes_depth)) {
             bool any_color = false;
@@ -7238,6 +7255,11 @@ private:
                  (unsigned long long)prepass_unmatched_, prepass_.size());
             prepass_skipped_ = prepass_converted_ = prepass_unmatched_ = 0;
         }
+        if (post_depth_draws_) {
+            LOGI(kTag, "skip_post: %llu draws made without colour (they write a depth that others sample) in the last 10 s",
+                 (unsigned long long)post_depth_draws_);
+            post_depth_draws_ = 0;
+        }
         Drain();  // the recorder's counters below
         if (rec_started_) {
             LOGI(kTag, "recorder thread: busy %.0f ms in the last 10 s; render thread waited %.0f ms for it; %llu batches; "
@@ -8375,6 +8397,7 @@ private:
     std::unordered_set<uint64_t> skip_fs_, skip_logged_;
     std::unordered_set<uint64_t> depth_sampled_;     // depth images (by address) some draw has read as a texture
     std::unordered_set<uint64_t> skip_kept_logged_;  // skip_post programs kept because they write such a depth
+    uint64_t post_depth_draws_ = 0;                  // ... and their draws made without colour (log)
     // skip_post hashes: only left out on small targets (see the skip_fs block of the draw); a full-size pass is the
     // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
     std::unordered_set<uint64_t> skip_post_;
