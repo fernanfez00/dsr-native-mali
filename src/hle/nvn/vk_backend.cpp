@@ -3647,10 +3647,11 @@ private:
     void OccPullNeighbours(const OccState& woke, uint64_t key) {
         const size_t n = occ_order_prev_.size();
         if (woke.pos >= n || occ_order_prev_[woke.pos] != key) return;  // its position is from an older frame
-        const size_t lo = woke.pos > kOccNeighbours ? woke.pos - kOccNeighbours : 0;
-        const size_t hi = std::min(n - 1, woke.pos + kOccNeighbours);
+        const size_t pos = woke.pos, reach = size_t(kOccNeighbours);
+        const size_t lo = pos > reach ? pos - reach : 0;
+        const size_t hi = std::min<size_t>(n - 1, pos + reach);
         for (size_t j = lo; j <= hi; j++) {
-            if (j == woke.pos) continue;
+            if (j == pos) continue;
             auto it = occ_state_.find(occ_order_prev_[j]);
             if (it == occ_state_.end() || it->second.hidden < kOccHiddenTests || it->second.force) continue;
             it->second.force = true;
