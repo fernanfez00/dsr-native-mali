@@ -3642,7 +3642,7 @@ private:
     // so it needs more empty results before it is left out and is retested every 3-4 frames while it stays hidden. Keys
     // that never came back keep the long intervals, which is where the saving is.
     std::vector<uint64_t> occ_order_, occ_order_prev_;  // judged keys in draw order: this frame / the last finished one
-    static constexpr int kOccNeighbours = 6;
+    static constexpr int kOccNeighbours = 10;
     uint64_t occ_pulled_ = 0;  // hidden keys retested early because of a neighbour (log)
     void OccPullNeighbours(const OccState& woke, uint64_t key) {
         const size_t n = occ_order_prev_.size();
@@ -3815,9 +3815,9 @@ private:
                 // has been hidden for a long time, and while the view moves nothing waits more than 8 frames.
                 const uint32_t extra = s.hidden - need;  // retests that found nothing
                 const bool still = !occ_moving_ && occ_still_ >= kOccStillFrames;
-                if (s.flaps) retest = still ? 4 : 3;  // at the edge of what is visible: it has come back before
+                if (s.flaps) retest = still ? 4 : 2;  // at the edge of what is visible: it has come back before
                 else if (still) retest = extra >= 4 ? 12 : extra >= 2 ? 9 : 6;
-                else retest = extra >= 4 ? 8 : extra >= 2 ? 6 : 4;
+                else retest = extra >= 4 ? 6 : extra >= 2 ? 5 : 3;  // the view moves: nothing waits more than 6 frames
             }
             const uint32_t since = occ_frame_ - std::max(s.last_test, s.kept_frame);
             if (since < retest || (occ_frame_ + uint32_t(key >> 7)) % retest != 0) return 2;
