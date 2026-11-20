@@ -5335,6 +5335,7 @@ private:
             if (st_.program[1] && (post_small || skip_fs_.count(st_.program[1]->hash))) {
                 for (size_t i = 0; i < colors.size(); i++)
                     if (colors[i]) ZeroSkippedTarget(*colors[i], i);
+                if (dsr::GetRuntime().config.profile) SkipDiag(p, colors, depth, fs, true);
                 if (skip_logged_.insert(st_.program[1]->hash).second)
                     LOGI(kTag, "skip_fs: fragment program %016llx is not drawn (%dx%d target)",
                          (unsigned long long)st_.program[1]->hash, colors[0] ? colors[0]->width : 0,
@@ -5344,6 +5345,9 @@ private:
             }
             for (Image* c : colors)
                 if (c) c->skip_zeroed = false;  // a real draw writes it now
+            if (dsr::GetRuntime().config.profile && world_max_area_ && colors[0] &&
+                uint64_t(colors[0]->width) * uint64_t(colors[0]->height) * 2 <= world_max_area_)
+                SkipDiag(p, colors, depth, fs, false);
         }
 
         // ---- post-processing census (diagnostics) -----------------------------------------------------------------
@@ -8411,6 +8415,38 @@ private:
         if (!skip_fs_.empty() || !skip_post_.empty())
             LOGI(kTag, "skip_fs: %zu fragment programs are left out (+%zu skip_post, small targets only)", skip_fs_.size(),
                  skip_post_.size());
+    }
+    // Diagnostics (profile on): which image each program writes on the small targets, and what it samples, once per
+    // program and image: the draws of a skipped program and the real draws that write the same images.
+    std::unordered_set<uint64_t> diag_seen_;
+    int diag_lines_ = 0;
+    void SkipDiag(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, Shader* fs, bool skipped) {
+        if (diag_lines_ >= 160 || colors.empty() || !colors[0] || !st_.program[1] || !fs) return;
+        const Image* c = colors[0];
+        const uint64_t h = st_.program[1]->hash;
+        const uint64_t k = h ^ (c->addr * 0x9E3779B97F4A7C15ull) ^ (skipped ? (1ull << 63) : 0);
+        if (!diag_seen_.insert(k).second) return;
+        diag_lines_++;
+        std::string tex;
+        for (uint32_t slot = 0; slot < 32; slot++) {
+            if (!(fs->info.texture_mask >> slot & 1)) continue;
+            BoundTexture bt = st_.textures[1][slot];
+            if (!bt.valid) bt = HandleFromUniforms(1, slot);
+            char b[112];
+            if (bt.valid)
+                snprintf(b, sizeof b, " s%u=%dx%d f%d @%llx", slot, bt.texture.tex.width, bt.texture.tex.height,
+                         bt.texture.tex.format, (unsigned long long)bt.texture.addr);
+            else
+                snprintf(b, sizeof b, " s%u=?", slot);
+            tex += b;
+        }
+        char d[112] = "none";
+        if (depth)
+            snprintf(d, sizeof d, "%dx%d @%llx test %d write %d", depth->width, depth->height,
+                     (unsigned long long)depth->addr, int(st_.depth.depth_test), int(st_.depth.depth_write));
+        LOGI(kTag, "skip_diag: %s %016llx -> %dx%d @%llx fmt %d, %zu colour target(s), blend %d, depth %s, mode %d count %d inst %d |%s",
+             skipped ? "SKIPPED" : "drawn  ", (unsigned long long)h, c->width, c->height, (unsigned long long)c->addr,
+             c->nvn_format, colors.size(), int(st_.color.blend_enable != 0), d, p.mode, p.count, p.instances, tex.c_str());
     }
     void ZeroSkippedTarget(Image& img, size_t i) {
         if (img.skip_zeroed) return;
