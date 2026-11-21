@@ -997,6 +997,8 @@ public:
             pass_written_.clear();
             pass_draws_ = 0;
             query_pass_.clear();
+            query_fs_.clear();
+            query_verts_.clear();
             capture_draws_logged_ = 0;
             geo_dumps_ = 0;
             map_geo_dumps_ = 0;
@@ -1045,6 +1047,8 @@ public:
             vkCmdResetQueryPool(SyncCmd(), query_pool_, 0, kMaxQueries);
         }
         query_pass_.clear();
+        query_fs_.clear();
+        query_verts_.clear();
         StartPassTimestamps();
         pass_written_.clear();
         pass_draws_ = 0;
@@ -1290,6 +1294,50 @@ public:
                     line += d;
                 }
                 LOGI(kTag, "capture %d samples passed per pass (samples/draws):%s", captures_done_, line.c_str());
+                // Per fragment program over the passes of more than 4 draws (the world): pixels shaded (a tiling GPU
+                // runs fragment work when the pass ends, so per-draw timestamps are meaningless; pixels x shader cost is
+                // what counts), draws and vertices. A program near the top of both lists is the one to look at.
+                {
+                    struct Agg { uint64_t px = 0, verts = 0; uint32_t draws = 0, zero = 0; };
+                    std::map<uint64_t, Agg> by_fs;
+                    uint64_t total_px = 0, total_verts = 0;
+                    for (size_t q = 0; q < res.size() && q < query_fs_.size(); q++) {
+                        if (per_pass[query_pass_[q]].second <= 4) continue;
+                        Agg& g = by_fs[query_fs_[q]];
+                        g.px += res[q];
+                        g.verts += query_verts_[q];
+                        g.draws++;
+                        g.zero += res[q] == 0;
+                        total_px += res[q];
+                        total_verts += query_verts_[q];
+                    }
+                    std::vector<std::pair<uint64_t, uint64_t>> by_px, by_v;
+                    for (auto& [h, g] : by_fs) {
+                        by_px.push_back({g.px, h});
+                        by_v.push_back({g.verts, h});
+                    }
+                    std::sort(by_px.rbegin(), by_px.rend());
+                    std::sort(by_v.rbegin(), by_v.rend());
+                    LOGI(kTag, "capture %d world passes: %llu pixels shaded, %llu vertices, %zu fragment programs",
+                         captures_done_, (unsigned long long)total_px, (unsigned long long)total_verts, by_fs.size());
+                    std::string l1, l2;
+                    for (size_t i = 0; i < by_px.size() && i < 12; i++) {
+                        const Agg& g = by_fs[by_px[i].second];
+                        char d[96];
+                        snprintf(d, sizeof(d), " %016llx %.0f%% px (%u draws, %u not visible);", (unsigned long long)by_px[i].second,
+                                 total_px ? 100.0 * double(g.px) / double(total_px) : 0.0, g.draws, g.zero);
+                        l1 += d;
+                    }
+                    for (size_t i = 0; i < by_v.size() && i < 8; i++) {
+                        const Agg& g = by_fs[by_v[i].second];
+                        char d[96];
+                        snprintf(d, sizeof(d), " %016llx %.0f%% verts (%u draws);", (unsigned long long)by_v[i].second,
+                                 total_verts ? 100.0 * double(g.verts) / double(total_verts) : 0.0, g.draws);
+                        l2 += d;
+                    }
+                    LOGI(kTag, "capture %d world passes, fragment programs by pixels shaded:%s", captures_done_, l1.c_str());
+                    LOGI(kTag, "capture %d world passes, fragment programs by vertices drawn:%s", captures_done_, l2.c_str());
+                }
                 // Per draw, for passes of few draws (single objects): did it cover any pixels?
                 std::string per_draw;
                 for (size_t q = 0; q < res.size(); q++) {
@@ -6151,6 +6199,8 @@ private:
         if (capture_active_ && query_pool_ && query_pass_.size() < kMaxQueries) {
             d.query = uint32_t(query_pass_.size());
             query_pass_.push_back(capture_pass_);
+            query_fs_.push_back(st_.program[1] ? st_.program[1]->hash : 0);
+            query_verts_.push_back(uint32_t(std::max(0, p.count)) * uint32_t(std::max(1, p.instances)));
         }
         if (capture_active_ && capture_draws_logged_ < 1500) {
             capture_draws_logged_++;
@@ -6519,7 +6569,9 @@ private:
             push_valid_ = true;
         }
         ApplyDynamicState(d.dyn);
-        if (d.query != UINT32_MAX) vkCmdBeginQuery(cb, query_pool_, d.query, 0);
+        // Precise: the number of pixels each draw shaded (not just whether any), for the capture's per-program table.
+        if (d.query != UINT32_MAX)
+            vkCmdBeginQuery(cb, query_pool_, d.query, features_.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
         if (d.occ_pool)
             vkCmdBeginQuery(cb, d.occ_pool, d.occ_q,
                             features_.occlusionQueryPrecise && dsr::GetRuntime().config.skip_hidden >= 3
@@ -8636,6 +8688,8 @@ private:
     std::map<std::pair<uint64_t, uint64_t>, uint64_t> post_census_;
     uint64_t census_max_area_ = 0;
     std::vector<uint32_t> query_pass_;
+    std::vector<uint64_t> query_fs_;     // fragment program of each capture query
+    std::vector<uint32_t> query_verts_;  // vertices (count x instances) of each capture query's draw
     uint64_t ubo_desc_draw_ = ~0ull;
     int world_draws_logged_ = 0;
     struct DrawImage {
