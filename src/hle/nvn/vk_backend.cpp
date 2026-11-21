@@ -42,6 +42,7 @@
 
 #include <sys/resource.h>
 #include <ctime>
+#include <fcntl.h>
 #ifndef RUSAGE_THREAD
 #define RUSAGE_THREAD 1
 #endif
@@ -814,6 +815,7 @@ public:
     // (preempted, waiting for memory, blocked in a driver call).
     struct ThreadUsage {
         double cpu_ms = 0;
+        double rq_ms = 0;  // time the thread was runnable but waiting for a CPU (scheduler run-queue delay)
         uint64_t minflt = 0, majflt = 0, nvcsw = 0, nivcsw = 0;
     };
     static ThreadUsage ReadThreadUsage() {
@@ -826,6 +828,18 @@ public:
             u.majflt = uint64_t(ru.ru_majflt);
             u.nvcsw = uint64_t(ru.ru_nvcsw);
             u.nivcsw = uint64_t(ru.ru_nivcsw);
+        }
+        // /proc/thread-self/schedstat: "<ns on CPU> <ns waiting on a run queue> <timeslices>"
+        const int fd = open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            char buf[96];
+            const ssize_t n = read(fd, buf, sizeof buf - 1);
+            close(fd);
+            if (n > 0) {
+                buf[n] = 0;
+                unsigned long long on_cpu = 0, waited = 0;
+                if (sscanf(buf, "%llu %llu", &on_cpu, &waited) == 2) u.rq_ms = double(waited) / 1e6;
+            }
         }
         return u;
     }
@@ -868,9 +882,11 @@ public:
             const ThreadUsage u = ReadThreadUsage();
             const double cpu = u.cpu_ms - a.u.cpu_ms;
             const double idle = ms - cpu - (b.drain - a.drain) - (b.wait - a.wait);
-            LOGI(kTag, "slow list thread: %.1f ms on CPU, %.1f ms not running and not explained by recorder/GPU waits | "
+            const double rq = u.rq_ms - a.u.rq_ms;
+            LOGI(kTag, "slow list thread: %.1f ms on CPU, %.1f ms runnable but waiting for a CPU, %.1f ms blocked or "
+                 "otherwise not running (not explained by recorder/GPU waits) | "
                  "%llu minor + %llu major page faults, %llu voluntary + %llu involuntary context switches",
-                 cpu, idle < 0 ? 0.0 : idle, (unsigned long long)(u.minflt - a.u.minflt),
+                 cpu, rq, idle - rq < 0 ? 0.0 : idle - rq, (unsigned long long)(u.minflt - a.u.minflt),
                  (unsigned long long)(u.majflt - a.u.majflt), (unsigned long long)(u.nvcsw - a.u.nvcsw),
                  (unsigned long long)(u.nivcsw - a.u.nivcsw));
         }
@@ -913,6 +929,7 @@ public:
         {
             const ThreadUsage u = ReadThreadUsage();
             exec_cpu_ms_ += u.cpu_ms - marks.u.cpu_ms;
+            exec_rq_ms_ += u.rq_ms - marks.u.rq_ms;
             exec_minflt_ += u.minflt - marks.u.minflt;
             exec_majflt_ += u.majflt - marks.u.majflt;
             exec_nvcsw_ += u.nvcsw - marks.u.nvcsw;
@@ -7537,12 +7554,12 @@ private:
             // recorder drain nor GPU wait is time the thread was not running.
             const double idle = exec_ms_ - exec_cpu_ms_ - exec_drain_ms_ - exec_gpuwait_ms_;
             LOGI(kTag, "executor thread (last 10 s): %.0f ms on CPU of %.0f ms executing; %.0f ms recorder drain, %.0f ms "
-                 "GPU wait, %.0f ms not running | %llu minor + %llu major page faults, %llu voluntary + %llu involuntary "
-                 "context switches",
-                 exec_cpu_ms_, exec_ms_, exec_drain_ms_, exec_gpuwait_ms_, idle < 0 ? 0.0 : idle,
+                 "GPU wait, %.0f ms not running (of it %.0f ms runnable but waiting for a CPU) | %llu minor + %llu major "
+                 "page faults, %llu voluntary + %llu involuntary context switches",
+                 exec_cpu_ms_, exec_ms_, exec_drain_ms_, exec_gpuwait_ms_, idle < 0 ? 0.0 : idle, exec_rq_ms_,
                  (unsigned long long)exec_minflt_, (unsigned long long)exec_majflt_, (unsigned long long)exec_nvcsw_,
                  (unsigned long long)exec_nivcsw_);
-            exec_cpu_ms_ = exec_drain_ms_ = exec_gpuwait_ms_ = 0;
+            exec_cpu_ms_ = exec_rq_ms_ = exec_drain_ms_ = exec_gpuwait_ms_ = 0;
             exec_minflt_ = exec_majflt_ = exec_nvcsw_ = exec_nivcsw_ = 0;
             LogSystemPressure();
         }
@@ -7712,7 +7729,9 @@ private:
             if (anon >= 0)
                 proc += " anon " + std::to_string(anon / 1024) + " MB, file " + std::to_string(file / 1024) + " MB, shmem " +
                         std::to_string(shmem / 1024) + " MB, swapped out " + std::to_string(swap / 1024) + " MB";
-            if (vmstat_have_) {
+            bool any_vm = false;
+            for (size_t i = 0; i < kN; i++) any_vm = any_vm || have[i];
+            if (vmstat_have_ && any_vm) {
                 proc += " | system, last 10 s:";
                 for (size_t i = 0; i < kN; i++)
                     if (have[i]) proc += std::string(" ") + kKeys[i] + " +" + std::to_string(now[i] - vmstat_prev_[i]);
@@ -7740,6 +7759,82 @@ private:
             any = true;
         }
         if (any) LOGI(kTag, "%s", cpu.c_str());
+        if (mapping_tick_++ % 3 == 0) LogMappings();  // every 30 s: reading smaps costs a few ms
+    }
+
+    // What the process's resident memory is made of, from /proc/self/smaps: resident and swapped-out size per mapped
+    // file (or named region), and the largest anonymous regions with their addresses (the guest heap and the Vulkan
+    // host memory show up there). Tells which part of the memory the kernel takes back and the game then faults in again.
+    void LogMappings() {
+        FILE* f = fopen("/proc/self/smaps", "r");
+        if (!f) return;
+        struct Region {
+            unsigned long start = 0, end = 0;
+            long rss_kb = 0, swap_kb = 0;
+        };
+        std::map<std::string, std::pair<long, long>> named;  // name -> (rss kB, swap kB)
+        std::vector<Region> anon;
+        char line[1024];
+        std::string cur;
+        bool cur_anon = false;
+        Region r;
+        auto flush = [&]() {
+            if (r.end == 0) return;
+            if (cur_anon) anon.push_back(r);
+            else {
+                auto& e = named[cur];
+                e.first += r.rss_kb;
+                e.second += r.swap_kb;
+            }
+            r = Region();
+        };
+        while (fgets(line, sizeof line, f)) {
+            unsigned long a = 0, b = 0;
+            char perm[8] = {};
+            int off = 0;
+            if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &a, &b, perm, &off) == 3 && off > 0) {
+                flush();
+                std::string path(line + off);
+                while (!path.empty() && (path.back() == '\n' || path.back() == ' ')) path.pop_back();
+                r.start = a;
+                r.end = b;
+                cur_anon = path.empty() || path == "[anon]";
+                if (!cur_anon) {
+                    const size_t slash = path.rfind('/');
+                    cur = slash == std::string::npos ? path : path.substr(slash + 1);
+                }
+            } else {
+                long v;
+                if (sscanf(line, "Rss: %ld kB", &v) == 1) r.rss_kb = v;
+                else if (sscanf(line, "Swap: %ld kB", &v) == 1) r.swap_kb = v;
+            }
+        }
+        flush();
+        fclose(f);
+        std::vector<std::pair<long, std::string>> top;
+        for (auto& [name, e] : named)
+            if (e.first + e.second >= 8 * 1024)
+                top.push_back({e.first, name + " " + std::to_string(e.first / 1024) + " MB resident, " +
+                                            std::to_string(e.second / 1024) + " MB swapped"});
+        std::sort(top.begin(), top.end(), [](auto& x, auto& y) { return x.first > y.first; });
+        std::string out = "mappings (files and named regions >= 8 MB):";
+        for (size_t i = 0; i < top.size() && i < 8; i++) out += (i ? "; " : " ") + top[i].second;
+        LOGI(kTag, "%s", out.c_str());
+        std::sort(anon.begin(), anon.end(), [](const Region& x, const Region& y) { return x.rss_kb + x.swap_kb > y.rss_kb + y.swap_kb; });
+        long anon_rss = 0, anon_swap = 0;
+        for (const Region& x : anon) {
+            anon_rss += x.rss_kb;
+            anon_swap += x.swap_kb;
+        }
+        std::string big = "anonymous regions: " + std::to_string(anon_rss / 1024) + " MB resident, " +
+                          std::to_string(anon_swap / 1024) + " MB swapped; largest:";
+        for (size_t i = 0; i < anon.size() && i < 5; i++) {
+            char buf[160];
+            snprintf(buf, sizeof buf, "%s@%lx size %lu MB, %ld MB resident, %ld MB swapped", i ? "; " : " ", anon[i].start,
+                     (anon[i].end - anon[i].start) >> 20, anon[i].rss_kb / 1024, anon[i].swap_kb / 1024);
+            big += buf;
+        }
+        LOGI(kTag, "%s", big.c_str());
     }
 
     void LogTargets(const std::vector<TexRef>& rts, int num_rt) {
@@ -8912,11 +9007,12 @@ private:
     int geo_dumps_ = 0;
     std::unordered_map<uint64_t, uint64_t> snapshot_gen_;
     double exec_ms_ = 0, wait_ms_ = 0;
-    double exec_cpu_ms_ = 0, exec_drain_ms_ = 0, exec_gpuwait_ms_ = 0;
+    double exec_cpu_ms_ = 0, exec_rq_ms_ = 0, exec_drain_ms_ = 0, exec_gpuwait_ms_ = 0;
     uint64_t exec_minflt_ = 0, exec_majflt_ = 0, exec_nvcsw_ = 0, exec_nivcsw_ = 0;
     uint64_t psi_some_us_ = 0, psi_full_us_ = 0;
     bool psi_have_ = false;
     uint64_t vmstat_prev_[9] = {};
+    int mapping_tick_ = 0;
     bool vmstat_have_ = false;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
 
