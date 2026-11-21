@@ -41,6 +41,10 @@
 #include <vector>
 
 #include <sys/resource.h>
+#include <ctime>
+#ifndef RUSAGE_THREAD
+#define RUSAGE_THREAD 1
+#endif
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -805,15 +809,36 @@ public:
     }
 
     // What a slow list spent its time on (stutters): counters at the start of the list.
+    // Per-thread CPU time, page faults and context switches of the calling thread (getrusage RUSAGE_THREAD): tells
+    // a list that was slow because it computed from one that was slow because the thread was not running
+    // (preempted, waiting for memory, blocked in a driver call).
+    struct ThreadUsage {
+        double cpu_ms = 0;
+        uint64_t minflt = 0, majflt = 0, nvcsw = 0, nivcsw = 0;
+    };
+    static ThreadUsage ReadThreadUsage() {
+        ThreadUsage u;
+        struct rusage ru {};
+        if (getrusage(RUSAGE_THREAD, &ru) == 0) {
+            u.cpu_ms = double(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
+                       double(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
+            u.minflt = uint64_t(ru.ru_minflt);
+            u.majflt = uint64_t(ru.ru_majflt);
+            u.nvcsw = uint64_t(ru.ru_nvcsw);
+            u.nivcsw = uint64_t(ru.ru_nivcsw);
+        }
+        return u;
+    }
     struct ListMarks {
         std::chrono::steady_clock::time_point t;
         double drain, wait, compile;
         uint64_t draws, geo_bytes, upload_bytes, pipelines, reuploads, uploads, flushes, waits, barriers, passes;
+        ThreadUsage u;
     };
     ListMarks Marks() const {
         return {std::chrono::steady_clock::now(), drain_ms_, wait_ms_, compile_ms_, drawn_, geo_bytes_, upload_bytes_,
                 uint64_t(new_pipelines_), reuploads_, uint64_t(uploads_), uint64_t(flushes_), pipeline_waits_,
-                barriers_, render_passes_};
+                barriers_, render_passes_, ReadThreadUsage()};
     }
     int slow_lists_logged_ = 0;
     std::chrono::steady_clock::time_point slow_window_;
@@ -835,6 +860,20 @@ public:
              (unsigned long long)(b.uploads - a.uploads), (unsigned long long)(b.reuploads - a.reuploads),
              (b.geo_bytes - a.geo_bytes) / 1048576.0, (b.upload_bytes - a.upload_bytes) / 1048576.0,
              (unsigned long long)(b.flushes - a.flushes));
+        // Where the list's wall time went: running on a CPU, or not running at all. `idle` is the wall time minus
+        // CPU time, the recorder drain and the GPU wait: large means the thread was descheduled or blocked on
+        // something the other counters do not cover (memory reclaim shows as page faults, preemption as
+        // involuntary switches, a driver lock or sleep as voluntary switches).
+        {
+            const ThreadUsage u = ReadThreadUsage();
+            const double cpu = u.cpu_ms - a.u.cpu_ms;
+            const double idle = ms - cpu - (b.drain - a.drain) - (b.wait - a.wait);
+            LOGI(kTag, "slow list thread: %.1f ms on CPU, %.1f ms not running and not explained by recorder/GPU waits | "
+                 "%llu minor + %llu major page faults, %llu voluntary + %llu involuntary context switches",
+                 cpu, idle < 0 ? 0.0 : idle, (unsigned long long)(u.minflt - a.u.minflt),
+                 (unsigned long long)(u.majflt - a.u.majflt), (unsigned long long)(u.nvcsw - a.u.nvcsw),
+                 (unsigned long long)(u.nivcsw - a.u.nivcsw));
+        }
     }
 
     void Execute(const CmdList& cmds) override {
@@ -871,6 +910,16 @@ public:
             persist_full_ = false;
         }
         if (capture_active_) FinishCapture();
+        {
+            const ThreadUsage u = ReadThreadUsage();
+            exec_cpu_ms_ += u.cpu_ms - marks.u.cpu_ms;
+            exec_minflt_ += u.minflt - marks.u.minflt;
+            exec_majflt_ += u.majflt - marks.u.majflt;
+            exec_nvcsw_ += u.nvcsw - marks.u.nvcsw;
+            exec_nivcsw_ += u.nivcsw - marks.u.nivcsw;
+            exec_drain_ms_ += drain_ms_ - marks.drain;
+            exec_gpuwait_ms_ += wait_ms_ - marks.wait;
+        }
         CheckSlowList(marks);
         last_list_draws_ = drawn_ - list_start_draws_;
         list_start_draws_ = drawn_;
@@ -7483,6 +7532,20 @@ private:
         LOGI(kTag, "GPU busy %.0f ms in the last 10 s (%.1f ms per list); geometry hashed ahead: %llu of %llu checks",
              gpu_busy_ms_, list_counter_ > stat_lists_ ? gpu_busy_ms_ / double(list_counter_ - stat_lists_) : 0.0,
              (unsigned long long)prehash_used_, (unsigned long long)(prehash_used_ + prehash_inline_));
+        {
+            // The executor thread (the one running lists): CPU time against wall time. Wall time that is neither CPU,
+            // recorder drain nor GPU wait is time the thread was not running.
+            const double idle = exec_ms_ - exec_cpu_ms_ - exec_drain_ms_ - exec_gpuwait_ms_;
+            LOGI(kTag, "executor thread (last 10 s): %.0f ms on CPU of %.0f ms executing; %.0f ms recorder drain, %.0f ms "
+                 "GPU wait, %.0f ms not running | %llu minor + %llu major page faults, %llu voluntary + %llu involuntary "
+                 "context switches",
+                 exec_cpu_ms_, exec_ms_, exec_drain_ms_, exec_gpuwait_ms_, idle < 0 ? 0.0 : idle,
+                 (unsigned long long)exec_minflt_, (unsigned long long)exec_majflt_, (unsigned long long)exec_nvcsw_,
+                 (unsigned long long)exec_nivcsw_);
+            exec_cpu_ms_ = exec_drain_ms_ = exec_gpuwait_ms_ = 0;
+            exec_minflt_ = exec_majflt_ = exec_nvcsw_ = exec_nivcsw_ = 0;
+            LogSystemPressure();
+        }
         gpu_busy_ms_ = 0;
         stat_lists_ = list_counter_;
         prehash_used_ = prehash_inline_ = 0;
@@ -7555,6 +7618,81 @@ private:
         fast_draws_ = 0;
         exec_ms_ = wait_ms_ = 0;
         upload_bytes_ = upload_hits_ = 0;
+    }
+
+    // System-wide memory and CPU state next to the 10 s stats: separates "the game stalled" from "Android took the
+    // memory or the cores away" (low MemAvailable, memory pressure stall time, a throttled CPU, a hot battery).
+    // Every file may be unreadable for an app on some devices: what cannot be read is left out.
+    static long ReadLongFile(const char* path) {
+        long v = -1;
+        if (FILE* f = fopen(path, "r")) {
+            if (fscanf(f, "%ld", &v) != 1) v = -1;
+            fclose(f);
+        }
+        return v;
+    }
+    void LogSystemPressure() {
+        long avail_kb = -1, swap_total_kb = -1, swap_free_kb = -1;
+        if (FILE* f = fopen("/proc/meminfo", "r")) {
+            char line[160];
+            while (fgets(line, sizeof line, f)) {
+                long v;
+                if (sscanf(line, "MemAvailable: %ld kB", &v) == 1) avail_kb = v;
+                else if (sscanf(line, "SwapTotal: %ld kB", &v) == 1) swap_total_kb = v;
+                else if (sscanf(line, "SwapFree: %ld kB", &v) == 1) swap_free_kb = v;
+            }
+            fclose(f);
+        }
+        // Memory pressure stall time (PSI): microseconds in which some / all tasks waited for memory since boot.
+        uint64_t some = 0, full = 0;
+        bool psi = false;
+        if (FILE* f = fopen("/proc/pressure/memory", "r")) {
+            char line[200];
+            while (fgets(line, sizeof line, f)) {
+                double a10, a60, a300;
+                unsigned long long total;
+                if (sscanf(line, "some avg10=%lf avg60=%lf avg300=%lf total=%llu", &a10, &a60, &a300, &total) == 4) {
+                    some = total;
+                    psi = true;
+                } else if (sscanf(line, "full avg10=%lf avg60=%lf avg300=%lf total=%llu", &a10, &a60, &a300, &total) == 4) {
+                    full = total;
+                }
+            }
+            fclose(f);
+        }
+        std::string mem = "system memory:";
+        if (avail_kb >= 0) mem += " " + std::to_string(avail_kb / 1024) + " MB available";
+        if (swap_total_kb > 0 && swap_free_kb >= 0)
+            mem += ", swap used " + std::to_string((swap_total_kb - swap_free_kb) / 1024) + " of " +
+                   std::to_string(swap_total_kb / 1024) + " MB";
+        if (psi) {
+            if (psi_have_)
+                mem += ", memory stalls in the last 10 s: some " + std::to_string((some - psi_some_us_) / 1000) + " ms, full " +
+                       std::to_string((full - psi_full_us_) / 1000) + " ms";
+            psi_some_us_ = some;
+            psi_full_us_ = full;
+            psi_have_ = true;
+        }
+        if (avail_kb >= 0 || psi) LOGI(kTag, "%s", mem.c_str());
+        std::string cpu = "cpu clocks (MHz now/max):";
+        bool any = false;
+        for (int c : {0, 4, 6, 7}) {
+            char path[96];
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", c);
+            const long cur = ReadLongFile(path);
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+            const long mx = ReadLongFile(path);
+            if (cur > 0) {
+                cpu += " cpu" + std::to_string(c) + " " + std::to_string(cur / 1000) + "/" + std::to_string(mx > 0 ? mx / 1000 : 0);
+                any = true;
+            }
+        }
+        const long batt = ReadLongFile("/sys/class/power_supply/battery/temp");  // tenths of a degree C
+        if (batt > 0) {
+            cpu += std::string(any ? "," : "") + " battery " + std::to_string(batt / 10) + "." + std::to_string(batt % 10) + " C";
+            any = true;
+        }
+        if (any) LOGI(kTag, "%s", cpu.c_str());
     }
 
     void LogTargets(const std::vector<TexRef>& rts, int num_rt) {
@@ -8727,6 +8865,10 @@ private:
     int geo_dumps_ = 0;
     std::unordered_map<uint64_t, uint64_t> snapshot_gen_;
     double exec_ms_ = 0, wait_ms_ = 0;
+    double exec_cpu_ms_ = 0, exec_drain_ms_ = 0, exec_gpuwait_ms_ = 0;
+    uint64_t exec_minflt_ = 0, exec_majflt_ = 0, exec_nvcsw_ = 0, exec_nivcsw_ = 0;
+    uint64_t psi_some_us_ = 0, psi_full_us_ = 0;
+    bool psi_have_ = false;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
 
     void* window_ = nullptr;
