@@ -413,6 +413,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "record_thread = 1\n"
                     "# fast_cores: 1 = keep the game's main, recording and submit threads on the performance cores\n"
                     "fast_cores = 1\n"
+                    "# render_nice: scheduler priority of the render thread, -10 (highest) to 0 (unchanged); the thread was\n"
+                    "# waiting for a CPU behind the game's worker threads\n"
+                    "render_nice = -4\n"
                     "# audio_smooth: 1 = release audio buffers to the game at a smoothed pace (experimental)\n"
                     "audio_smooth = 0\n"
                     PRESENT_MODE_HELP
@@ -457,6 +460,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "pin_render_thread")) cfg->pin_render_thread = v != 0;
             else if (!strcmp(key, "record_thread")) cfg->record_thread = v != 0;
             else if (!strcmp(key, "fast_cores")) cfg->fast_cores = v != 0;
+            else if (!strcmp(key, "render_nice")) cfg->render_nice = std::clamp(v, -10, 0);
             else if (!strcmp(key, "gpu_compression")) cfg->gpu_compression = v != 0;
             else if (!strcmp(key, "audio_smooth")) cfg->audio_smooth = v != 0;
             else if (!strcmp(key, "lrz_workaround")) cfg->lrz_workaround = v != 0;
