@@ -12,10 +12,12 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
+#include <sys/resource.h>
 #endif
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -659,6 +661,18 @@ private:
     }
     void Run() {
         dsr::profiler::RegisterCurrentThread("render (Vulkan)");
+#if defined(__ANDROID__)
+        {
+            // The render thread is the frame's critical path: the log showed it runnable but waiting for a CPU for 1.3-2.8 s
+            // of every 10 s behind the game's worker threads. A lower nice value lets it run first (settings render_nice).
+            const int want = dsr::GetRuntime().config.render_nice;
+            if (want < 0) {
+                errno = 0;
+                const int r = setpriority(PRIO_PROCESS, 0, want);
+                LOGI(kTag, "render thread priority: nice %d: %s", want, r == 0 ? "ok" : strerror(errno));
+            }
+        }
+#endif
         if (dsr::GetRuntime().config.pin_render_thread)
             PinToFastestCores();
         else
