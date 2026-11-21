@@ -146,6 +146,7 @@ struct RuntimeConfig {
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
+    int render_nice = -4;    // scheduler priority of the render thread (nice value, -10..0; 0 = unchanged): it waited for a CPU behind the game's worker threads
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
     bool pin_render_thread = false;  // keep the render thread on the fastest CPU core(s) (slower on 8 Gen 2: off)
     float exposure = 1.37f;       // scales the tone-mapping exposure (1.0 = as the game draws it)
