@@ -7674,6 +7674,53 @@ private:
             psi_have_ = true;
         }
         if (avail_kb >= 0 || psi) LOGI(kTag, "%s", mem.c_str());
+        {
+            // Where this process's memory is: anonymous (game heap, caches), file-backed (code and mapped files, which
+            // the kernel drops first and re-reads with major faults) or swapped out (VmSwap: touching it faults it back).
+            long anon = -1, file = -1, shmem = -1, swap = -1;
+            if (FILE* f = fopen("/proc/self/status", "r")) {
+                char line[160];
+                while (fgets(line, sizeof line, f)) {
+                    long v;
+                    if (sscanf(line, "RssAnon: %ld kB", &v) == 1) anon = v;
+                    else if (sscanf(line, "RssFile: %ld kB", &v) == 1) file = v;
+                    else if (sscanf(line, "RssShmem: %ld kB", &v) == 1) shmem = v;
+                    else if (sscanf(line, "VmSwap: %ld kB", &v) == 1) swap = v;
+                }
+                fclose(f);
+            }
+            // System-wide counters since boot, reported as the change over the last 10 s: pages swapped in and out,
+            // major faults, file pages re-read after being evicted (workingset refaults), direct reclaim stalls.
+            static const char* const kKeys[] = {"pswpin", "pswpout", "pgmajfault", "workingset_refault_file",
+                                                "workingset_refault_anon", "workingset_refault", "allocstall_normal",
+                                                "allocstall_movable", "pgscan_direct"};
+            constexpr size_t kN = sizeof(kKeys) / sizeof(kKeys[0]);
+            uint64_t now[kN] = {};
+            bool have[kN] = {};
+            if (FILE* f = fopen("/proc/vmstat", "r")) {
+                char name[64];
+                unsigned long long v;
+                while (fscanf(f, "%63s %llu", name, &v) == 2)
+                    for (size_t i = 0; i < kN; i++)
+                        if (!strcmp(name, kKeys[i])) {
+                            now[i] = v;
+                            have[i] = true;
+                        }
+                fclose(f);
+            }
+            std::string proc = "process memory:";
+            if (anon >= 0)
+                proc += " anon " + std::to_string(anon / 1024) + " MB, file " + std::to_string(file / 1024) + " MB, shmem " +
+                        std::to_string(shmem / 1024) + " MB, swapped out " + std::to_string(swap / 1024) + " MB";
+            if (vmstat_have_) {
+                proc += " | system, last 10 s:";
+                for (size_t i = 0; i < kN; i++)
+                    if (have[i]) proc += std::string(" ") + kKeys[i] + " +" + std::to_string(now[i] - vmstat_prev_[i]);
+            }
+            for (size_t i = 0; i < kN; i++) vmstat_prev_[i] = now[i];
+            vmstat_have_ = true;
+            if (anon >= 0 || vmstat_have_) LOGI(kTag, "%s", proc.c_str());
+        }
         std::string cpu = "cpu clocks (MHz now/max):";
         bool any = false;
         for (int c : {0, 4, 6, 7}) {
@@ -8869,6 +8916,8 @@ private:
     uint64_t exec_minflt_ = 0, exec_majflt_ = 0, exec_nvcsw_ = 0, exec_nivcsw_ = 0;
     uint64_t psi_some_us_ = 0, psi_full_us_ = 0;
     bool psi_have_ = false;
+    uint64_t vmstat_prev_[9] = {};
+    bool vmstat_have_ = false;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
 
     void* window_ = nullptr;
