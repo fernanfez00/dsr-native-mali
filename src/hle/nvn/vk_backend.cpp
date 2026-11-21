@@ -531,6 +531,7 @@ struct Image {
     // new snapshot ends the open pass.
     uint64_t content_gen = 0;
     bool skip_zeroed = false;  // settings skip_fs: a skipped pass's target, cleared to zero (until a draw writes it)
+    bool skip_fill_white = false;  // settings skip_white: ... cleared to white (1.0) instead of zero (valid with skip_zeroed)
 };
 
 struct Shader {
@@ -5451,7 +5452,7 @@ private:
                 for (size_t i = 0; i < colors.size(); i++) {
                     if (!colors[i]) continue;
                     if (overlay && (colors[i]->clear_pending || colors[i]->written)) continue;
-                    ZeroSkippedTarget(*colors[i], i);
+                    ZeroSkippedTarget(*colors[i], i, skip_white_.count(st_.program[1]->hash) != 0);
                 }
                 if (dsr::GetRuntime().config.profile) SkipDiag(p, colors, depth, fs, true);
                 if (skip_logged_.insert(st_.program[1]->hash).second)
@@ -5655,7 +5656,10 @@ private:
                     img != &hud_img_ && img != &hud2_img_ && info.texture_dim[slot] == shader::TexDim::D2 &&
                     !info.texture_array[slot] && !capture_active_) {
                     // the alpha of formats without alpha is read as one, as for the image itself
-                    Image* z = Fallback(info.texture_dim[slot], false, true, !IgnoresAlpha(img->nvn_format));
+                    // skip_white: the target was filled with white, so is the stand-in (opaque white)
+                    Image* z = img->skip_fill_white
+                                   ? Fallback(info.texture_dim[slot], false, false, false)
+                                   : Fallback(info.texture_dim[slot], false, true, !IgnoresAlpha(img->nvn_format));
                     if (z) {
                         img = z;
                         zero_standin = true;
@@ -8529,6 +8533,7 @@ private:
     // skip_post hashes: only left out on small targets (see the skip_fs block of the draw); a full-size pass is the
     // frame itself (tone mapping / final composite) and skipping it leaves the picture black.
     std::unordered_set<uint64_t> skip_post_;
+    std::unordered_set<uint64_t> skip_white_;  // skip_white (settings): skipped like skip_post, target filled with white
     uint64_t world_max_area_ = 0;  // biggest colour target drawn together with a depth buffer (the 3D world)
     uint64_t game_frame_area_ = 0;  // pixels of the frame the game presents (the world is never bigger)
     uint64_t skipped_draws_ = 0;
@@ -8562,6 +8567,8 @@ private:
         // skip_post_extra (settings): more hashes with the same small-targets-only rule, to try passes from the
         // "post census" log line without rebuilding.
         if (!dsr::GetRuntime().config.skip_post_extra.empty()) post += "," + dsr::GetRuntime().config.skip_post_extra;
+        // skip_white (settings): the same rule, but the skipped target is filled with white instead of zero (masks).
+        if (!dsr::GetRuntime().config.skip_white.empty()) post += "," + dsr::GetRuntime().config.skip_white;
         auto parse = [&](const std::string& list, std::unordered_set<uint64_t>& out) {
             size_t at = 0;
             while (at < list.size()) {
@@ -8579,6 +8586,10 @@ private:
         };
         parse(s, skip_fs_);
         parse(post, skip_post_);
+        parse(dsr::GetRuntime().config.skip_white, skip_white_);
+        if (!skip_white_.empty())
+            LOGI(kTag, "skip_white: %zu fragment programs are left out and their target is filled with white",
+                 skip_white_.size());
         if (!skip_fs_.empty() || !skip_post_.empty())
             LOGI(kTag, "skip_fs: %zu fragment programs are left out (+%zu skip_post, small targets only)", skip_fs_.size(),
                  skip_post_.size());
@@ -8615,17 +8626,19 @@ private:
              skipped ? "SKIPPED" : "drawn  ", (unsigned long long)h, c->width, c->height, (unsigned long long)c->addr,
              c->nvn_format, colors.size(), int(st_.color.blend_enable != 0), d, p.mode, p.count, p.instances, tex.c_str());
     }
-    void ZeroSkippedTarget(Image& img, size_t i) {
-        if (img.skip_zeroed) return;
+    void ZeroSkippedTarget(Image& img, size_t i, bool white = false) {
+        if (img.skip_zeroed && img.skip_fill_white == white) return;
         img.skip_zeroed = true;
+        img.skip_fill_white = white;
+        VkClearValue fill{};  // zero, or white (1.0 in every channel) for a skip_white program
+        if (white) fill.color.float32[0] = fill.color.float32[1] = fill.color.float32[2] = fill.color.float32[3] = 1.0f;
         const auto sub_rt = RtSub(i);
         // The target is an attachment of the open pass: zero it inside the pass (as the game's own clears of an open
         // pass's target are done) instead of ending the pass for it. A pass ended just to zero a skipped pass's
         // target was one of the most frequent breaks in the log (the line of this EndRendering).
         if (rendering_ && !capture_active_ && i < pass_color_count_ && pass_colors_[i] == &img &&
             pass_color_sub_[i] == std::make_pair(sub_rt.first, sub_rt.second)) {
-            VkClearValue zero{};
-            VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, uint32_t(i), zero};
+            VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, uint32_t(i), fill};
             const VkClearRect rect{{{0, 0}, pass_extent_}, 0, 1};
             Rec([ca, rect](VkCommandBuffer cb) { vkCmdClearAttachments(cb, 1, &ca, 1, &rect); });
             clears_in_pass_++;
@@ -8637,7 +8650,7 @@ private:
         if (img.clear_pending && !DeadClear(img, VK_IMAGE_ASPECT_COLOR_BIT, sub_rt.first, sub_rt.second))
             FlushClear(img);
         img.clear_pending = true;
-        img.clear_value = {};
+        img.clear_value = fill;
         img.clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
         img.clear_layer = sub_rt.first;
         img.clear_level = sub_rt.second;
