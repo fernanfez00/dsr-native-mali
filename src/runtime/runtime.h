@@ -116,7 +116,7 @@ struct RuntimeConfig {
     // only; they do not need to be repeated there), but their target is filled with WHITE (1.0) instead of zero.
     // For passes that make a mask the composition multiplies the picture by (ambient occlusion, soft shadows): zero
     // blacks the picture out, white means "nothing occluded". Reads of such a target are served by a 1x1 white image.
-    std::string skip_white;
+    std::string skip_white = "476b45e1b3e73549,fcb25d171a89d84a";  // default: the two ambient-occlusion programs; `skip_white` empty in settings.txt turns it off
     // skip_post_plus (menu toggle): leaves out 16 more post-processing / low-resolution effect programs, with the
     // skip_post rule (small targets only). Tested on a Mali-G57 (A15) with the picture intact.
     bool skip_post_plus = false;
