@@ -538,6 +538,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_bloom")) cfg->skip_bloom = v != 0;
             else if (!strcmp(key, "skip_post")) cfg->skip_post = v != 0;
             else if (!strcmp(key, "skip_post_extra")) cfg->skip_post_extra = value;
+            else if (!strcmp(key, "skip_white")) cfg->skip_white = value;
             else if (!strcmp(key, "skip_post_plus")) cfg->skip_post_plus = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
@@ -660,6 +661,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     if (cfg->skip_post) LOGI(kTag, "settings: skip_post on");
     if (cfg->skip_post_plus) LOGI(kTag, "settings: skip_post_plus on");
     if (!cfg->skip_post_extra.empty()) LOGI(kTag, "settings: skip_post_extra %s", cfg->skip_post_extra.c_str());
+    if (!cfg->skip_white.empty()) LOGI(kTag, "settings: skip_white %s", cfg->skip_white.c_str());
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
