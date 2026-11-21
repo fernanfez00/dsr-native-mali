@@ -43,6 +43,7 @@
 #include <sys/resource.h>
 #include <ctime>
 #include <fcntl.h>
+#include <sched.h>
 #ifndef RUSAGE_THREAD
 #define RUSAGE_THREAD 1
 #endif
@@ -816,10 +817,12 @@ public:
     struct ThreadUsage {
         double cpu_ms = 0;
         double rq_ms = 0;  // time the thread was runnable but waiting for a CPU (scheduler run-queue delay)
+        int cpu = -1;      // the core the thread is running on right now (sched_getcpu)
         uint64_t minflt = 0, majflt = 0, nvcsw = 0, nivcsw = 0;
     };
     static ThreadUsage ReadThreadUsage() {
         ThreadUsage u;
+        u.cpu = sched_getcpu();
         struct rusage ru {};
         if (getrusage(RUSAGE_THREAD, &ru) == 0) {
             u.cpu_ms = double(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
@@ -930,6 +933,8 @@ public:
             const ThreadUsage u = ReadThreadUsage();
             exec_cpu_ms_ += u.cpu_ms - marks.u.cpu_ms;
             exec_rq_ms_ += u.rq_ms - marks.u.rq_ms;
+            for (int c : {marks.u.cpu, u.cpu})  // the core at the start and at the end of the list
+                if (c >= 0 && c < 16) exec_cpu_hist_[c]++;
             exec_minflt_ += u.minflt - marks.u.minflt;
             exec_majflt_ += u.majflt - marks.u.majflt;
             exec_nvcsw_ += u.nvcsw - marks.u.nvcsw;
@@ -7559,6 +7564,17 @@ private:
                  exec_cpu_ms_, exec_ms_, exec_drain_ms_, exec_gpuwait_ms_, idle < 0 ? 0.0 : idle, exec_rq_ms_,
                  (unsigned long long)exec_minflt_, (unsigned long long)exec_majflt_, (unsigned long long)exec_nvcsw_,
                  (unsigned long long)exec_nivcsw_);
+            {
+                uint32_t total = 0;
+                for (uint32_t n : exec_cpu_hist_) total += n;
+                if (total) {
+                    std::string cores = "executor thread cores (share of list starts and ends in the last 10 s):";
+                    for (int c = 0; c < 16; c++)
+                        if (exec_cpu_hist_[c]) cores += " cpu" + std::to_string(c) + " " + std::to_string(exec_cpu_hist_[c] * 100 / total) + "%";
+                    LOGI(kTag, "%s", cores.c_str());
+                }
+                for (uint32_t& n : exec_cpu_hist_) n = 0;
+            }
             exec_cpu_ms_ = exec_rq_ms_ = exec_drain_ms_ = exec_gpuwait_ms_ = 0;
             exec_minflt_ = exec_majflt_ = exec_nvcsw_ = exec_nivcsw_ = 0;
             LogSystemPressure();
@@ -9008,6 +9024,7 @@ private:
     std::unordered_map<uint64_t, uint64_t> snapshot_gen_;
     double exec_ms_ = 0, wait_ms_ = 0;
     double exec_cpu_ms_ = 0, exec_rq_ms_ = 0, exec_drain_ms_ = 0, exec_gpuwait_ms_ = 0;
+    uint32_t exec_cpu_hist_[16] = {};  // lists that started or ended on each core in the last 10 s
     uint64_t exec_minflt_ = 0, exec_majflt_ = 0, exec_nvcsw_ = 0, exec_nivcsw_ = 0;
     uint64_t psi_some_us_ = 0, psi_full_us_ = 0;
     bool psi_have_ = false;
