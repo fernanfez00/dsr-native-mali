@@ -7782,6 +7782,30 @@ private:
     // file (or named region), and the largest anonymous regions with their addresses (the guest heap and the Vulkan
     // host memory show up there). Tells which part of the memory the kernel takes back and the game then faults in again.
     void LogMappings() {
+        if (FILE* sf = fopen("/proc/swaps", "r")) {
+            // Each swap area: a zram device (compressed RAM) or a file on storage (Samsung RAM Plus): a swap file is
+            // read from flash on every major fault, zram is decompressed from RAM.
+            std::string swaps = "swap areas:";
+            char line[256];
+            bool first = true, any_area = false;
+            while (fgets(line, sizeof line, sf)) {
+                if (first) {  // header
+                    first = false;
+                    continue;
+                }
+                char name[200], type[32];
+                long size_kb, used_kb, prio;
+                if (sscanf(line, "%199s %31s %ld %ld %ld", name, type, &size_kb, &used_kb, &prio) == 5) {
+                    swaps += std::string(any_area ? ";" : "") + " " + name + " (" + type + ") " + std::to_string(used_kb / 1024) +
+                             " of " + std::to_string(size_kb / 1024) + " MB used, priority " + std::to_string(prio);
+                    any_area = true;
+                }
+            }
+            fclose(sf);
+            LOGI(kTag, "%s", any_area ? swaps.c_str() : "swap areas: none");
+        } else {
+            LOGI(kTag, "swap areas: /proc/swaps not readable");
+        }
         {
             // /proc/self/smaps_rollup: the kernel's own totals over all mappings. Rss split by who owns the pages
             // (private or shared, clean or dirty) and Pss by kind (anonymous, file, shared memory): a resident file
