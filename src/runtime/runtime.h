@@ -145,6 +145,9 @@ struct RuntimeConfig {
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
+    // geo_cache_mb: size of the geometry cache (vertex/index data kept on the GPU across frames), in MB. Less memory
+    // when smaller, but it fills up sooner and is emptied and refilled (a short stall each time).
+    int geo_cache_mb = 192;
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
     int render_nice = -4;    // scheduler priority of the render thread (nice value, -10..0; 0 = unchanged): it waited for a CPU behind the game's worker threads
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
