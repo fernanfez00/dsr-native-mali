@@ -3,10 +3,16 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <random>
+#include <thread>
+
+#ifdef __ANDROID__
+#include <malloc.h>
+#endif
 
 #include "common/log.h"
 #include "hle/os/heap.h"
@@ -71,6 +77,17 @@ HLE_FUNC(_ZN2nn2os17SetMemoryHeapSizeEm, uint32_t, nn_os_SetMemoryHeapSize, (siz
         // Align base to the block unit so block addresses match Switch alignment expectations.
         uintptr_t b = AlignUp(reinterpret_cast<uintptr_t>(p), kBlockUnit);
         g_heap_base = b;
+#ifdef __ANDROID__
+        // Memory the process freed (conversion buffers, caches that were cleared) stays with the allocator: hand it
+        // back now and then so it is not swapped out for nothing. (M_PURGE = -101, M_PURGE_ALL = -104, Android 14+.)
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(30));
+                mallopt(-104, 0);
+                mallopt(-101, 0);
+            }
+        }).detach();
+#endif
     }
     if (size > kHeapReserve - kBlockUnit) return kResultOutOfMemory;
     if (size > g_heap_size) {
