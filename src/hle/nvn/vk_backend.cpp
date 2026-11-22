@@ -127,7 +127,7 @@ void LoadDeviceFunctions(VkDevice device) {
     DSR_VK_DEVICE_FUNCS(DSR_VK_LOAD)
 #undef DSR_VK_LOAD
 }
-constexpr VkDeviceSize kStreamSize = 48ull << 20;  // per slot (four slots)
+constexpr VkDeviceSize kStreamSize = 32ull << 20;  // per slot (four slots): a list streams ~1-2 MB, a big texture ~21 MB
 constexpr VkDeviceSize kMaxUniformRange = 65536;
 constexpr uint32_t kCbufBase = 3;      // NVN uniform-buffer binding b is read by shaders as c[b + 3]
 constexpr uint32_t kCompilerConstants = 1;  // c[1]: literal constants from the shader's control section
