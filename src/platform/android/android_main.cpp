@@ -473,6 +473,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             }
             else if (!strcmp(key, "compositor_scaling")) cfg->compositor_scaling = v != 0;
             else if (!strcmp(key, "max_anisotropy")) cfg->max_anisotropy = v;
+            else if (!strcmp(key, "geo_cache_mb")) cfg->geo_cache_mb = std::clamp(v, 32, 512);
             else if (!strcmp(key, "shadow_compare")) cfg->shadow_compare = std::clamp(v, 0, 3);
             else if (!strcmp(key, "game_hooks")) cfg->game_hooks = v != 0;
             else if (!strcmp(key, "skip_intro")) cfg->skip_intro = v != 0;
