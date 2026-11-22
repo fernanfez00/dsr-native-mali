@@ -5,9 +5,10 @@
 #include <cstdint>
 #include <string>
 
-// Hot thread_locals: the default (global-dynamic) model calls __tls_get_addr in the dynamic linker on every access
-// (~20% of the samples of the game's polling threads in linker64). initial-exec reads the slot directly.
-#if defined(__ANDROID__)
+// Hot thread_locals. Left as the default model: initial-exec TLS in a library loaded with System.loadLibrary needs
+// static TLS space from the dynamic linker and can make the load fail (the app closing at start). Define
+// DSR_FAST_TLS_IE to try it again.
+#if defined(__ANDROID__) && defined(DSR_FAST_TLS_IE)
 #define DSR_FAST_TLS __attribute__((tls_model("initial-exec")))
 #else
 #define DSR_FAST_TLS
