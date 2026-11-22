@@ -15,6 +15,7 @@
 #endif
 
 #include "common/log.h"
+#include "common/platform.h"
 #include "hle/os/heap.h"
 #include "hle/os/os.h"
 #include "hle/registry.h"
@@ -163,25 +164,36 @@ HLE_FUNC(_ZN2nn2os15QueryMemoryInfoEPNS0_10MemoryInfoE, void, nn_os_QueryMemoryI
 // clock_gettime). A thread that has read the clock back to back (under 5 us apart) for more than 1 ms gets a
 // 0.5 ms nap every 32 reads from then on, so it stops taking a fast core from the frame and render threads.
 // A thread that reads the clock at a normal rate never qualifies; a spin-wait may overshoot by up to 0.5 ms.
+namespace {
+struct TickPoll {  // one TLS slot instead of four (each access of a dynamic-model thread_local calls the linker)
+    int64_t last = 0, streak_start = 0;
+    int dense = 0;
+    bool napped = false;
+    bool moved = false;
+};
+DSR_FAST_TLS thread_local TickPoll t_tick;
+}  // namespace
 HLE_FUNC(_ZN2nn2os13GetSystemTickEv, int64_t, nn_os_GetSystemTick, ()) {
     const int64_t t = NowTicks();
-    thread_local int64_t last = 0, streak_start = 0;
-    thread_local int dense = 0;
-    thread_local bool napped = false;
-    if (t - last < 96 || napped) {  // 96 ticks = 5 us at 19.2 MHz; our own nap does not end a streak
-        napped = false;
-        if (!streak_start) streak_start = t;
-        if (++dense >= 32 && t - streak_start > 19200) {
-            dense = 0;
+    TickPoll& p = t_tick;
+    if (t - p.last < 96 || p.napped) {  // 96 ticks = 5 us at 19.2 MHz; our own nap does not end a streak
+        p.napped = false;
+        if (!p.streak_start) p.streak_start = t;
+        if (++p.dense >= 32 && t - p.streak_start > 19200) {
+            p.dense = 0;
+            if (!p.moved) {  // a polling thread has no business on the fast cores the frame threads need
+                p.moved = true;
+                dsr::platform::PreferSlowCores("clock-polling thread");
+            }
             timespec ts{0, 500'000};
             nanosleep(&ts, nullptr);
-            napped = true;
+            p.napped = true;
         }
     } else {
-        dense = 0;
-        streak_start = 0;
+        p.dense = 0;
+        p.streak_start = 0;
     }
-    last = t;
+    p.last = t;
     return t;
 }
 HLE_ALIAS(nnosGetSystemTick, nn_os_GetSystemTick);

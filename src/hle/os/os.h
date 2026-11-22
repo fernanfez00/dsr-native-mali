@@ -5,6 +5,14 @@
 #include <cstdint>
 #include <string>
 
+// Hot thread_locals: the default (global-dynamic) model calls __tls_get_addr in the dynamic linker on every access
+// (~20% of the samples of the game's polling threads in linker64). initial-exec reads the slot directly.
+#if defined(__ANDROID__)
+#define DSR_FAST_TLS __attribute__((tls_model("initial-exec")))
+#else
+#define DSR_FAST_TLS
+#endif
+
 namespace dsr::hle::os {
 
 // ---- Switch tick (19.2 MHz) ----------------------------------------------------------------------

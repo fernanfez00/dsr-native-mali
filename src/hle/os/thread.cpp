@@ -53,8 +53,8 @@ std::mutex g_threads_mutex;
 std::unordered_map<GuestThread*, std::unique_ptr<HostThread>> g_threads;
 std::atomic<uint64_t> g_next_id{1};
 
-thread_local HostThread* t_current = nullptr;
-thread_local uintptr_t t_tls_values[kTlsSlots];
+DSR_FAST_TLS thread_local HostThread* t_current = nullptr;
+DSR_FAST_TLS thread_local uintptr_t t_tls_values[kTlsSlots];
 
 struct TlsSlotInfo {
     bool used = false;
