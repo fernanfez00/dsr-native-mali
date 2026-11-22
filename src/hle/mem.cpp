@@ -5,6 +5,9 @@
 #include <cstring>
 #include <mutex>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include "common/log.h"
 #include "hle/registry.h"
 
@@ -118,11 +121,25 @@ struct Heap {
         return reinterpret_cast<uint8_t*>(b) + kHdr;
     }
 
+    // A big block that was freed (loading buffers, decompression scratch) stays resident in the game's heap until
+    // it is allocated again, and on a phone that memory is what gets swapped out. Its whole pages go back to the OS
+    // (they read as zeros when the block is reused). The first 32 bytes keep the header and free-list links; the
+    // header of the next block lies past the end of the range.
+    static void Discard(Block* b, size_t sz) {
+        constexpr size_t kDiscardMin = size_t(1) << 20;  // smaller blocks are reused too often to be worth a syscall
+        if (sz < kDiscardMin) return;
+        static const uintptr_t page = uintptr_t(sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096);
+        const uintptr_t lo = (reinterpret_cast<uintptr_t>(b) + kMinBlock + page - 1) & ~(page - 1);
+        const uintptr_t hi = (reinterpret_cast<uintptr_t>(b) + sz) & ~(page - 1);
+        if (hi > lo) madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_DONTNEED);
+    }
+
     void Free(void* p) {
         if (!p) return;
         std::lock_guard<std::mutex> lk(m);
         auto* b = reinterpret_cast<Block*>(static_cast<uint8_t*>(p) - kHdr);
         size_t sz = b->size();
+        Discard(b, sz);  // only the block being freed: neighbours that were free were discarded when they were freed
         bool prev_used = b->prev_used();
         Block* n = Next(b);
         if (!n->used()) {
