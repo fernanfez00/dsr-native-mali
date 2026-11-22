@@ -480,6 +480,8 @@ public final class SettingsMenu {
                 "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        choice("geo_cache_mb", Strings.t("geo_t"), Strings.t("geo_n") + " " + Strings.t("changes_next"),
+                new String[] {"192", "128", "96", "64"}, new String[] {"192 MB", "128 MB", "96 MB", "64 MB"}, "192");
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------

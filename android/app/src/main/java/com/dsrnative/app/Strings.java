@@ -457,6 +457,15 @@ final class Strings {
                 "Non disegna gli oggetti che negli ultimi fotogrammi non hanno coperto alcun pixel (ritentati ogni pochi fotogrammi). Più veloce sulle GPU deboli; un oggetto che entra in vista può comparire con qualche fotogramma di ritardo.",
                 "No dibuja los objetos que no cubrieron ningún píxel en los últimos fotogramas (se reintentan cada pocos fotogramas). Más rápido en GPU modestas; un objeto que entra en vista puede aparecer con unos fotogramas de retraso.",
                 "Não desenha objetos que não cobriram nenhum pixel nos últimos quadros (testados de novo a cada poucos quadros). Mais rápido em GPUs fracas; um objeto que entra em vista pode aparecer com alguns quadros de atraso.");
+        put("geo_t", "Geometry cache", "Cache de géométrie", "Geometrie-Cache", "Cache della geometria",
+                "Caché de geometría", "Cache de geometria");
+        put("geo_n",
+                "Memory for the level's vertex data kept on the GPU. Smaller uses less RAM, but it fills up sooner and is emptied and refilled with a short stall each time.",
+                "Mémoire pour les données de sommets du niveau gardées sur le GPU. Plus petit = moins de RAM, mais le cache se remplit plus vite et est vidé puis rechargé, avec une courte saccade à chaque fois.",
+                "Speicher für die auf der GPU gehaltenen Vertexdaten des Levels. Kleiner braucht weniger RAM, füllt sich aber früher und wird dann geleert und neu gefüllt, mit einem kurzen Ruckler.",
+                "Memoria per i dati dei vertici del livello tenuti sulla GPU. Più piccola usa meno RAM, ma si riempie prima e viene svuotata e riempita di nuovo, con una breve pausa ogni volta.",
+                "Memoria para los datos de vértices del nivel que se guardan en la GPU. Más pequeña usa menos RAM, pero se llena antes y se vacía y rellena con un pequeño tirón cada vez.",
+                "Memória para os dados de vértices do nível mantidos na GPU. Menor usa menos RAM, mas enche mais cedo e é esvaziada e preenchida de novo, com uma pequena pausa a cada vez.");
         put("aniso_0", "Game's own", "Celui du jeu", "Wie im Spiel", "Quello del gioco", "El del juego", "O do jogo");
         put("aniso_off", "Off", "Désactivé", "Aus", "Disattivato", "Desactivado", "Desativado");
         put("mip_t", "Texture mip skip", "Saut de mip des textures", "Textur-Mip überspringen", "Salto mip delle texture",
