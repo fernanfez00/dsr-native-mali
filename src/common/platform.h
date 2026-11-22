@@ -27,6 +27,10 @@ bool TakeText(bool* ok, std::u16string* text);
 // On chips with fewer than 4 fast cores only `essential` threads (the game's main thread) are pinned; the others
 // are given all CPUs (dropping a pin inherited from the thread that created them).
 void PreferFastCores(const char* who, bool essential = false);
+// Moves the calling thread to the efficiency cores (every CPU that PreferFastCores does not use), for threads that
+// burn CPU polling (clock spin loops) and would otherwise compete with the frame/executor threads for the two fast
+// cores. Once per thread; no-op when the chip has one kind of core or fast_cores is off.
+void PreferSlowCores(const char* who);
 // Lets the calling thread run on every CPU (background workers created by pinned threads inherit their pin).
 void UseAllCores();
 // On chips with fewer than 4 fast cores: drops a fast-core pin inherited from the creating thread (game threads).

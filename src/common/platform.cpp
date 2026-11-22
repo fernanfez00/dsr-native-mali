@@ -267,6 +267,27 @@ void PreferFastCores(const char* who, bool essential) {
     (void)essential;
 #endif
 }
+void PreferSlowCores(const char* who) {
+#if defined(__ANDROID__)
+    thread_local bool done = false;
+    if (done) return;
+    done = true;
+    if (!dsr::GetRuntime().config.fast_cores) return;
+    const FastCores& fc = GetFastCores();
+    if (fc.count <= 0) return;
+    cpu_set_t slow;
+    CPU_ZERO(&slow);
+    const long n = sysconf(_SC_NPROCESSORS_CONF);
+    for (long c = 0; c < n && c < CPU_SETSIZE; c++)
+        if (!CPU_ISSET(c, &fc.set)) CPU_SET(c, &slow);
+    if (CPU_COUNT(&slow) == 0) return;
+    const int r = sched_setaffinity(0, sizeof(slow), &slow);
+    LOGI("platform", "%s moved to the efficiency cores (%d CPUs): %s", who, CPU_COUNT(&slow),
+         r == 0 ? "ok" : "refused");
+#else
+    (void)who;
+#endif
+}
 namespace {
 std::mutex g_pause_mutex;
 std::condition_variable g_pause_cv;
