@@ -308,77 +308,6 @@ void EnginePanic(const char* file, int line, const char* fmt, ...) {
           (unsigned long)GuestOffset(__builtin_return_address(0)));
 }
 
-// ---- aspect ratio: camera aspect (experimental) --------------------------------------------------------------
-// With a wider or narrower render resolution the 3D view still came out stretched: the camera that renders the
-// scene keeps a 16:9 aspect ratio. Cameras keep {fov, aspect, near, far} at +0x50..+0x5c (main+0xfa7f4 reads
-// fov and aspect for the view frustum). This scans the guest heap and the game's data for such blocks with a
-// 16:9 aspect, logs them (with the owner's vtable, to find the code that sets it) and writes the wanted aspect
-// into them, again every second (rescanning every 2 s until cameras are found, then every 10 s). While nothing is
-// found the pause between scans doubles (2, 4, 8 ... up to 30 s): a scan walks the whole guest heap (1-1.6 s on a
-// phone), and repeating it every 2-3 s kept ~30 % of a core busy for the whole session (log of 2026-11-19).
-float g_aspect = 0;
-void CameraAspectThread() {
-    pthread_setname_np(pthread_self(), "dsr-aspect");
-    setpriority(PRIO_PROCESS, 0, 10);  // a background scan must not compete with the game and render threads
-    const loader::Module& m = GetRuntime().main;
-    int empty_pause = 2;  // seconds between scans while no camera has been found (doubles up to 30)
-    std::vector<float*> found;
-    int scans = 0;
-    auto plausible = [](const float* a) {  // a = &aspect: fov before it, near and far after
-        const float fov = a[-1], nearz = a[1], farz = a[2];
-        return fov > 0.2f && fov < 2.5f && nearz > 0.001f && nearz < 50.0f && farz > nearz && farz < 1e6f;
-    };
-    for (;;) {
-        const auto scan_start = std::chrono::steady_clock::now();
-        // Scan: 16:9 exactly (0x3FE38E39) at a 4-byte boundary.
-        uintptr_t hb = 0;
-        size_t hs = 0;
-        hle::os::GuestHeapRange(&hb, &hs);
-        std::vector<std::pair<uintptr_t, size_t>> ranges;
-        if (hb && hs) ranges.push_back({hb, hs});
-        const loader::NsoImage& nso = GetRuntime().main_nso;  // .data + .bss
-        const size_t data = nso.data.mem_offset, data_size = size_t(nso.data.size) + nso.bss_size;
-        if (data && m.size() > data) ranges.push_back({m.base() + data, std::min<size_t>(m.size() - data, data_size)});
-        int new_found = 0;
-        for (const auto& [base, size] : ranges) {
-            const uint32_t* p = reinterpret_cast<const uint32_t*>(base + 4);
-            const uint32_t* end = reinterpret_cast<const uint32_t*>(base + size - 12);
-            for (; p < end; p++) {
-                if (*p != 0x3FE38E39u) continue;
-                float* a = reinterpret_cast<float*>(const_cast<uint32_t*>(p));
-                if (!plausible(a)) continue;
-                if (std::find(found.begin(), found.end(), a) != found.end()) continue;
-                found.push_back(a);
-                new_found++;
-                const uintptr_t obj = reinterpret_cast<uintptr_t>(a) - 0x54;
-                uintptr_t vt = 0;
-                if ((obj & 7) == 0) memcpy(&vt, reinterpret_cast<const void*>(obj), 8);
-                if (found.size() <= 40)
-                    LOGI("hooks", "camera aspect: 16:9 at %p (fov %.3f near %.3f far %.1f), object vtable %s0x%lx", a,
-                         a[-1], a[1], a[2], m.Contains(vt) ? "main+" : "", (unsigned long)(m.Contains(vt) ? vt - m.base() : vt));
-            }
-        }
-        scans++;
-        const double scan_ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scan_start).count();
-        if (new_found || scans <= 3 || scans % 60 == 0)
-            LOGI("hooks", "camera aspect: scan %d (%.0f ms): %d new 16:9 cameras, %zu in all; setting them to %.3f", scans,
-                 scan_ms, new_found, found.size(), g_aspect);
-        int rewrites = 10;  // 10 s between scans once cameras are known
-        if (found.empty()) {
-            rewrites = empty_pause;
-            empty_pause = std::min(empty_pause * 2, 30);
-        } else {
-            empty_pause = 2;
-        }
-        for (int k = 0; k < rewrites; k++) {
-            for (float* a : found)
-                if (*a > 1.7777f && *a < 1.7779f && plausible(a)) *a = g_aspect;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-    }
-}
-
 struct Hook {
     uint64_t offset;
     void* fn;
@@ -531,10 +460,8 @@ void InstallGameHooks() {
             if (ok) {
                 LOGI("hooks", "aspect ratio %s (%.3f), render scale %.2f: the game renders at %dx%d (was 1280x720)",
                      ar_ok ? rt.config.aspect_ratio.c_str() : "16:9", ar, scale, width, height);
-                g_aspect = float(width) / float(height);
                 rt.config.render_width = width;
                 rt.config.render_height = height;
-                if (std::fabs(g_aspect - 16.0f / 9.0f) > 0.01f) std::thread(CameraAspectThread).detach();
             } else {
                 LOGW("hooks", "resolution patch failed: %s", err.c_str());
             }
