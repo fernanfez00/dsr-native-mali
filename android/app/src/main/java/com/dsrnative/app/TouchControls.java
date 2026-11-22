@@ -159,7 +159,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
             }
             sView.setAlpha(Math.max(0.1f, Math.min(1.0f, opacity)));
             sView.mCameraSpeed = Math.max(0.1f, Math.min(10f, cameraSpeed));
-            sView.invalidate();
+            sView.redraw();
         });
     }
 
@@ -167,7 +167,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
     public static void releaseForMenu() {
         if (sView != null) {
             sView.releaseAll();
-            sView.invalidate();
+            sView.redraw();
         }
     }
 
@@ -229,9 +229,11 @@ public final class TouchControls extends View implements InputManager.InputDevic
     private long mRLastFrameNs;
     private static final float REST_START_S = 0.012f, REST_RAMP_S = 0.045f;  // stillness before / to full slide
     private static final float RECENTER_TIME_S = 0.06f;  // time constant of the slide at full strength
+    private boolean mRecenterPosted;
     private final android.view.Choreographer.FrameCallback mRecenter = new android.view.Choreographer.FrameCallback() {
         @Override
         public void doFrame(long frameNs) {
+            mRecenterPosted = false;
             if (mRStickPointer < 0) return;
             float dt = mRLastFrameNs == 0 ? 0.016f : Math.min(0.05f, (frameNs - mRLastFrameNs) / 1e9f);
             mRLastFrameNs = frameNs;
@@ -248,11 +250,19 @@ public final class TouchControls extends View implements InputManager.InputDevic
                     mRBaseY = mRY;
                 }
                 sendState();
-                invalidate();
+                invalidateIfChanged();
             }
-            android.view.Choreographer.getInstance().postFrameCallback(this);
+            // Keep running only while the base has to catch up with the thumb (move() starts it again): a thumb
+            // resting at the centre no longer wakes the UI thread on every display frame.
+            if (sRecenter && (mRX != mRBaseX || mRY != mRBaseY)) postRecenter();
         }
     };
+
+    private void postRecenter() {
+        if (mRecenterPosted) return;
+        mRecenterPosted = true;
+        android.view.Choreographer.getInstance().postFrameCallback(mRecenter);
+    }
     private float mCameraSpeed;
 
     // Double tap (to show the controls again).
@@ -308,7 +318,10 @@ public final class TouchControls extends View implements InputManager.InputDevic
                 WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        // A window added with addView is drawn in software unless it asks for this: the whole
+                        // screen was repainted on the UI thread (CPU) at every touch event.
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                 PixelFormat.TRANSLUCENT);
         lp.token = decor.getWindowToken();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
@@ -318,6 +331,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
             if (mEditTemp) return;  // only for the layout editor
             sView = this;
             nativeVisible(mShown);
+            mSentValid = false;
         } catch (Exception e) {
             android.util.Log.w("DSRNative", "touch controls: could not add the overlay", e);
         }
@@ -360,7 +374,8 @@ public final class TouchControls extends View implements InputManager.InputDevic
         mShown = shown;
         releaseAll();
         nativeVisible(shown);
-        invalidate();
+        mSentValid = false;  // nativeVisible reset the native side
+        redraw();
     }
 
     private void releaseAll() {
@@ -398,7 +413,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
 
     private void relayout() {
         if (getWidth() > 0 && getHeight() > 0) layout(getWidth(), getHeight());
-        invalidate();
+        redraw();
     }
 
     private float mU, mW, mH;
@@ -671,7 +686,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
             default:
                 break;
         }
-        invalidate();
+        redraw();
     }
 
     private void drawEditor(Canvas c) {
@@ -753,7 +768,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
                 break;
         }
         sendState();
-        invalidate();
+        invalidateIfChanged();
         return true;
     }
 
@@ -807,7 +822,8 @@ public final class TouchControls extends View implements InputManager.InputDevic
             mRLastMove = android.os.SystemClock.uptimeMillis();
             mRLastFrameNs = 0;
             android.view.Choreographer.getInstance().removeFrameCallback(mRecenter);
-            android.view.Choreographer.getInstance().postFrameCallback(mRecenter);
+            mRecenterPosted = false;
+            postRecenter();
         } else {
             mKind[id] = K_NONE;
         }
@@ -820,6 +836,8 @@ public final class TouchControls extends View implements InputManager.InputDevic
 
     private void move(int id, float x, float y) {
         if (id < 0 || id >= 16) return;
+        // A MOVE event reports every finger, most of them where they were: nothing changes for those.
+        if (x == mLastX[id] && y == mLastY[id]) return;
         switch (mKind[id]) {
             case K_BUTTON: {  // slide between buttons (e.g. across the face buttons)
                 Button b = hit(x, y);
@@ -835,7 +853,13 @@ public final class TouchControls extends View implements InputManager.InputDevic
                 mStickY = y;
                 break;
             case K_RSTICK: {
-                if (x != mRX || y != mRY) mRLastMove = android.os.SystemClock.uptimeMillis();
+                if (x != mRX || y != mRY) {
+                    mRLastMove = android.os.SystemClock.uptimeMillis();
+                    if (!mRecenterPosted) {  // the slide had stopped: it starts again after the thumb rests
+                        mRLastFrameNs = 0;
+                        postRecenter();
+                    }
+                }
                 mRX = x;
                 mRY = y;
                 float dx = x - mRBaseX, dy = y - mRBaseY, len = (float) Math.sqrt(dx * dx + dy * dy);
@@ -859,6 +883,47 @@ public final class TouchControls extends View implements InputManager.InputDevic
         if (mKind[id] == K_RSTICK) mRStickPointer = -1;
         mKind[id] = K_NONE;
         mOn[id] = null;
+    }
+
+    // What native code was last told (nativeState is skipped when nothing changed: a MOVE event arrives at up to
+    // several hundred Hz and every call takes a JNI crossing and the input mutex the game polls with).
+    private boolean mSentValid;
+    private int mSentBits;
+    private float mSentLx, mSentLy, mSentRx, mSentRy;
+    // What the last redraw request showed: a redraw is only asked for when something drawn has changed.
+    private int mDrawBits;
+    private boolean mDrawStick, mDrawR;
+    private float mDrawStickX, mDrawStickY, mDrawRBaseX, mDrawRBaseY, mDrawRX, mDrawRY;
+
+    private int pressedBits() {
+        int bits = 0;
+        for (Button b : mButtons)
+            if (b.pressCount > 0) bits |= b.bit;
+        return bits;
+    }
+
+    /** Full redraw (layout, visibility, opacity, editor): also records what is being shown. */
+    private void redraw() {
+        mDrawBits = pressedBits();
+        mDrawStick = mStickPointer >= 0;
+        mDrawStickX = mStickX;
+        mDrawStickY = mStickY;
+        mDrawR = mRStickPointer >= 0;
+        mDrawRBaseX = mRBaseX;
+        mDrawRBaseY = mRBaseY;
+        mDrawRX = mRX;
+        mDrawRY = mRY;
+        invalidate();
+    }
+
+    /** Redraws only when a button, the stick or the camera stick looks different from the last redraw. */
+    private void invalidateIfChanged() {
+        final boolean stick = mStickPointer >= 0, r = mRStickPointer >= 0;
+        final boolean changed = pressedBits() != mDrawBits
+                || stick != mDrawStick || (stick && (mStickX != mDrawStickX || mStickY != mDrawStickY))
+                || r != mDrawR || (r && (mRBaseX != mDrawRBaseX || mRBaseY != mDrawRBaseY
+                        || mRX != mDrawRX || mRY != mDrawRY));
+        if (changed) redraw();
     }
 
     private void sendState() {
@@ -885,6 +950,14 @@ public final class TouchControls extends View implements InputManager.InputDevic
             ry = Math.max(-1f, Math.min(1f, -(mRY - mRBaseY) / reach));
             if (Math.abs(rx) < 0.06f && Math.abs(ry) < 0.06f) rx = ry = 0;
         }
+        if (mSentValid && bits == mSentBits && lx == mSentLx && ly == mSentLy && rx == mSentRx && ry == mSentRy)
+            return;
+        mSentValid = true;
+        mSentBits = bits;
+        mSentLx = lx;
+        mSentLy = ly;
+        mSentRx = rx;
+        mSentRy = ry;
         nativeState(bits, lx, ly, rx, ry);
     }
 
