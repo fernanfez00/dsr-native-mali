@@ -7782,6 +7782,36 @@ private:
     // file (or named region), and the largest anonymous regions with their addresses (the guest heap and the Vulkan
     // host memory show up there). Tells which part of the memory the kernel takes back and the game then faults in again.
     void LogMappings() {
+        {
+            // /proc/self/smaps_rollup: the kernel's own totals over all mappings. Rss split by who owns the pages
+            // (private or shared, clean or dirty) and Pss by kind (anonymous, file, shared memory): a resident file
+            // total that no file mapping explains shows up here as Shared_Clean or Pss_File.
+            static const char* const kKeys[] = {"Rss",           "Pss",           "Pss_Anon",      "Pss_File",    "Pss_Shmem",
+                                                "Shared_Clean",  "Shared_Dirty",  "Private_Clean", "Private_Dirty", "Anonymous",
+                                                "Swap",          "SwapPss"};
+            constexpr size_t kN = sizeof(kKeys) / sizeof(kKeys[0]);
+            long v[kN];
+            for (long& x : v) x = -1;
+            if (FILE* rf = fopen("/proc/self/smaps_rollup", "r")) {
+                char line[160];
+                while (fgets(line, sizeof line, rf)) {
+                    char key[48];
+                    long kb;
+                    if (sscanf(line, "%47[^:]: %ld kB", key, &kb) == 2)
+                        for (size_t i = 0; i < kN; i++)
+                            if (!strcmp(key, kKeys[i])) v[i] = kb;
+                }
+                fclose(rf);
+            }
+            std::string roll = "smaps rollup (MB):";
+            bool any_roll = false;
+            for (size_t i = 0; i < kN; i++)
+                if (v[i] >= 0) {
+                    roll += std::string(any_roll ? "," : "") + " " + kKeys[i] + " " + std::to_string(v[i] / 1024);
+                    any_roll = true;
+                }
+            LOGI(kTag, "%s", any_roll ? roll.c_str() : "smaps rollup: not readable");
+        }
         FILE* f = fopen("/proc/self/smaps", "r");
         if (!f) return;
         struct Region {
