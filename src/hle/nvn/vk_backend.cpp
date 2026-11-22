@@ -7789,6 +7789,14 @@ private:
             long rss_kb = 0, swap_kb = 0;
         };
         std::map<std::string, std::pair<long, long>> named;  // name -> (rss kB, swap kB)
+        struct DirTotal {
+            long rss_kb = 0, swap_kb = 0;
+            int mappings = 0;
+            std::string biggest;  // the largest file in the folder, by resident size
+            long biggest_kb = 0;
+        };
+        std::map<std::string, DirTotal> dirs;  // folder of each file mapping -> totals (many small files add up)
+        std::string cur_path;
         std::vector<Region> anon;
         char line[1024];
         std::string cur;
@@ -7801,6 +7809,25 @@ private:
                 auto& e = named[cur];
                 e.first += r.rss_kb;
                 e.second += r.swap_kb;
+                if (!cur_path.empty() && cur_path[0] == '/') {
+                    std::string dir = cur_path;
+                    if (dir.find("memfd:") != std::string::npos || dir.compare(0, 5, "/dev/") == 0) {
+                        // memfd and device mappings: the name itself is the group
+                        const size_t sp = dir.find(" (deleted)");
+                        if (sp != std::string::npos) dir.resize(sp);
+                    } else {
+                        const size_t slash = dir.rfind('/');
+                        dir = slash == 0 ? "/" : dir.substr(0, slash);
+                    }
+                    DirTotal& d = dirs[dir];
+                    d.rss_kb += r.rss_kb;
+                    d.swap_kb += r.swap_kb;
+                    d.mappings++;
+                    if (r.rss_kb > d.biggest_kb) {
+                        d.biggest_kb = r.rss_kb;
+                        d.biggest = cur;
+                    }
+                }
             }
             r = Region();
         };
@@ -7815,6 +7842,7 @@ private:
                 r.start = a;
                 r.end = b;
                 cur_anon = path.empty() || path == "[anon]";
+                cur_path = path;
                 if (!cur_anon) {
                     const size_t slash = path.rfind('/');
                     cur = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -7836,6 +7864,25 @@ private:
         std::string out = "mappings (files and named regions >= 8 MB):";
         for (size_t i = 0; i < top.size() && i < 8; i++) out += (i ? "; " : " ") + top[i].second;
         LOGI(kTag, "%s", out.c_str());
+        {
+            // File mappings by folder: many small files add up where no single file reaches 8 MB. Shows where the
+            // resident file memory (RssFile) comes from: the game's data, the app's libraries, the GPU driver, ...
+            std::vector<std::pair<long, std::string>> by_dir;
+            long total_rss = 0, total_swap = 0;
+            for (auto& [dir, d] : dirs) {
+                total_rss += d.rss_kb;
+                total_swap += d.swap_kb;
+                by_dir.push_back({d.rss_kb, dir + " " + std::to_string(d.rss_kb / 1024) + " MB resident, " +
+                                                std::to_string(d.swap_kb / 1024) + " MB swapped, " + std::to_string(d.mappings) +
+                                                " mappings (largest: " + d.biggest + " " + std::to_string(d.biggest_kb / 1024) +
+                                                " MB)"});
+            }
+            std::sort(by_dir.begin(), by_dir.end(), [](auto& x, auto& y) { return x.first > y.first; });
+            std::string line = "file mappings by folder: " + std::to_string(total_rss / 1024) + " MB resident, " +
+                               std::to_string(total_swap / 1024) + " MB swapped in all;";
+            for (size_t i = 0; i < by_dir.size() && i < 6; i++) line += (i ? "; " : " ") + by_dir[i].second;
+            LOGI(kTag, "%s", line.c_str());
+        }
         std::sort(anon.begin(), anon.end(), [](const Region& x, const Region& y) { return x.rss_kb + x.swap_kb > y.rss_kb + y.swap_kb; });
         long anon_rss = 0, anon_swap = 0;
         for (const Region& x : anon) {
