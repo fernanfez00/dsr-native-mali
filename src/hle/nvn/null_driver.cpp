@@ -482,6 +482,62 @@ uint64_t WindowTexturePresentSeq(const void* window, int index) {
     return it == g_present_seqs.end() ? 0 : it->second;
 }
 
+// Where the busiest threads run: a sampler reads the CPU each of them was last on every 200 ms and counts how often
+// that was a fast core, to see who shares the two fast cores with the frame and executor threads.
+namespace {
+std::mutex g_cpu_mutex;
+struct CpuCount {
+    std::string name;
+    int fast = 0, slow = 0;
+};
+std::map<int, CpuCount> g_cpu_counts;  // tid -> counts since the last report
+int LastCpuOf(int tid, std::string* name) {
+    char path[64], buf[1024];
+    snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    const size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char* open = strchr(buf, '(');
+    const char* close = strrchr(buf, ')');
+    if (!open || !close || close < open) return -1;
+    if (name) *name = std::string(open + 1, size_t(close - open - 1));
+    const char* p = close + 1;  // " S ppid ...": the processor is field 39 of the line, the 37th after the name
+    for (int field = 3; field < 39 && *p; field++) {
+        p = strchr(p + 1, ' ');
+        if (!p) return -1;
+    }
+    return p ? atoi(p + 1) : -1;
+}
+void StartCpuSampler() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread([] {
+            pthread_setname_np(pthread_self(), "dsr-cpusample");
+            dsr::platform::PreferSlowCores("cpu sampler");
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                std::vector<int> tids;
+                {
+                    std::lock_guard<std::mutex> lk(g_cpu_mutex);
+                    for (auto& kv : g_cpu_counts) tids.push_back(kv.first);
+                }
+                for (int tid : tids) {
+                    std::string name;
+                    const int cpu = LastCpuOf(tid, &name);
+                    if (cpu < 0) continue;
+                    std::lock_guard<std::mutex> lk(g_cpu_mutex);
+                    auto it = g_cpu_counts.find(tid);
+                    if (it == g_cpu_counts.end()) continue;
+                    (dsr::platform::IsFastCpu(cpu) ? it->second.fast : it->second.slow)++;
+                }
+            }
+        }).detach();
+    });
+}
+}  // namespace
+
 // Every 10 s: the CPU load of each thread of the process (100% = one core), from /proc, to see which thread limits the
 // frame (the game's own logic thread, the render thread, the recorder, the decoders...).
 static void LogThreadLoad(double wall_s) {
@@ -530,6 +586,23 @@ static void LogThreadLoad(double wall_s) {
         out += one;
     }
     LOGI(kTag, "thread load (last %.0f s, 100%% = one core, total %.0f%%): %s", wall_s, sum, out.c_str());
+    // Which of those threads sat on the fast cores (share of the 200 ms samples), then watch the current top ones.
+    {
+        std::lock_guard<std::mutex> lk(g_cpu_mutex);
+        std::string cpus;
+        for (auto& kv : g_cpu_counts) {
+            const int total = kv.second.fast + kv.second.slow;
+            if (total < 5) continue;
+            char one[96];
+            snprintf(one, sizeof one, "%s%s %d%%", cpus.empty() ? "" : ", ", kv.second.name.c_str(),
+                     100 * kv.second.fast / total);
+            cpus += one;
+        }
+        if (!cpus.empty()) LOGI(kTag, "thread placement (share of samples on the fast cores): %s", cpus.c_str());
+        g_cpu_counts.clear();
+        for (size_t i = 0; i < rows.size() && i < 10; i++) g_cpu_counts[rows[i].tid].name = rows[i].name;
+    }
+    StartCpuSampler();
 }
 
 void QueuePresentTexture(void* queue, void* window, int index) {

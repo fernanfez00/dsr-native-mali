@@ -156,7 +156,10 @@ void Append(void* cb, Cmd&& c) {
 
 // ---- recording ------------------------------------------------------------------------------------------
 void BeginRecording(void* cb) {
-    dsr::platform::PreferFastCores("game command recording thread");  // the game's MTR_* workers
+    if (dsr::GetRuntime().config.slow_recorders)
+        dsr::platform::PreferSlowCores("game command recording thread");  // the game's MTR_* workers
+    else
+        dsr::platform::PreferFastCores("game command recording thread");
     Recorder& r = RecorderOf(cb);
     r.recording = true;
     r.cmds.clear();
