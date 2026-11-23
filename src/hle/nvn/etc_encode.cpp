@@ -227,7 +227,7 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
 
             int codes[16] = {}, tables[2] = {0, 0}, errs[2] = {0, 0};
             int err = 0;
-            for (int pass = 0; pass < 3; pass++) {
+            for (int pass = 0; pass < 2; pass++) {
                 int base_rgb[2][3];
                 for (int s = 0; s < 2; s++)
                     for (int c = 0; c < 3; c++)
@@ -239,8 +239,9 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
                 }
                 const bool improved = err < best_err;
                 consider(flip, diff != 0, base_code, tables, codes, err);
-                // Blocks that are already (almost) exact are not worth refining: smooth areas are the bulk of a texture.
-                if (pass == 2 || err <= 16 * 8 || (!improved && pass > 0)) break;
+                // One refinement round, and only for blocks that are not already (almost) exact: smooth areas are the bulk
+                // of a texture, and the conversion time is how long a texture is drawn white (see PumpBcUploads).
+                if (pass == 1 || err <= 16 * 25 || !improved) break;
 
                 // Least-squares refinement: the base that makes the chosen modifiers fit the texels best (the mean of
                 // texel - modifier), requantised; then the tables and indices are solved again.
@@ -352,23 +353,39 @@ void EncodeEacBlock(uint8_t* out, const uint8_t a[16]) {
         return;
     }
     const int range = hi - lo;
-    // Every table, multipliers around the one whose span covers the range, bases around the centred one; then a
-    // finer pass on the winner.
-    int bt = 0, bm = 1, bb = lo, be = 1 << 30;
+    // Pass 1: every table with the multiplier whose span just covers the range and the centred base (16 tries).
+    // Pass 2: only the three best tables get the neighbouring multipliers and bases. Pass 3: a fine pass on the
+    // winner. About half the tries of searching every table in full, for the same result in practice: the
+    // conversion of a big BC3 texture is mostly this search, and until it is done the texture is drawn white.
+    struct Cand {
+        int err, t, m, b0;
+    } top[3] = {{1 << 30, 0, 1, lo}, {1 << 30, 0, 1, lo}, {1 << 30, 0, 1, lo}};
     for (int t = 0; t < 16; t++) {
         const int tmin = *std::min_element(kEacMods[t], kEacMods[t] + 8);
         const int tmax = *std::max_element(kEacMods[t], kEacMods[t] + 8);
-        const int span = tmax - tmin;
-        const int m0 = (range + span - 1) / span;
-        for (int m = m0; m <= m0 + 1; m++) {
-            if (m < 1 || m > 15) continue;
-            const int b0 = ClampByte(int((lo + hi) * 0.5 - m * (tmin + tmax) * 0.5 + 0.5));
+        const int m0 = std::clamp((range + (tmax - tmin) - 1) / (tmax - tmin), 1, 15);
+        const int b0 = ClampByte(int((lo + hi) * 0.5 - m0 * (tmin + tmax) * 0.5 + 0.5));
+        const int e = EacTry(a, t, m0, b0, idx, top[2].err);
+        if (e >= top[2].err) continue;
+        Cand c{e, t, m0, b0};
+        for (int k = 0; k < 3; k++)
+            if (c.err < top[k].err) std::swap(c, top[k]);
+    }
+    int bt = top[0].t, bm = top[0].m, bb = top[0].b0, be = top[0].err;
+    for (const Cand& c : top) {
+        if (c.err == (1 << 30)) continue;
+        const int tmin = *std::min_element(kEacMods[c.t], kEacMods[c.t] + 8);
+        const int tmax = *std::max_element(kEacMods[c.t], kEacMods[c.t] + 8);
+        for (int m = c.m; m <= c.m + 1; m++) {
+            if (m > 15) continue;
+            const int b0 = m == c.m ? c.b0 : ClampByte(int((lo + hi) * 0.5 - m * (tmin + tmax) * 0.5 + 0.5));
             for (int db = -2; db <= 2; db += 2) {
+                if (m == c.m && db == 0) continue;  // evaluated in pass 1
                 const int b = ClampByte(b0 + db);
-                const int e = EacTry(a, t, m, b, idx, be);
+                const int e = EacTry(a, c.t, m, b, idx, be);
                 if (e < be) {
                     be = e;
-                    bt = t;
+                    bt = c.t;
                     bm = m;
                     bb = b;
                 }
