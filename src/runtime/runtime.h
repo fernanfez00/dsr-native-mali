@@ -63,7 +63,8 @@ struct RuntimeConfig {
     // GPU filling a screen-sized image each frame.
     bool compositor_scaling = true;
     // GPUs without BC textures (Mali; Adreno 6xx without BCeNabler): BC1 textures are re-encoded as ETC2 (same size
-    // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2).
+    // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2 = 1, the default; menu switch
+    // "Compress BC1 textures (ETC2)"). bc_etc2 = 0 decodes BC1 to RGBA8. It only governs BC1: BC3 follows bc3_mode.
     bool bc_etc2 = true;
     // bc3_mode: what BC3 textures (colour + alpha) become on those GPUs.
     //   0 = auto: ASTC when bc_astc is on, else ETC2 RGBA8 (EAC alpha + ETC2 colour: 8 bits per texel, 4x smaller than
