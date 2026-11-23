@@ -1,6 +1,7 @@
 #include "hle/nvn/etc_encode.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -132,6 +133,49 @@ uint64_t PackCodes(uint64_t v, const int codes[16]) {
     return v;
 }
 
+// Best 4-bit (individual) or 5-bit (differential) code whose expanded value is nearest to `target` (0..255).
+inline int NearestCode(int target, bool diff) {
+    const int maxc = diff ? 31 : 15;
+    int c = (target * maxc + 127) / 255;
+    int best = c, best_d = 1 << 30;
+    for (int k = std::max(0, c - 1); k <= std::min(maxc, c + 1); k++) {
+        const int d = std::abs((diff ? Expand5(k) : Expand4(k)) - target);
+        if (d < best_d) {
+            best_d = d;
+            best = k;
+        }
+    }
+    return best;
+}
+
+// Differential mode: the second subblock's 5-bit base may differ from the first's by -4..3 per channel. When the two
+// wanted bases are further apart, BOTH move towards each other (the error is shared, not dumped on subblock 1).
+// Returns true when no change was needed.
+bool FitDelta(int c0[3], int c1[3]) {
+    bool fits = true;
+    for (int c = 0; c < 3; c++) {
+        const int d = c1[c] - c0[c];
+        if (d >= -4 && d <= 3) continue;
+        fits = false;
+        const int sum = c0[c] + c1[c];
+        int a = d > 3 ? (sum - 3) / 2 : (sum + 4) / 2;  // first base, so that the delta becomes 3 / -4
+        int b = d > 3 ? a + 3 : a - 4;
+        const int shift = b < 0 ? -b : (b > 31 ? 31 - b : 0);
+        a += shift;
+        b += shift;
+        if (a < 0 || a > 31) {  // a base fell off the range (colours at the very ends): keep both in range
+            const int s2 = a < 0 ? -a : 31 - a;
+            a += s2;
+            b += s2;
+        }
+        c0[c] = std::clamp(a, 0, 31);
+        c1[c] = std::clamp(b, 0, 31);
+        if (c1[c] - c0[c] < -4) c1[c] = c0[c] - 4;
+        if (c1[c] - c0[c] > 3) c1[c] = c0[c] + 3;
+    }
+    return fits;
+}
+
 // One block as a 64-bit word. punch = the RGB8A1 format (differential mode only, bit 33 = opaque).
 uint64_t EncodeBlock(const Texel t[16], bool punch) {
     bool any_transparent = false;
@@ -140,55 +184,86 @@ uint64_t EncodeBlock(const Texel t[16], bool punch) {
 
     uint64_t best_word = 0;
     int best_err = std::numeric_limits<int>::max();
+
+    // Packs and keeps the candidate when it beats the best so far.
+    auto consider = [&](int flip, bool diff, const int base_code[2][3], const int tables[2], const int codes[16], int err) {
+        if (err >= best_err) return;
+        best_err = err;
+        uint64_t v = 0;
+        if (diff) {
+            for (int c = 0; c < 3; c++) {
+                v |= uint64_t(base_code[0][c]) << (59 - 8 * c);
+                v |= uint64_t((base_code[1][c] - base_code[0][c]) & 7) << (56 - 8 * c);
+            }
+            // Bit 33: "diff" in RGB8; "opaque" in RGB8A1 (clear when the block has transparent pixels).
+            if (!punch || mode == Mode::Normal) v |= uint64_t(1) << 33;
+        } else {
+            for (int c = 0; c < 3; c++) {
+                v |= uint64_t(base_code[0][c]) << (60 - 8 * c);
+                v |= uint64_t(base_code[1][c]) << (56 - 8 * c);
+            }
+        }
+        if (flip) v |= uint64_t(1) << 32;
+        v |= uint64_t(tables[0]) << 37;
+        v |= uint64_t(tables[1]) << 34;
+        best_word = PackCodes(v, codes);
+    };
+
     for (int flip = 0; flip < 2; flip++) {
         // Differential first: 5-bit bases. Plain RGB8 also tries individual mode (4-bit bases) when the two
         // subblocks' colours are too far apart for the 3-bit delta; RGB8A1 has no individual mode, so there the
-        // second base is brought within reach of the first.
+        // bases are brought within reach of each other.
         for (int diff = 1; diff >= 0; diff--) {
             if (!diff && punch) break;
-            int base_code[2][3], base_rgb[2][3];
-            bool fits = true;
+            int base_code[2][3];
             for (int s = 0; s < 2; s++) {
                 int avg[3];
                 SubblockAverage(t, flip, s, avg);
-                for (int c = 0; c < 3; c++)
-                    base_code[s][c] = diff ? std::min(31, (avg[c] * 31 + 127) / 255) : std::min(15, (avg[c] + 8) / 17);
+                for (int c = 0; c < 3; c++) base_code[s][c] = NearestCode(avg[c], diff);
             }
-            if (diff)
-                for (int c = 0; c < 3; c++) {
-                    const int d = base_code[1][c] - base_code[0][c];
-                    if (d < -4 || d > 3) {
-                        fits = false;
-                        base_code[1][c] = base_code[0][c] + std::clamp(d, -4, 3);
-                    }
-                }
+            bool fits = true;
+            if (diff) fits = FitDelta(base_code[0], base_code[1]);
             if (diff && !fits && !punch) continue;  // RGB8: individual mode instead
-            for (int s = 0; s < 2; s++)
-                for (int c = 0; c < 3; c++)
-                    base_rgb[s][c] = diff ? Expand5(base_code[s][c]) : Expand4(base_code[s][c]);
 
-            int codes[16] = {}, tables[2] = {0, 0}, err = 0;
-            for (int s = 0; s < 2; s++) err += SolveSubblock(t, flip, s, base_rgb[s], mode, codes, &tables[s]);
-            if (err < best_err) {
-                best_err = err;
-                uint64_t v = 0;
-                if (diff) {
-                    for (int c = 0; c < 3; c++) {
-                        v |= uint64_t(base_code[0][c]) << (59 - 8 * c);
-                        v |= uint64_t((base_code[1][c] - base_code[0][c]) & 7) << (56 - 8 * c);
+            int codes[16] = {}, tables[2] = {0, 0}, errs[2] = {0, 0};
+            int err = 0;
+            for (int pass = 0; pass < 3; pass++) {
+                int base_rgb[2][3];
+                for (int s = 0; s < 2; s++)
+                    for (int c = 0; c < 3; c++)
+                        base_rgb[s][c] = diff ? Expand5(base_code[s][c]) : Expand4(base_code[s][c]);
+                err = 0;
+                for (int s = 0; s < 2; s++) {
+                    errs[s] = SolveSubblock(t, flip, s, base_rgb[s], mode, codes, &tables[s]);
+                    err += errs[s];
+                }
+                const bool improved = err < best_err;
+                consider(flip, diff != 0, base_code, tables, codes, err);
+                // Blocks that are already (almost) exact are not worth refining: smooth areas are the bulk of a texture.
+                if (pass == 2 || err <= 16 * 8 || (!improved && pass > 0)) break;
+
+                // Least-squares refinement: the base that makes the chosen modifiers fit the texels best (the mean of
+                // texel - modifier), requantised; then the tables and indices are solved again.
+                int next[2][3];
+                for (int s = 0; s < 2; s++) {
+                    int sum[3] = {0, 0, 0}, n = 0;
+                    for (int i = 0; i < 16; i++) {
+                        if (!InSubblock(i, flip, s) || t[i].transparent) continue;
+                        const int m = Modifier(tables[s], codes[i], mode);
+                        for (int c = 0; c < 3; c++) sum[c] += t[i].rgb[c] - m;
+                        n++;
                     }
-                    // Bit 33: "diff" in RGB8; "opaque" in RGB8A1 (clear when the block has transparent pixels).
-                    if (!punch || mode == Mode::Normal) v |= uint64_t(1) << 33;
-                } else {
                     for (int c = 0; c < 3; c++) {
-                        v |= uint64_t(base_code[0][c]) << (60 - 8 * c);
-                        v |= uint64_t(base_code[1][c]) << (56 - 8 * c);
+                        const int target = n ? std::clamp((sum[c] + (sum[c] >= 0 ? n / 2 : -n / 2)) / n, 0, 255) : 0;
+                        next[s][c] = NearestCode(target, diff);
                     }
                 }
-                if (flip) v |= uint64_t(1) << 32;
-                v |= uint64_t(tables[0]) << 37;
-                v |= uint64_t(tables[1]) << 34;
-                best_word = PackCodes(v, codes);
+                if (diff) FitDelta(next[0], next[1]);
+                bool same = true;
+                for (int s = 0; s < 2; s++)
+                    for (int c = 0; c < 3; c++) same &= next[s][c] == base_code[s][c];
+                if (same) break;
+                std::memcpy(base_code, next, sizeof(next));
             }
             if (diff && fits) break;  // differential fits: individual mode would only be coarser
         }

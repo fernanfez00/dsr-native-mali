@@ -2435,10 +2435,15 @@ private:
             vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, BcTo::Astc), &p);
             if ((p.optimalTilingFeatures & need) == need) return BcTo::Astc;
         }
-        if (!features_.textureCompressionETC2 || !c.bc_etc2) return BcTo::Decoded;
+        if (!features_.textureCompressionETC2) return BcTo::Decoded;
+        // bc_etc2 is the BC1 switch (off: BC1 decoded to RGBA8); BC3 is governed by bc3_mode alone, so BC3 can stay
+        // on ETC2 with BC1 off, and the other way round.
         BcTo to = BcTo::Decoded;
-        if (IsEtcEncodable(nvn_format)) to = BcTo::Etc2;
-        else if (is_bc3) to = BcTo::Etc2Rgba8;  // bc3_mode 0 / 1 (2 returned above)
+        if (IsEtcEncodable(nvn_format)) {
+            if (c.bc_etc2) to = BcTo::Etc2;
+        } else if (is_bc3) {
+            to = BcTo::Etc2Rgba8;  // bc3_mode 0 / 1 (2 returned above)
+        }
         if (to == BcTo::Decoded) return to;
         VkFormatProperties p;
         vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, to), &p);
