@@ -343,6 +343,14 @@ final class Strings {
                 "Mali처럼 게임의 텍스처 형식이 없거나 타일 방식으로 그리는 GPU용입니다. 테스트할 때가 아니면 끄세요.",
                 "适用于 Mali 等缺少游戏纹理格式或以分块方式绘制的 GPU。除测试外请保持关闭。",
                 "適用於 Mali 等缺少遊戲紋理格式或以分塊方式繪製的 GPU。除測試外請保持關閉。");
+        put("bc1_t", "Compress BC1 textures (ETC2)", "Compresser les textures BC1 (ETC2)", "BC1-Texturen komprimieren (ETC2)",
+                "Comprimi texture BC1 (ETC2)", "Comprimir texturas BC1 (ETC2)", "Comprimir texturas BC1 (ETC2)");
+        put("bc1_n", "BC1 textures stay compressed as ETC2 (same size as BC1, 4x less memory than RGBA8; slightly lossy). Off: decoded to RGBA8 (uncompressed, exact colours).",
+                "Les textures BC1 restent compressées en ETC2 (même taille que le BC1, 4x moins de mémoire que le RGBA8 ; légère perte). Désactivé : décodées en RGBA8 (non compressé, couleurs exactes).",
+                "BC1-Texturen bleiben als ETC2 komprimiert (gleiche Größe wie BC1, 4x weniger Speicher als RGBA8; leicht verlustbehaftet). Aus: als RGBA8 dekodiert (unkomprimiert, exakte Farben).",
+                "Le texture BC1 restano compresse in ETC2 (stessa dimensione del BC1, 4x meno memoria dell'RGBA8; leggera perdita). Disattivato: decodificate in RGBA8 (non compresso, colori esatti).",
+                "Las texturas BC1 se mantienen comprimidas en ETC2 (mismo tamaño que BC1, 4x menos memoria que RGBA8; con una ligera pérdida). Desactivado: se decodifican a RGBA8 (sin comprimir, colores exactos).",
+                "As texturas BC1 ficam comprimidas em ETC2 (mesmo tamanho que o BC1, 4x menos memória que o RGBA8; com ligeira perda). Desativado: decodificadas em RGBA8 (sem compressão, cores exatas).");
         put("bc3_t", "Compress BC3 textures (ETC2)", "Compresser les textures BC3 (ETC2)", "BC3-Texturen komprimieren (ETC2)",
                 "Comprimi texture BC3 (ETC2)", "Comprimir texturas BC3 (ETC2)", "Comprimir texturas BC3 (ETC2)",
                 "Сжимать текстуры BC3 (ETC2)", "BC3 テクスチャを圧縮 (ETC2)", "BC3 텍스처 압축 (ETC2)", "压缩 BC3 纹理 (ETC2)",

@@ -472,6 +472,8 @@ public final class SettingsMenu {
         note(Strings.t("gpu_n"));
         // bc3_mode: 0 auto (ASTC if on, else ETC2), 1 ETC2 always, 2 RGBA8. Files from before it carry bc3_etc2 = 1.
         final String bc3Default = !mValues.containsKey("bc3_mode") && "1".equals(mValues.get("bc3_etc2")) ? "1" : "0";
+        // bc_etc2: BC1 textures re-encoded as ETC2 (on by default; off = decoded to RGBA8, 4x the memory).
+        toggle("bc_etc2", Strings.t("bc1_t"), Strings.t("bc1_n") + " " + Strings.t("changes_next"), "1", "0", "1");
         choice("bc3_mode", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("bc3_n2") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2"},
                 new String[] {Strings.t("bc3_auto"), Strings.t("bc3_etc2"), Strings.t("bc3_rgba")}, bc3Default);
