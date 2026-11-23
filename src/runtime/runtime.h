@@ -107,7 +107,8 @@ struct RuntimeConfig {
     // scale_filter: how the picture is enlarged to the screen. 0 = nearest (sharp pixels), 1 = bilinear (default)
     int scale_filter = 1;
     // upscaler: how the 3D picture is enlarged to the HUD image (needs hud_full_res and a render scale under ~83%):
-    // 0 = the plain scale_filter blit, 1 = FSR 1 EASU, 2 = EASU + RCAS sharpening (fsr_sharpness 0..100 %).
+    // 0 = the plain scale_filter blit, 1 = FSR 1 EASU, 2 = EASU + RCAS sharpening (fsr_sharpness 0..100 %),
+    // 3 = Arm ASR style: EASU + temporal accumulation (no motion vectors: it ghosts) + RCAS.
     int upscaler = 0;
     // skip_fs: fragment-program hashes (hex, separated by commas) whose draws are left out, e.g. a bloom chain (see
     // the "capture pass" lines of a frame capture for the hashes). Their targets are cleared to zero instead.
