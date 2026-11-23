@@ -1,6 +1,7 @@
 // Self-contained tests for the loader and HLE runtime (no game files needed).
 // Portable tests run everywhere; ABI tests (x18 handling, thunks, setjmp) run only on arm64.
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -621,6 +622,54 @@ static void TestEtcEncode() {
     CHECK(once);
 }
 
+// Faces: smooth skin gradients with sharp dark features (eyes, brows, lips) in the same 4x4 blocks. The encoder shares the
+// differential-mode delta between both subblocks and refines the bases, so a dark edge no longer drags one half of a block
+// to a wrong colour: PSNR stays above 39.1 dB and no texel is more than 58 levels off (the old encoder: 38.3 dB, 63).
+static void TestEtcSkin() {
+    using namespace dsr::hle::nvn;
+    const int W = 128, H = 128, bxn = W / 4, byn = H / 4;
+    std::vector<uint8_t> img(size_t(W) * H * 4);
+    uint32_t seed = 3;
+    auto rnd = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const double u = x / double(W), v = y / double(H);
+            double r = 205 - 60 * (u - 0.5) * (u - 0.5) * 4 - 25 * v, g = 150 - 45 * (u - 0.5) * (u - 0.5) * 4 - 30 * v,
+                   b = 120 - 35 * v - 20 * (u - 0.5) * (u - 0.5) * 4;
+            const double n = (int(rnd() % 9) - 4) * 0.5;
+            r += n, g += n * 0.8, b += n * 0.7;
+            for (int e = 0; e < 2; e++) {
+                const double cx = e ? 0.68 : 0.32, d = std::sqrt((u - cx) * (u - cx) * 4 + (v - 0.38) * (v - 0.38) * 16);
+                if (d < 0.12) r = 30, g = 22, b = 20;
+            }
+            if (std::fabs(v - 0.72) < 0.02 && u > 0.35 && u < 0.65) r = 150, g = 50, b = 55;
+            uint8_t* p = &img[(size_t(y) * W + x) * 4];
+            p[0] = uint8_t(std::clamp(r, 0.0, 255.0)), p[1] = uint8_t(std::clamp(g, 0.0, 255.0));
+            p[2] = uint8_t(std::clamp(b, 0.0, 255.0)), p[3] = 255;
+        }
+    for (int punch = 0; punch < 2; punch++) {  // RGB8 (BC1 without alpha, BC3 colour) and RGB8A1 (BC1 with alpha)
+        std::vector<uint8_t> out(EtcLevelBytes(W, H, 1));
+        EncodeEtc2Rgb(out.data(), img.data(), W, H, 1, punch != 0);
+        double se = 0;
+        int max_err = 0;
+        for (int by = 0; by < byn; by++)
+            for (int bx = 0; bx < bxn; bx++) {
+                uint8_t d[16][4];
+                DecodeEtc2RgbBlock(&out[(size_t(by) * bxn + bx) * 8], punch != 0, d);
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++)
+                        for (int c = 0; c < 3; c++) {
+                            const int e = int(d[y * 4 + x][c]) - img[(size_t(by * 4 + y) * W + bx * 4 + x) * 4 + c];
+                            se += double(e) * e;
+                            max_err = std::max(max_err, std::abs(e));
+                        }
+            }
+        const double mse = se / (double(W) * H * 3);
+        CHECK(10 * std::log10(255.0 * 255.0 / mse) > 39.1);
+        CHECK(max_err <= 58);
+    }
+}
+
 // BC3 -> ETC2 RGBA8 (settings bc3_mode 0 / 1): a BC3 image goes through the real path (BcDecode, then EncodeEtc2Rgba8)
 // and decodes back close to it: the EAC alpha within a few levels (smooth and cut-out alpha), the colour close.
 static void TestBc3ToEtc2() {
@@ -923,6 +972,7 @@ int main() {
         {"shader_translator", TestShaderTranslator},
         {"block_linear", TestBlockLinear},
         {"etc_encode", TestEtcEncode},
+        {"etc_skin", TestEtcSkin},
         {"bc3_etc2", TestBc3ToEtc2},
         {"astc_encode", TestAstcEncode},
         {"astc_block_sizes", TestAstcBlockSizes},
