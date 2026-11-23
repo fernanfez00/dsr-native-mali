@@ -553,6 +553,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_post_extra")) cfg->skip_post_extra = value;
             else if (!strcmp(key, "skip_white")) cfg->skip_white = value;
             else if (!strcmp(key, "skip_post_plus")) cfg->skip_post_plus = v != 0;
+            else if (!strcmp(key, "skip_geometry")) cfg->skip_geometry = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 3);
