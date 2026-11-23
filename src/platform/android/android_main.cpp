@@ -624,7 +624,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         if (!have_fxaa)
             if (FILE* w = fopen(path.c_str(), "a")) {
                 fputs("\n# fxaa: 0 = off, 1 = FXAA 3.11 fast (light: for Mali GPUs), 2 = FXAA 3.11 quality. Smooths the 3D picture's\n"
-                      "# edges at the game's render size, before it is enlarged. Needs hud_full_res = 1\n"
+                      "# edges at the game's render size, before it is enlarged. Works without hud_full_res\n"
                       "fxaa = 0\n"
                       "# hud_max_height: 0 = the picture and HUD at the screen's size; 720 / 540 = at most that many lines tall,\n"
                       "# stretched to the screen by Android (fewer pixels for FSR and the HUD on a weak GPU such as a Mali-G57)\n"
@@ -635,7 +635,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
         if (!have_hud_full_res)
             if (FILE* w = fopen(path.c_str(), "a")) {
                 fputs("\n# hud_full_res: 1 = the game's HUD, menus and text are drawn at the screen's full resolution\n"
-                      "# (sharp text at any render_scale); 0 = drawn in the game's own (smaller) frame\n"
+                      "# (sharp text at any render_scale); 0 = drawn in the game's own (smaller) frame. Upscaler and FXAA turn it on\n"
+                      "# by themselves, so they work with 0 too\n"
                       "hud_full_res = 1\n", w);
                 fclose(w);
                 LOGI(kTag, "settings: added hud_full_res to %s", path.c_str());
@@ -1086,6 +1087,32 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         now = true;
     } else if (key == "min_fps") {  // the lowest rate fps = auto may use; read by the limiter every frame
         c.min_fps = std::clamp(atoi(value.c_str()), 15, 30);
+        now = true;
+    } else if (key == "skip_bloom" || key == "skip_post" || key == "skip_post_plus") {  // lists made again
+        const bool on = atoi(value.c_str()) != 0;
+        if (key == "skip_bloom") c.skip_bloom = on;
+        else if (key == "skip_post") c.skip_post = on;
+        else c.skip_post_plus = on;
+        dsr::BumpSkipGeneration();
+        now = true;
+    } else if (key == "bc_etc2") {  // the next texture upload reads these: textures loaded from now on
+        c.bc_etc2 = atoi(value.c_str()) != 0;
+        now = true;
+    } else if (key == "bc_astc") {
+        c.bc_astc = atoi(value.c_str()) != 0;
+        now = true;
+    } else if (key == "bc5_astc") {
+        c.bc5_astc = atoi(value.c_str()) != 0;
+        now = true;
+    } else if (key == "bc3_mode") {
+        c.bc3_mode = std::clamp(atoi(value.c_str()), 0, 2);
+        now = true;
+    } else if (key == "astc_block") {
+        const int v = atoi(value.c_str());
+        c.astc_block = (v == 6 || v == 8) ? v : 4;
+        now = true;
+    } else if (key == "texture_mip_skip") {
+        c.texture_mip_skip = std::clamp(atoi(value.c_str()), 0, 1);
         now = true;
     } else if (key == "exposure") {
         const float e = float(atof(value.c_str()));
