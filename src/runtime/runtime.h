@@ -63,10 +63,15 @@ struct RuntimeConfig {
     // GPU filling a screen-sized image each frame.
     bool compositor_scaling = true;
     // GPUs without BC textures (Mali; Adreno 6xx without BCeNabler): BC1 textures are re-encoded as ETC2 (same size
-    // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2); BC3 too with bc3_etc2
-    // (4x smaller than RGBA8, but lossier: off by default).
+    // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2).
     bool bc_etc2 = true;
-    bool bc3_etc2 = false;
+    // bc3_mode: what BC3 textures (colour + alpha) become on those GPUs.
+    //   0 = auto: ASTC when bc_astc is on, else ETC2 RGBA8 (EAC alpha + ETC2 colour: 8 bits per texel, 4x smaller than
+    //       RGBA8). Never RGBA8 while the GPU can take ETC2 or ASTC.
+    //   1 = ETC2 RGBA8 always, even with bc_astc on (BC1 keeps going to ASTC).
+    //   2 = decoded to RGBA8 (the original look, 32 bits per texel).
+    // The old settings.txt key bc3_etc2 = 1 still means mode 1.
+    int bc3_mode = 0;
     // bc_astc = 1: BC1 and BC3 textures are re-encoded as ASTC 4x4 instead (GPUs with ASTC LDR: all Mali). 8 bits per
     // texel: twice the size of BC1 as ETC2, the same as BC3; BC1 stays close to the source and alpha is native.
     bool bc_astc = false;
