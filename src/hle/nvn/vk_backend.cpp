@@ -2720,7 +2720,8 @@ private:
             }
         }
         // texture_mip_skip: big BC textures (the game's art; never drawn into) without their most detailed level.
-        if (mip_skip_ && BcKindOf(t.tex.format) != BcKind::None && img.levels >= 2 && t.tex.width >= 512 &&
+        if (dsr::GetRuntime().config.texture_mip_skip > 0 && BcKindOf(t.tex.format) != BcKind::None &&
+            img.levels >= 2 && t.tex.width >= 512 &&
             t.tex.height >= 512 && t.tex.target != kTarget3D && t.tex.target != kTarget1D &&
             t.tex.target != kTarget1DArray) {
             img.mip_skip = 1;
@@ -5480,7 +5481,7 @@ private:
         // post-processing chain is a large part of the frame. A draw whose fragment program is in the list is not
         // drawn; the target it would have written is cleared to zero (once, until some other draw writes it) so that
         // what samples it later (the tone mapping adding the bloom) reads black instead of whatever the memory held.
-        if (!skip_parsed_) ParseSkipList();
+        if (!skip_parsed_ || skip_gen_seen_ != dsr::SkipGeneration()) ParseSkipList();  // again after a menu change
         // The 3D world's target size (a colour target drawn with a depth buffer): skip_post passes are only left out
         // on targets at most half that area, never on the full-size passes that make up the picture itself.
         // Targets bigger than the game's presented frame are not the world (a 1024x1024 colour target drawn with a depth
@@ -8289,7 +8290,10 @@ private:
     void HudUpdateSize(const Image& f) {
         int w = 0, h = 0;
         const dsr::RuntimeConfig& cfg = dsr::GetRuntime().config;
-        if (cfg.hud_full_res && win_w_ > 0 && win_h_ > 0 && f.width > 0 && f.height > 0) {
+        // The screen-sized image is also what the upscaler (settings upscaler 1-3) and FXAA work in, so they turn it on
+        // by themselves: they need no hud_full_res. (hud_full_res alone still gives the sharp HUD without an upscaler.)
+        const bool postfx = cfg.upscaler > 0 || cfg.fxaa > 0;
+        if ((cfg.hud_full_res || postfx) && win_w_ > 0 && win_h_ > 0 && f.width > 0 && f.height > 0) {
             double k = std::min(double(win_w_) / f.width, double(win_h_) / f.height);
             // hud_max_height: the picture (and the HUD on it) is at most this many lines tall; the system compositor
             // enlarges it to the screen. Fewer pixels for FSR, the HUD and the final pass on a weak GPU (Mali).
@@ -8297,7 +8301,7 @@ private:
                 k = std::max(1.0, double(cfg.hud_max_height) / f.height);
             // FXAA (settings fxaa) runs in the HUD path, so it is also used when the screen is barely bigger than the
             // frame (a 720p phone at the game's own size); without it only from 1.2x on.
-            if (k >= (cfg.fxaa > 0 ? 1.0 : 1.2)) {
+            if (k >= (postfx ? 1.0 : 1.2)) {
                 w = int(std::lround(f.width * k));
                 h = int(std::lround(f.height * k));
             }
@@ -9107,8 +9111,13 @@ private:
     uint64_t world_max_area_ = 0;  // biggest colour target drawn together with a depth buffer (the 3D world)
     uint64_t game_frame_area_ = 0;  // pixels of the frame the game presents (the world is never bigger)
     uint64_t skipped_draws_ = 0;
+    unsigned skip_gen_seen_ = 0;  // dsr::SkipGeneration() the lists below were made for (the menu changes it)
     void ParseSkipList() {
         skip_parsed_ = true;
+        skip_gen_seen_ = dsr::SkipGeneration();
+        skip_fs_.clear();
+        skip_post_.clear();
+        skip_white_.clear();
         // skip_bloom (settings): the glow chain of the post-processing (from a frame capture on a Mali-G57: a bright
         // pass and the blurs at 192x108 / 96x54 that feed the final composite). The downsample shared with the depth
         // of field (8801d1d8f9f8273b) is left alone.
