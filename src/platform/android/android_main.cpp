@@ -446,6 +446,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     } else {
         bool have_present_mode = false, have_face_buttons = false, have_gpu_driver = false, have_bc_enabler = false;
         bool have_touch = false, have_aspect = false, have_hud_full_res = false, have_fxaa = false;
+        bool have_bc3_mode = false, legacy_bc3_etc2 = false;
         int settings_version = 1;
         char line[2048];  // (skip_fs / skip_post_extra list many 16-digit hashes: a line longer than the buffer was cut)
         while (fgets(line, sizeof(line), f)) {
@@ -493,7 +494,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 else LOGW(kTag, "settings: unknown language '%s': using %s", value, cfg->language.c_str());
             }
             else if (!strcmp(key, "bc_etc2")) cfg->bc_etc2 = v != 0;
-            else if (!strcmp(key, "bc3_etc2")) cfg->bc3_etc2 = v != 0;
+            else if (!strcmp(key, "bc3_mode")) {
+                cfg->bc3_mode = std::clamp(v, 0, 2);
+                have_bc3_mode = true;
+            } else if (!strcmp(key, "bc3_etc2")) legacy_bc3_etc2 = v != 0;  // old key: 1 = ETC2 always
             else if (!strcmp(key, "bc_astc")) cfg->bc_astc = v != 0;
             else if (!strcmp(key, "astc_block")) cfg->astc_block = (v == 6 || v == 8) ? v : 4;
             else if (!strcmp(key, "bc5_astc")) cfg->bc5_astc = v != 0;
@@ -567,6 +571,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             }
         }
         fclose(f);
+        if (!have_bc3_mode && legacy_bc3_etc2) cfg->bc3_mode = 1;  // settings.txt from before bc3_mode: bc3_etc2 = 1
         // Version 2: the presentation default changed from mailbox to fifo. Files from before carry the old default
         // (written by the app), so `present_mode = mailbox` there becomes fifo, once; a choice made later is kept.
         if (settings_version < 2) {
@@ -663,9 +668,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d, skip_prepass %d",
          int(cfg->hud_full_res), cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden),
          int(cfg->skip_prepass));
-    LOGI(kTag, "settings: astc_block %d, bc_astc %d, bc5_astc %d, bc3_etc2 %d, skip_bloom %d, fxaa %d, upscaler %d, fsr_sharpness %d, "
+    LOGI(kTag, "settings: astc_block %d, bc_astc %d, bc5_astc %d, bc3_mode %d, skip_bloom %d, fxaa %d, upscaler %d, fsr_sharpness %d, "
          "hud_max_height %d, max_anisotropy %d, fps %d%s",
-         cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), int(cfg->bc3_etc2), int(cfg->skip_bloom), cfg->fxaa,
+         cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), cfg->bc3_mode, int(cfg->skip_bloom), cfg->fxaa,
          cfg->upscaler, cfg->fsr_sharpness, cfg->hud_max_height, cfg->max_anisotropy, cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "");
     if (cfg->skip_post) LOGI(kTag, "settings: skip_post on");
     if (cfg->skip_post_plus) LOGI(kTag, "settings: skip_post_plus on");
