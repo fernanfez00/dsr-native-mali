@@ -555,7 +555,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "skip_post_plus")) cfg->skip_post_plus = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
-            else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "upscaler")) cfg->upscaler = std::clamp(v, 0, 3);
             else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "fxaa")) {
                 cfg->fxaa = std::clamp(v, 0, 2);
@@ -1063,7 +1063,7 @@ jboolean JNICALL MenuApply(JNIEnv* env, jclass, jstring jkey, jstring jvalue) {
         c.scale_filter = std::clamp(atoi(value.c_str()), 0, 1);
         now = true;
     } else if (key == "upscaler") {  // read when the HUD image is started, every frame
-        c.upscaler = std::clamp(atoi(value.c_str()), 0, 2);
+        c.upscaler = std::clamp(atoi(value.c_str()), 0, 3);
         now = true;
     } else if (key == "fsr_sharpness") {
         c.fsr_sharpness = std::clamp(atoi(value.c_str()), 0, 100);
