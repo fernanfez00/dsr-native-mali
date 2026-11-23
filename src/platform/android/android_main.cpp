@@ -668,9 +668,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     LOGI(kTag, "settings: hud_full_res %d, shadow_quality %d, low_effects %d, skip_hidden %d, skip_prepass %d",
          int(cfg->hud_full_res), cfg->shadow_quality, int(cfg->low_effects), int(cfg->skip_hidden),
          int(cfg->skip_prepass));
-    LOGI(kTag, "settings: astc_block %d, bc_astc %d, bc5_astc %d, bc3_mode %d, skip_bloom %d, fxaa %d, upscaler %d, fsr_sharpness %d, "
-         "hud_max_height %d, max_anisotropy %d, fps %d%s",
-         cfg->astc_block, int(cfg->bc_astc), int(cfg->bc5_astc), cfg->bc3_mode, int(cfg->skip_bloom), cfg->fxaa,
+    LOGI(kTag, "settings: astc_block %d, bc_etc2 %d, bc_astc %d, bc5_astc %d, bc3_mode %d, skip_bloom %d, fxaa %d, upscaler %d, "
+         "fsr_sharpness %d, hud_max_height %d, max_anisotropy %d, fps %d%s",
+         cfg->astc_block, int(cfg->bc_etc2), int(cfg->bc_astc), int(cfg->bc5_astc), cfg->bc3_mode, int(cfg->skip_bloom), cfg->fxaa,
          cfg->upscaler, cfg->fsr_sharpness, cfg->hud_max_height, cfg->max_anisotropy, cfg->target_fps, cfg->dynamic_fps ? " (auto)" : "");
     if (cfg->skip_post) LOGI(kTag, "settings: skip_post on");
     if (cfg->skip_post_plus) LOGI(kTag, "settings: skip_post_plus on");
