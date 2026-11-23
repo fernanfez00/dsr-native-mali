@@ -87,6 +87,55 @@ final class Strings {
         put("changes_now", "Changes at once.", "S'applique immédiatement.", "Wirkt sofort.", "Si applica subito.",
                 "Se aplica al instante.", "Aplica na hora.", "Применяется сразу.", "すぐに反映されます。", "즉시 적용됩니다.",
                 "立即生效。", "立即生效。");
+        put("changes_new_tex", "Applies to textures loaded from now on.", "S'applique aux textures chargées à partir de maintenant.",
+                "Gilt für ab jetzt geladene Texturen.", "Vale per le texture caricate da ora.",
+                "Se aplica a las texturas que se carguen desde ahora.", "Aplica às texturas carregadas a partir de agora.",
+                "Применяется к текстурам, загружаемым с этого момента.", "今後読み込まれるテクスチャに反映されます。",
+                "지금부터 불러오는 텍스처에 적용됩니다.", "对此后加载的纹理生效。", "對此後載入的紋理生效。");
+        put("close_btn", "Close the game", "Fermer le jeu", "Spiel beenden", "Chiudi il gioco", "Cerrar el juego",
+                "Fechar o jogo", "Закрыть игру", "ゲームを終了", "게임 종료", "关闭游戏", "關閉遊戲");
+        put("close_t", "Close the game?", "Fermer le jeu ?", "Spiel beenden?", "Chiudere il gioco?", "¿Cerrar el juego?",
+                "Fechar o jogo?", "Закрыть игру?", "ゲームを終了しますか？", "게임을 종료할까요?", "关闭游戏？", "關閉遊戲？");
+        put("close_msg", "The game closes. Progress since your last save is lost.",
+                "Le jeu se ferme. La progression depuis votre dernière sauvegarde sera perdue.",
+                "Das Spiel wird beendet. Fortschritt seit dem letzten Speichern geht verloren.",
+                "Il gioco si chiude. I progressi dall'ultimo salvataggio andranno persi.",
+                "El juego se cierra. Se pierde el progreso desde tu último guardado.",
+                "O jogo fecha. O progresso desde o último salvamento será perdido.",
+                "Игра закроется. Прогресс после последнего сохранения будет потерян.",
+                "ゲームを終了します。最後のセーブ以降の進行は失われます。",
+                "게임이 종료됩니다. 마지막 저장 이후의 진행 상황은 사라집니다.",
+                "游戏将关闭。上次存档之后的进度会丢失。", "遊戲將關閉。上次存檔之後的進度會遺失。");
+        put("restart_now", "Restart now", "Redémarrer", "Jetzt neu starten", "Riavvia ora", "Reiniciar ahora",
+                "Reiniciar agora", "Перезапустить", "今すぐ再起動", "지금 다시 시작", "立即重启", "立即重啟");
+        put("restart_btn", "Apply and restart the game", "Appliquer et redémarrer le jeu",
+                "Übernehmen und Spiel neu starten", "Applica e riavvia il gioco", "Aplicar y reiniciar el juego",
+                "Aplicar e reiniciar o jogo", "Применить и перезапустить игру", "適用してゲームを再起動",
+                "적용하고 게임 다시 시작", "应用并重启游戏", "套用並重啟遊戲");
+        put("restart_t", "Restart the game?", "Redémarrer le jeu ?", "Spiel neu starten?", "Riavviare il gioco?",
+                "¿Reiniciar el juego?", "Reiniciar o jogo?", "Перезапустить игру?", "ゲームを再起動しますか？",
+                "게임을 다시 시작할까요?", "重启游戏？", "重啟遊戲？");
+        put("restart_msg", "The game closes and opens again with the new settings. Progress since your last save is lost.",
+                "Le jeu se ferme puis se rouvre avec les nouveaux réglages. La progression depuis votre dernière sauvegarde sera perdue.",
+                "Das Spiel schließt sich und startet mit den neuen Einstellungen neu. Fortschritt seit dem letzten Speichern geht verloren.",
+                "Il gioco si chiude e si riapre con le nuove impostazioni. I progressi dall'ultimo salvataggio andranno persi.",
+                "El juego se cierra y se abre de nuevo con los ajustes nuevos. Se pierde el progreso desde tu último guardado.",
+                "O jogo fecha e abre de novo com as novas configurações. O progresso desde o último salvamento será perdido.",
+                "Игра закроется и откроется снова с новыми настройками. Прогресс после последнего сохранения будет потерян.",
+                "ゲームを閉じて新しい設定で開き直します。最後のセーブ以降の進行は失われます。",
+                "게임이 종료된 뒤 새 설정으로 다시 열립니다. 마지막 저장 이후의 진행 상황은 사라집니다.",
+                "游戏将关闭并以新设置重新打开。上次存档之后的进度会丢失。",
+                "遊戲將關閉並以新設定重新開啟。上次存檔之後的進度會遺失。");
+        put("restart_fail", "Could not restart the game. Close it and open it again.",
+                "Impossible de redémarrer le jeu. Fermez-le et rouvrez-le.",
+                "Neustart nicht möglich. Schließe das Spiel und öffne es erneut.",
+                "Impossibile riavviare il gioco. Chiudilo e riaprilo.",
+                "No se pudo reiniciar el juego. Ciérralo y ábrelo de nuevo.",
+                "Não foi possível reiniciar o jogo. Feche e abra de novo.",
+                "Не удалось перезапустить игру. Закройте её и откройте снова.",
+                "ゲームを再起動できませんでした。いったん閉じて開き直してください。",
+                "게임을 다시 시작하지 못했습니다. 종료 후 다시 여세요.", "无法重启游戏。请关闭后重新打开。",
+                "無法重啟遊戲。請關閉後重新開啟。");
         put("changes_next", "Changes at the next start.", "S'applique au prochain lancement.",
                 "Wirkt beim nächsten Start.", "Si applica al prossimo avvio.", "Se aplica en el próximo inicio.",
                 "Aplica no próximo início.", "Применяется при следующем запуске.", "次回起動時に反映されます。",

@@ -456,9 +456,9 @@ public final class SettingsMenu {
                 new String[] {Strings.t("q_high"), Strings.t("q_medium"), Strings.t("q_low"), Strings.t("q_off")}, "3");
         toggle("low_effects", Strings.t("loweff_t"), Strings.t("loweff_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
-        toggle("skip_bloom", Strings.t("bloom_t"), Strings.t("bloom_n") + " " + Strings.t("changes_next"), "1", "0", "0");
-        toggle("skip_post", Strings.t("post_t"), Strings.t("post_n") + " " + Strings.t("changes_next"), "1", "0", "0");
-        toggle("skip_post_plus", Strings.t("postplus_t"), Strings.t("postplus_n") + " " + Strings.t("changes_next"), "1", "0",
+        toggle("skip_bloom", Strings.t("bloom_t"), Strings.t("bloom_n") + " " + Strings.t("changes_now"), "1", "0", "0");
+        toggle("skip_post", Strings.t("post_t"), Strings.t("post_n") + " " + Strings.t("changes_now"), "1", "0", "0");
+        toggle("skip_post_plus", Strings.t("postplus_t"), Strings.t("postplus_n") + " " + Strings.t("changes_now"), "1", "0",
                 "0");
         choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_now"),
                 new String[] {"0", "1", "2", "3"},
@@ -473,21 +473,31 @@ public final class SettingsMenu {
         // bc3_mode: 0 auto (ASTC if on, else ETC2), 1 ETC2 always, 2 RGBA8. Files from before it carry bc3_etc2 = 1.
         final String bc3Default = !mValues.containsKey("bc3_mode") && "1".equals(mValues.get("bc3_etc2")) ? "1" : "0";
         // bc_etc2: BC1 textures re-encoded as ETC2 (on by default; off = decoded to RGBA8, 4x the memory).
-        toggle("bc_etc2", Strings.t("bc1_t"), Strings.t("bc1_n") + " " + Strings.t("changes_next"), "1", "0", "1");
-        choice("bc3_mode", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("bc3_n2") + " " + Strings.t("changes_next"),
+        toggle("bc_etc2", Strings.t("bc1_t"), Strings.t("bc1_n") + " " + Strings.t("changes_new_tex"), "1", "0", "1");
+        choice("bc3_mode", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("bc3_n2") + " " + Strings.t("changes_new_tex"),
                 new String[] {"0", "1", "2"},
                 new String[] {Strings.t("bc3_auto"), Strings.t("bc3_etc2"), Strings.t("bc3_rgba")}, bc3Default);
-        toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
-        choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_next"),
+        toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_new_tex"), "1", "0", "0");
+        choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_new_tex"),
                 new String[] {"4", "6", "8"},
                 new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
-        toggle("bc5_astc", Strings.t("bc5_t"), Strings.t("bc5_n") + " " + Strings.t("changes_next"), "1", "0", "0");
-        toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
+        toggle("bc5_astc", Strings.t("bc5_t"), Strings.t("bc5_n") + " " + Strings.t("changes_new_tex"), "1", "0", "0");
+        toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_new_tex"), "1", "0",
                 "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         choice("geo_cache_mb", Strings.t("geo_t"), Strings.t("geo_n") + " " + Strings.t("changes_next"),
                 new String[] {"192", "128", "96", "64"}, new String[] {"192 MB", "128 MB", "96 MB", "64 MB"}, "192");
+
+        // What says "next start" (render scale, aspect ratio, shadows, effects ...) takes effect after this restart.
+        TextView again = chip(Strings.t("restart_btn"), false);
+        again.setGravity(Gravity.CENTER);
+        again.setOnClickListener(v -> confirmRestart());
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.topMargin = dp(18);
+        mBody.addView(again, alp);
+        addCloseButton(8);
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
@@ -599,6 +609,7 @@ public final class SettingsMenu {
     private void buildSettingsTab() {
         section(Strings.t("sec_game"));
         toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
+        addCloseButton(8);
 
         section(Strings.t("sec_controls"));
         toggle("face_buttons", Strings.t("swap_t"), Strings.t("swap_n") + " " + Strings.t("changes_now"),
@@ -732,7 +743,7 @@ public final class SettingsMenu {
                 }
                 mValues.put("render_scale", v);
                 if (tell)
-                    popup(title, Strings.t("next_start", title));
+                    popupRestart(title, Strings.t("next_start", title));
                 else
                     Toast.makeText(mA, Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
             }
@@ -1139,7 +1150,7 @@ public final class SettingsMenu {
         if (now)
             Toast.makeText(mA, Strings.t("applied", title), Toast.LENGTH_SHORT).show();
         else
-            popup(title, Strings.t("next_start", title));
+            popupRestart(title, Strings.t("next_start", title));
     }
 
     private void cantSave() {
@@ -1208,6 +1219,55 @@ public final class SettingsMenu {
             c.setLayoutParams(lp);
         }
         return c;
+    }
+
+    /** A "Close the game" button (asks first). */
+    private void addCloseButton(int topMarginDp) {
+        TextView quit = chip(Strings.t("close_btn"), false);
+        quit.setGravity(Gravity.CENTER);
+        quit.setOnClickListener(v -> confirmClose());
+        LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        qlp.topMargin = dp(topMarginDp);
+        mBody.addView(quit, qlp);
+    }
+
+    /** Asks, then ends the game and its process (progress since the last save is lost). */
+    private void confirmClose() {
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(Strings.t("close_t"))
+                .setMessage(Strings.t("close_msg"))
+                .setPositiveButton(Strings.t("close_btn"), (dlg, which) -> {
+                    mA.finishAndRemoveTask();
+                    Runtime.getRuntime().exit(0);  // the native game thread ends with the process
+                })
+                .setNegativeButton(Strings.t("cancel"), null)
+                .create();
+        GameActivity.showImmersive(d);
+    }
+
+    /** Like popup, with a button that restarts the game so the change takes effect now. */
+    private void popupRestart(String title, String message) {
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(Strings.t("ok"), null)
+                .setNeutralButton(Strings.t("restart_now"), (dlg, which) -> confirmRestart())
+                .create();
+        GameActivity.showImmersive(d);
+    }
+
+    /** Asks, then closes the game and opens it again (progress since the last save is lost). */
+    private void confirmRestart() {
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(Strings.t("restart_t"))
+                .setMessage(Strings.t("restart_msg"))
+                .setPositiveButton(Strings.t("restart_now"), (dlg, which) -> {
+                    if (!RestartActivity.restart(mA)) popup(Strings.t("restart_t"), Strings.t("restart_fail"));
+                })
+                .setNegativeButton(Strings.t("cancel"), null)
+                .create();
+        GameActivity.showImmersive(d);
     }
 
     private void popup(String title, String message) {
