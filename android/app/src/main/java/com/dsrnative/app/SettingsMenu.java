@@ -422,8 +422,8 @@ public final class SettingsMenu {
         choice("scale_filter", Strings.t("scalef_t"), Strings.t("scalef_n") + " " + Strings.t("changes_now"),
                 new String[] {"0", "1"}, new String[] {Strings.t("scalef_0"), Strings.t("scalef_1")}, "1");
         choice("upscaler", Strings.t("up_t"), Strings.t("up_n") + " " + Strings.t("changes_now"),
-                new String[] {"0", "1", "2"},
-                new String[] {Strings.t("up_0"), Strings.t("up_1"), Strings.t("up_2")}, "0");
+                new String[] {"0", "1", "2", "3"},
+                new String[] {Strings.t("up_0"), Strings.t("up_1"), Strings.t("up_2"), Strings.t("up_3")}, "0");
         choice("fsr_sharpness", Strings.t("sharp_t"), Strings.t("sharp_n") + " " + Strings.t("changes_now"),
                 new String[] {"100", "85", "70", "50", "30", "0"},
                 new String[] {"100%", "85%", "70%", "50%", "30%", "0%"}, "70");

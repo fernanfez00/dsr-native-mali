@@ -289,6 +289,8 @@ final class Strings {
         put("up_0", "Plain scaling", "Agrandissement simple", "Einfache Skalierung", "Ingrandimento semplice", "Escalado simple", "Escala simples");
         put("up_1", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)", "FSR 1 (EASU)");
         put("up_2", "FSR 1 + sharpening", "FSR 1 + netteté", "FSR 1 + Schärfe", "FSR 1 + nitidezza", "FSR 1 + nitidez", "FSR 1 + nitidez");
+        put("up_3", "Arm ASR (temporal, may ghost)", "Arm ASR (temporel, rémanence possible)", "Arm ASR (temporal, Geisterbilder möglich)",
+                "Arm ASR (temporale, possibile ghosting)", "Arm ASR (temporal, puede dar ghosting)", "Arm ASR (temporal, pode dar ghosting)");
         put("fxaa_t", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA", "FXAA");
         put("fxaa_n",
                 "Smooths jagged edges of the 3D picture before it is enlarged (FXAA 3.11). Fast is the light one, for Mali GPUs. Needs 'HUD at full resolution'.",
@@ -309,12 +311,12 @@ final class Strings {
                 "Limita a imagem ampliada e o HUD a este número de linhas; o Android estica para a tela. Menos pixels para o FSR e o HUD numa GPU fraca (Mali). Precisa de 'HUD em resolução total'.");
         put("hudmax_0", "No limit", "Sans limite", "Kein Limit", "Nessun limite", "Sin límite", "Sem limite");
         put("sharp_t", "FSR sharpness", "Netteté FSR", "FSR-Schärfe", "Nitidezza FSR", "Nitidez de FSR", "Nitidez do FSR");
-        put("sharp_n", "RCAS sharpening after the upscaling (only with 'FSR 1 + sharpening').",
-                "Netteté RCAS après l'agrandissement (seulement avec 'FSR 1 + netteté').",
-                "RCAS-Schärfung nach dem Hochskalieren (nur mit 'FSR 1 + Schärfe').",
-                "Nitidezza RCAS dopo l'ingrandimento (solo con 'FSR 1 + nitidezza').",
-                "Nitidez RCAS tras el escalado (solo con 'FSR 1 + nitidez').",
-                "Nitidez RCAS após a ampliação (apenas com 'FSR 1 + nitidez').");
+        put("sharp_n", "RCAS sharpening after the upscaling (only with 'FSR 1 + sharpening' and Arm ASR).",
+                "Netteté RCAS après l'agrandissement (seulement avec 'FSR 1 + netteté' et Arm ASR).",
+                "RCAS-Schärfung nach dem Hochskalieren (nur mit 'FSR 1 + Schärfe' und Arm ASR).",
+                "Nitidezza RCAS dopo l'ingrandimento (solo con 'FSR 1 + nitidezza' e Arm ASR).",
+                "Nitidez RCAS tras el escalado (solo con 'FSR 1 + nitidez' y Arm ASR).",
+                "Nitidez RCAS após a ampliação (apenas com 'FSR 1 + nitidez' e Arm ASR).");
         put("perf_t", "Performance mode", "Mode performance", "Leistungsmodus", "Modalità prestazioni",
                 "Modo rendimiento", "Modo desempenho", "Режим производительности", "パフォーマンスモード", "성능 모드",
                 "性能模式", "效能模式");
