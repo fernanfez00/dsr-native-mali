@@ -2410,12 +2410,16 @@ private:
              bc_forced_ ? " - BC textures used as they are (not decoded)" : " - BC textures stay decoded on upload");
     }
 
-    // What a BC texture is converted into when the GPU cannot sample BC: ETC2 when the GPU has it (BC1 always;
-    // BC3 with settings bc3_etc2), else decoded. ETC2 keeps BC1 textures at their compressed size (8 bytes per
-    // 4x4 block; decoded RGBA8 is 4x larger), which saves memory and texture bandwidth on Mali.
+    // What a BC texture is converted into when the GPU cannot sample BC: ETC2 when the GPU has it (BC1 and BC3),
+    // else decoded. ETC2 keeps BC1 textures at their compressed size (8 bytes per 4x4 block; decoded RGBA8 is 4x
+    // larger), and BC3 as ETC2 RGBA8 (EAC alpha block + ETC2 colour block, 16 bytes per 4x4 block: also 4x smaller
+    // than RGBA8), which saves memory and texture bandwidth on Mali. Settings bc3_mode picks what BC3 becomes:
+    // 0 auto (ASTC if bc_astc, else ETC2), 1 ETC2 even with bc_astc, 2 decoded RGBA8.
     BcTo BcTarget(int nvn_format) {
         const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
         const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        const bool is_bc3 = IsEtcRgba8Encodable(nvn_format);  // NVN BC3 (68, 72)
+        if (is_bc3 && c.bc3_mode == 2) return BcTo::Decoded;  // asked for: RGBA8, as the game's own art would be
         // bc5_astc: BC5 (two channels, normal maps) as ASTC luminance + alpha, two weight planes.
         if (c.bc5_astc && features_.textureCompressionASTC_LDR && IsAstcLaEncodable(nvn_format)) {
             VkFormatProperties p;
@@ -2424,7 +2428,9 @@ private:
         }
         // bc_astc: ASTC (astc_block x astc_block) for BC1 and BC3 when the GPU has it (all Mali); a format it cannot
         // take falls through to the ETC2 choice below.
-        if (c.bc_astc && features_.textureCompressionASTC_LDR && IsAstcEncodable(nvn_format)) {
+        // bc3_mode 1 keeps BC3 out of this block: it goes to ETC2 below.
+        if (c.bc_astc && features_.textureCompressionASTC_LDR && IsAstcEncodable(nvn_format) &&
+            !(is_bc3 && c.bc3_mode == 1)) {
             VkFormatProperties p;
             vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, BcTo::Astc), &p);
             if ((p.optimalTilingFeatures & need) == need) return BcTo::Astc;
@@ -2432,7 +2438,7 @@ private:
         if (!features_.textureCompressionETC2 || !c.bc_etc2) return BcTo::Decoded;
         BcTo to = BcTo::Decoded;
         if (IsEtcEncodable(nvn_format)) to = BcTo::Etc2;
-        else if (c.bc3_etc2 && IsEtcRgba8Encodable(nvn_format)) to = BcTo::Etc2Rgba8;
+        else if (is_bc3) to = BcTo::Etc2Rgba8;  // bc3_mode 0 / 1 (2 returned above)
         if (to == BcTo::Decoded) return to;
         VkFormatProperties p;
         vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, to), &p);
@@ -2473,10 +2479,11 @@ private:
                 feats = p.optimalTilingFeatures;
                 LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: %s on upload (Vulkan format %d)",
                      nvn_format,
-                     to == BcTo::Decoded ? "decoded"
+                     to == BcTo::Decoded ? "decoded (uncompressed)"
                      : to == BcTo::Astc ? (AstcBlock() == 6 ? "re-encoded as ASTC 6x6 (world textures; the HUD, text and small textures 4x4)" : AstcBlock() == 8 ? "re-encoded as ASTC 8x8 (world textures; the HUD, text and small textures 4x4)" : "re-encoded as ASTC 4x4")
                      : to == BcTo::AstcLa ? "re-encoded as ASTC luminance+alpha (dual plane)"
-                                          : "re-encoded as ETC2",
+                     : to == BcTo::Etc2Rgba8 ? "re-encoded as ETC2 RGBA8 (EAC alpha + ETC2 colour)"
+                                             : "re-encoded as ETC2",
                      int(f));
                 if (BcKindOf(nvn_format) == BcKind::BC7 || BcKindOf(nvn_format) == BcKind::BC6H_S ||
                     BcKindOf(nvn_format) == BcKind::BC6H_U)

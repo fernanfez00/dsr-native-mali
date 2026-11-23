@@ -18,7 +18,7 @@ namespace dsr::hle::nvn {
 // NVN BC1 formats (65, 66, 69, 70) -> ETC2 RGB8 (65, 69) or RGB8A1 (66, 70: BC1 with 1-bit alpha).
 bool IsEtcEncodable(int nvn_format);
 bool EtcHasPunchThrough(int nvn_format);
-// NVN BC3 formats (68, 72) -> ETC2 RGBA8 (lossier: opt-in, settings bc3_etc2).
+// NVN BC3 formats (68, 72) -> ETC2 RGBA8 (settings bc3_mode: 0 auto, 1 ETC2 always, 2 decoded RGBA8).
 bool IsEtcRgba8Encodable(int nvn_format);
 
 // Bytes of a level of width x height (x depth) texels: 8 per block (RGB8, RGB8A1) or 16 (RGBA8).
