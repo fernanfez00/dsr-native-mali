@@ -32,7 +32,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64" OR ANDROID_ABI STREQUAL "arm64
 endif()
 
 
-# FSR 1 upscaler shaders (settings upscaler = 1 or 2): GLSL compiled to SPIR-V at build time with glslc, which the
+# FSR 1 / Arm ASR upscaler shaders (settings upscaler = 1, 2 or 3): GLSL compiled to SPIR-V at build time with glslc, which the
 # Android NDK ships (shader-tools/) and the Vulkan SDK too. Without it the build still works: the upscaler is left
 # out (DSR_HAVE_FSR1 not defined) and the picture is enlarged by the plain blit as before.
 set(DSR_GLSLC_HINTS)
@@ -49,6 +49,7 @@ if(DSR_GLSLC)
       COMMAND ${CMAKE_COMMAND} -DGLSLC=${DSR_GLSLC} -DSRC_DIR=${DSR_SHADERS_DIR} -DOUT=${DSR_GEN_DIR}/fsr1_spv.h
               -DWORK=${DSR_GEN_DIR} -P "${CMAKE_SOURCE_DIR}/cmake/build_fsr1_spv.cmake"
       DEPENDS "${DSR_SHADERS_DIR}/fsr1.vert" "${DSR_SHADERS_DIR}/fsr1_easu.frag" "${DSR_SHADERS_DIR}/fsr1_rcas.frag"
+              "${DSR_SHADERS_DIR}/asr_temporal.frag"
               "${CMAKE_SOURCE_DIR}/cmake/build_fsr1_spv.cmake"
       VERBATIM)
   add_custom_target(dsr_fsr1_shaders DEPENDS "${DSR_GEN_DIR}/fsr1_spv.h")
