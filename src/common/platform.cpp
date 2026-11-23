@@ -267,6 +267,15 @@ void PreferFastCores(const char* who, bool essential) {
     (void)essential;
 #endif
 }
+bool IsFastCpu(int cpu) {
+#if defined(__ANDROID__)
+    const FastCores& fc = GetFastCores();
+    return fc.count > 0 && cpu >= 0 && cpu < CPU_SETSIZE && CPU_ISSET(cpu, &fc.set);
+#else
+    (void)cpu;
+    return false;
+#endif
+}
 void PreferSlowCores(const char* who) {
 #if defined(__ANDROID__)
     thread_local bool done = false;

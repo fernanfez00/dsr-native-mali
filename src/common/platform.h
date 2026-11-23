@@ -31,6 +31,8 @@ void PreferFastCores(const char* who, bool essential = false);
 // burn CPU polling (clock spin loops) and would otherwise compete with the frame/executor threads for the two fast
 // cores. Once per thread; no-op when the chip has one kind of core or fast_cores is off.
 void PreferSlowCores(const char* who);
+// True when `cpu` is one of the fast cores (diagnostics); false everywhere when the chip has one kind of core.
+bool IsFastCpu(int cpu);
 // Lets the calling thread run on every CPU (background workers created by pinned threads inherit their pin).
 void UseAllCores();
 // On chips with fewer than 4 fast cores: drops a fast-core pin inherited from the creating thread (game threads).
