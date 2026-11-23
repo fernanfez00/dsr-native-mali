@@ -1,5 +1,6 @@
 // Self-contained tests for the loader and HLE runtime (no game files needed).
 // Portable tests run everywhere; ABI tests (x18 handling, thunks, setjmp) run only on arm64.
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 
 static int g_failures = 0;
 #include "hle/nvn/astc_encode.h"
+#include "hle/nvn/bc_decode.h"
 #include "hle/nvn/etc_encode.h"
 #include "hle/nvn/parallel.h"
 #include "runtime/cheat_vm.h"
@@ -619,6 +621,64 @@ static void TestEtcEncode() {
     CHECK(once);
 }
 
+// BC3 -> ETC2 RGBA8 (settings bc3_mode 0 / 1): a BC3 image goes through the real path (BcDecode, then EncodeEtc2Rgba8)
+// and decodes back close to it: the EAC alpha within a few levels (smooth and cut-out alpha), the colour close.
+static void TestBc3ToEtc2() {
+    using namespace dsr::hle::nvn;
+    CHECK(IsEtcRgba8Encodable(68) && IsEtcRgba8Encodable(72) && !IsEtcRgba8Encodable(66));
+    const int W = 64, H = 44, bxn = W / 4, byn = H / 4;
+    std::vector<uint8_t> bc3(size_t(bxn) * byn * 16);
+    uint32_t seed = 11;
+    auto rnd = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+    auto rgb565 = [](int r, int g, int b) { return uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)); };
+    for (int by = 0; by < byn; by++)
+        for (int bx = 0; bx < bxn; bx++) {
+            uint8_t* b = &bc3[(size_t(by) * bxn + bx) * 16];
+            const bool cutout = (bx / 3 + by / 2) % 4 == 0;  // a0 > a1: eight steps; a0 <= a1: six steps, 0 and 255
+            const int a0 = cutout ? 0 : 60 + (bx * 3 + by * 5) % 150, a1 = cutout ? 255 : a0 + 20 + int(rnd() % 40);
+            b[0] = uint8_t(cutout ? a0 : a1);
+            b[1] = uint8_t(cutout ? a1 : a0);
+            uint64_t ai = 0;
+            for (int i = 0; i < 16; i++) ai |= uint64_t(rnd() % 8) << (3 * i);
+            for (int k = 0; k < 6; k++) b[2 + k] = uint8_t(ai >> (8 * k));
+            const int r = bx * 255 / bxn, g = by * 255 / byn, bl = ((bx + by) & 1) ? 200 : 60;
+            const uint16_t c0 = rgb565(r, g, bl), c1 = rgb565(r / 2 + 20, g / 2 + 30, bl / 2 + 40);
+            b[8] = uint8_t(c0 & 255), b[9] = uint8_t(c0 >> 8), b[10] = uint8_t(c1 & 255), b[11] = uint8_t(c1 >> 8);
+            for (int k = 0; k < 4; k++) b[12 + k] = uint8_t(rnd() & 255);
+        }
+    std::vector<uint8_t> rgba(size_t(W) * H * 4);
+    BcDecode(BcKind::BC3, bc3.data(), bxn, byn, rgba.data(), W, H);
+    std::vector<uint8_t> out(EtcRgba8LevelBytes(W, H, 1));
+    CHECK(out.size() == size_t(bxn) * byn * 16);
+    EncodeEtc2Rgba8(out.data(), rgba.data(), W, H, 1);
+    double se = 0, sa = 0;
+    int cut_wrong = 0, max_a = 0;
+    for (int by = 0; by < byn; by++)
+        for (int bx = 0; bx < bxn; bx++) {
+            const uint8_t* b = &out[(size_t(by) * bxn + bx) * 16];
+            uint8_t d[16][4], a[16];
+            DecodeEacAlphaBlock(b, a);
+            DecodeEtc2RgbBlock(b + 8, false, d);
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < 4; x++) {
+                    const uint8_t* p = &rgba[(size_t(by * 4 + y) * W + bx * 4 + x) * 4];
+                    const int da = int(a[y * 4 + x]) - p[3];
+                    sa += double(da) * da;
+                    max_a = std::max(max_a, std::abs(da));
+                    if ((p[3] == 0 || p[3] == 255) && da != 0) cut_wrong++;  // cut-out alpha stays exact
+                    for (int c = 0; c < 3; c++) {
+                        const double e = double(d[y * 4 + x][c]) - p[c];
+                        se += e * e;
+                    }
+                }
+        }
+    const double n = double(W) * H;
+    CHECK(cut_wrong == 0);
+    CHECK(sa / n < 4.0 * 4.0);        // alpha: under 4 levels RMS
+    CHECK(max_a <= 24);
+    CHECK(se / (n * 3) < 20.0 * 20.0);  // colour: noisy 4-colour blocks, RMS under 20
+}
+
 // BC -> ASTC 4x4 re-encoding (settings bc_astc): the blocks decode back close to the source, BC1-style palettes (four
 // colours on a line, 1/3 steps) almost exactly, and cut-out alpha keeps its shape.
 static void TestAstcEncode() {
@@ -863,6 +923,7 @@ int main() {
         {"shader_translator", TestShaderTranslator},
         {"block_linear", TestBlockLinear},
         {"etc_encode", TestEtcEncode},
+        {"bc3_etc2", TestBc3ToEtc2},
         {"astc_encode", TestAstcEncode},
         {"astc_block_sizes", TestAstcBlockSizes},
         {"cheats", TestCheats},
