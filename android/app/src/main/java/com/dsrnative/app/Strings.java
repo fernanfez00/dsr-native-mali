@@ -358,6 +358,21 @@ final class Strings {
                 "BC를 지원하지 않는 GPU에서 텍스처 메모리가 4분의 1로 줄어듭니다. 약간 손실이 있습니다.",
                 "在不支持 BC 的 GPU 上纹理内存减少至 1/4；略有损失。",
                 "在不支援 BC 的 GPU 上紋理記憶體減少至 1/4；略有損失。");
+        // en, fr, de, it, es, pt (other languages show the English text)
+        put("bc3_n2",
+                "Auto uses ASTC for BC3 when the ASTC option below is on, otherwise ETC2 (colour + alpha, 8 bits per texel). \"ETC2 always\" keeps BC3 on ETC2 even with ASTC on (BC1 still follows ASTC). RGBA8 is uncompressed.",
+                "Auto utilise l'ASTC pour le BC3 si l'option ASTC ci-dessous est activée, sinon l'ETC2 (couleur + alpha, 8 bits par texel). « Toujours ETC2 » garde le BC3 en ETC2 même avec l'ASTC activé (le BC1 suit toujours l'ASTC). Le RGBA8 n'est pas compressé.",
+                "Auto nutzt ASTC für BC3, wenn die ASTC-Option unten aktiv ist, sonst ETC2 (Farbe + Alpha, 8 Bit pro Texel). „Immer ETC2“ hält BC3 auch bei aktivem ASTC auf ETC2 (BC1 folgt weiter ASTC). RGBA8 ist unkomprimiert.",
+                "Auto usa ASTC per il BC3 se l'opzione ASTC qui sotto è attiva, altrimenti ETC2 (colore + alpha, 8 bit per texel). «Sempre ETC2» mantiene il BC3 in ETC2 anche con ASTC attivo (il BC1 segue sempre ASTC). RGBA8 non è compresso.",
+                "Auto usa ASTC para BC3 si la opción ASTC de abajo está activada y, si no, ETC2 (color + alfa, 8 bits por texel). «Siempre ETC2» mantiene BC3 en ETC2 incluso con ASTC activado (BC1 sigue usando ASTC). RGBA8 no está comprimido.",
+                "Auto usa ASTC para BC3 se a opção ASTC abaixo estiver ativada e, senão, ETC2 (cor + alfa, 8 bits por texel). «Sempre ETC2» mantém o BC3 em ETC2 mesmo com ASTC ativado (o BC1 continua em ASTC). RGBA8 não é comprimido.");
+        put("bc3_auto", "Auto (ASTC if on, else ETC2)", "Auto (ASTC si activé, sinon ETC2)", "Auto (ASTC falls aktiv, sonst ETC2)",
+                "Auto (ASTC se attivo, altrimenti ETC2)", "Auto (ASTC si está activo, si no ETC2)",
+                "Auto (ASTC se ativo, senão ETC2)");
+        put("bc3_etc2", "ETC2 always", "Toujours ETC2", "Immer ETC2", "Sempre ETC2", "Siempre ETC2", "Sempre ETC2");
+        put("bc3_rgba", "RGBA8 (uncompressed, 4x memory)", "RGBA8 (non compressé, 4x la mémoire)",
+                "RGBA8 (unkomprimiert, 4x Speicher)", "RGBA8 (non compresso, 4x memoria)",
+                "RGBA8 (sin comprimir, 4x memoria)", "RGBA8 (sem compressão, 4x memória)");
         put("astc_t", "BC textures as ASTC instead of ETC2",
                 "Textures BC en ASTC au lieu d'ETC2",
                 "BC-Texturen als ASTC statt ETC2",
