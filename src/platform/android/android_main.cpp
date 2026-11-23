@@ -413,6 +413,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "record_thread = 1\n"
                     "# fast_cores: 1 = keep the game's main, recording and submit threads on the performance cores\n"
                     "fast_cores = 1\n"
+                    "# slow_recorders: 1 = move the game's command recording workers (MTR_*) to the efficiency cores; frees the\n"
+                    "# fast cores for the frame/executor threads but may slow recording (0 = as before)\n"
+                    "slow_recorders = 0\n"
                     "# render_nice: scheduler priority of the render thread, -10 (highest) to 0 (unchanged); the thread was\n"
                     "# waiting for a CPU behind the game's worker threads\n"
                     "render_nice = -4\n"
@@ -460,6 +463,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "pin_render_thread")) cfg->pin_render_thread = v != 0;
             else if (!strcmp(key, "record_thread")) cfg->record_thread = v != 0;
             else if (!strcmp(key, "fast_cores")) cfg->fast_cores = v != 0;
+            else if (!strcmp(key, "slow_recorders")) cfg->slow_recorders = v != 0;
             else if (!strcmp(key, "render_nice")) cfg->render_nice = std::clamp(v, -10, 0);
             else if (!strcmp(key, "gpu_compression")) cfg->gpu_compression = v != 0;
             else if (!strcmp(key, "audio_smooth")) cfg->audio_smooth = v != 0;
