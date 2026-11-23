@@ -199,6 +199,9 @@ int FrameRateNow();  // the rate the frame limiter paces to now (the cap, or the
 void ReportGpuFrameTime(double ms);
 // Whether the GPU samples BC textures itself (natively or through BCeNabler): 1 yes, 0 no (converted on the CPU),
 // -1 not known yet (no Vulkan device). The menu turns texture_mip_skip on with performance mode only without BC.
+// The menu changed a skip_bloom / skip_post / skip_post_plus switch: the render thread makes its lists again.
+unsigned SkipGeneration();
+void BumpSkipGeneration();
 void SetGpuHasBc(bool has);
 int GpuHasBc();
 bool FrameRateAdjustable();  // the frame rate patches are in: config.target_fps may change while the game runs

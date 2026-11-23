@@ -4,6 +4,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -16,6 +17,12 @@
 #include "hle/registry.h"
 
 namespace dsr {
+
+namespace {
+std::atomic<unsigned> g_skip_generation{0};
+}
+unsigned SkipGeneration() { return g_skip_generation.load(std::memory_order_acquire); }
+void BumpSkipGeneration() { g_skip_generation.fetch_add(1, std::memory_order_acq_rel); }
 
 namespace {
 constexpr const char* kTag = "runtime";
