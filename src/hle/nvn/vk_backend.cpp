@@ -2503,11 +2503,48 @@ private:
 
     // Image for a texture, created on first use. For sampling (`upload`), a texture the GPU never wrote is
     // filled from game memory (deswizzled) the first time.
+    // Diagnostics (face texture): the skin shader's 128x128 RGBA8 texture holds garbage. Logs every way this
+    // texture is touched (use, write access, upload, change, copies) with a summary of its guest memory, to
+    // find out who is meant to fill it. Limited so it cannot flood the log.
+    void DiagFaceTex(const char* what, const TexRef& t, const Image* img) {
+        if (!t.valid || t.tex.width != 128 || t.tex.height != 128 || t.tex.format != 37) return;
+        static std::mutex dm;
+        static std::unordered_map<std::string, int> counts;
+        static int total = 0;
+        std::lock_guard<std::mutex> lk(dm);
+        int& n = counts[what];
+        if (n >= 12 || total >= 150) return;
+        n++;
+        total++;
+        char mem[160] = "memory unreadable";
+        if (GuestRangeValid(t.addr, 65536)) {
+            const uint8_t* b = reinterpret_cast<const uint8_t*>(t.addr);
+            size_t zeros = 0, first_nz = 65536, last_nz = 0;
+            for (size_t i = 0; i < 65536; i++) {
+                if (b[i]) {
+                    if (first_nz == 65536) first_nz = i;
+                    last_nz = i;
+                } else {
+                    zeros++;
+                }
+            }
+            snprintf(mem, sizeof(mem), "zero bytes %.0f%%, first non-zero @%zu, last @%zu, hash %016llx, sample %016llx",
+                     100.0 * double(zeros) / 65536.0, first_nz, last_nz,
+                     (unsigned long long)Fnv(b, 65536), (unsigned long long)SampleHash(t));
+        }
+        LOGI(kTag, "face-diag %s: 128x128 f37 @%llx list %llu thread %lx | img: written %d uploaded %d cpu_source %d pending %d "
+                   "skip_zeroed %d | %s",
+             what, (unsigned long long)t.addr, (unsigned long long)list_counter_, (unsigned long)pthread_self(),
+             img ? int(img->written) : -1, img ? int(img->uploaded) : -1, img ? int(img->cpu_source) : -1,
+             img ? int(img->pending) : -1, img ? int(img->skip_zeroed) : -1, mem);
+    }
+
     Image* GetImage(const TexRef& t, bool upload) {
         if (!t.valid || t.tex.width <= 0 || t.tex.height <= 0) return nullptr;
         Image* img = FindImage(t);
         if (!img) img = CreateImage(t);
         if (!img) return nullptr;
+        DiagFaceTex(upload ? "use (sampled)" : "access (target / copy dst)", t, img);
         if (img->pending && !img->written) return nullptr;  // converting in the background: not drawn yet
         if (upload && TakeFrame(*img, t)) return img;
         if (upload && !img->written && !img->uploaded) {
@@ -2525,6 +2562,7 @@ private:
                 img->next_check_list = list_counter_ + img->check_interval;
             } else {
                 if (big) big_changes_++;
+                DiagFaceTex("memory changed, re-uploading", t, img);
                 Upload(*img, t);
                 if (++reuploads_ <= 8 || reuploads_ % 300 == 0)
                     LOGI(kTag, "texture %dx%d format %d changed in game memory: re-uploaded (%llu so far)", img->width,
@@ -3186,6 +3224,7 @@ private:
 
     // Fills a sampled texture from game memory: deswizzle each level/layer into the stream, then copy.
     void Upload(Image& img, const TexRef& t) {
+        DiagFaceTex("upload from game memory", t, &img);
         if (img.pending) return;  // already on its way (a re-upload while the first conversion runs)
         img.uploaded = true;
         img.cpu_source = true;
@@ -4345,6 +4384,13 @@ private:
         img->cpu_source = false;
     }
 
+        if (dst.width == 128 && dst.height == 128 && dst.nvn_format == 37) {
+            static int copy_logged = 0;
+            if (copy_logged++ < 12)
+                LOGI(kTag, "face-diag texture copy into a 128x128 f37: from %dx%d f%d (region %d,%d %dx%d -> %d,%d %dx%d) flags %d",
+                     src.width, src.height, src.nvn_format, sr.x, sr.y, sr.width, sr.height, dr.x, dr.y, dr.width,
+                     dr.height, flags);
+        }
     void CopyImage(Image& src, const CopyRegion& sr, Image& dst, const CopyRegion& dr, int flags) {
         dst.skip_zeroed = false;  // written by a copy: no longer the skipped pass's zero
         if (IsDepthFormat(src.nvn_format) != IsDepthFormat(dst.nvn_format)) return;
@@ -4555,6 +4601,7 @@ private:
         if (!c.copy) return;
         const CopyInfo& ci = *c.copy;
         Image* img = GetImage(ci.dst, false);
+        DiagFaceTex("buffer-to-texture copy into it", ci.dst, img);
         if (!img || IsDepthFormat(img->nvn_format)) return;
         const FormatInfo fi = GetFormatInfo(img->nvn_format);
         const CopyRegion& r = ci.dst_region;
