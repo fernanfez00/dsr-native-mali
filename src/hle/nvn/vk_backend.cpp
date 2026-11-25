@@ -50,6 +50,7 @@
 #include "hle/nvn/astc_encode.h"
 #include "hle/nvn/postfx_spv.h"
 #ifdef DSR_HAVE_FSR1
+#include "hle/nvn/normal_map.h"
 #include "fsr1_spv.h"  // generated at build time from src/hle/nvn/shaders (cmake/build_fsr1_spv.cmake)
 #endif
 #include "hle/nvn/etc_encode.h"
@@ -2689,6 +2690,7 @@ private:
                  (unsigned long long)img.addr);
         return &images_.emplace(t.addr, std::move(img)).first->second;
     }
+    int normal_maps_logged_ = 0;
     Image* CreateImage(const TexRef& t, bool park_drawn = false) {
         VkFormatFeatureFlags feats = 0;
         VkFormat vf = PickFormat(t.tex.format, &feats);
@@ -2718,6 +2720,28 @@ private:
                     img.bc_to = to;
                     break;
                 }
+        // Normal maps (BC1 / BC3) do not go through ETC2, see normal_map.h: kept as decoded RGBA8 (small ones only).
+        if (img.bc != BcKind::None && (img.bc_to == BcTo::Etc2 || img.bc_to == BcTo::Etc2Rgba8) &&
+            dsr::GetRuntime().config.bc_normals && int64_t(t.tex.width) * t.tex.height <= 1024 * 1024 &&
+            GuestRangeValid(t.addr, layout.total)) {
+            float mean[4];
+            if (BcMeanColor(reinterpret_cast<const uint8_t*>(t.addr), layout, img.bc, mean) &&
+                MeanLooksLikeNormalMap(mean, img.bc)) {
+                const VkFormat df = ConvertedFormat(t.tex.format, BcTo::Decoded);
+                VkFormatProperties dp;
+                vkGetPhysicalDeviceFormatProperties(phys_, df, &dp);
+                const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+                if ((dp.optimalTilingFeatures & need) == need) {
+                    vf = df;
+                    feats = dp.optimalTilingFeatures;
+                    img.vk_format = vf;
+                    img.bc_to = BcTo::Decoded;
+                    if (++normal_maps_logged_ <= 12)
+                        LOGI(kTag, "normal map kept uncompressed (RGBA8, not ETC2): %dx%d format %d, mean colour %.0f %.0f %.0f %.0f",
+                             t.tex.width, t.tex.height, t.tex.format, mean[0], mean[1], mean[2], mean[3]);
+                }
+            }
+        }
         img.width = t.tex.width;
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
@@ -5194,6 +5218,12 @@ private:
                 }
             }
         }
+        // Camera motion (skip_hidden Gentle, temporal smoothing): sampled from the frame's first opaque, depth-tested
+        // world draw with a colour target (OccCamera).
+        if ((dsr::GetRuntime().config.skip_hidden || dsr::GetRuntime().config.fsr >= 2) && occ_cam_frame_ != occ_frame_ &&
+            !colors.empty() && colors[0] && depth && depth->width >= 256 && st_.depth.depth_test &&
+            st_.color.blend_enable == 0 && !capture_active_)
+            OccCamera();
         // ---- skip_hidden (experimental; from PR #47): world draws that covered no pixel lately are left out ----------
         uint64_t occ_key = 0;
         bool occ_query = false;
@@ -7208,6 +7238,10 @@ private:
                  "copy, %llu frames shown without (a later draw needed the frame's depth buffer)",
                  (unsigned long long)sharp_draws_, (unsigned long long)sharp_restarts_, (unsigned long long)sharp_dropped_);
         sharp_draws_ = sharp_restarts_ = sharp_dropped_ = 0;
+        if (dsr::GetRuntime().config.fsr >= 2 && post_temporal_frames_)
+            LOGI(kTag, "temporal smoothing: %llu frames in the last 10 s with the history reduced or off (camera moving)",
+                 (unsigned long long)post_temporal_moving_);
+        post_temporal_moving_ = 0;
         if (dsr::GetRuntime().config.shadow_quality == 0)
             LOGI(kTag, "shadow_quality 0: %llu shadow map draws left out (last 10 s)", (unsigned long long)shadow_draws_skipped_);
         shadow_draws_skipped_ = 0;
@@ -7722,7 +7756,9 @@ private:
     // replaces the bilinear blit. Fragment passes over a full-screen triangle in render pass objects (every driver has
     // them): no compute, no storage images. FXAA's SPIR-V is checked in (postfx_spv.h); FSR's is compiled from
     // src/hle/nvn/shaders at build time (DSR_HAVE_FSR1; without glslc the build leaves FSR out).
-    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostKinds };
+    // kPostTemporal (settings fsr = 2, temporal smoothing; PR #47's "Arm ASR" pass): the EASU output blended with the
+    // previous frame's result, the history clamped to the current neighbourhood's colours. Samples two images.
+    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostTemporal, kPostKinds };
     struct PostPipe {
         VkPipeline pipe = VK_NULL_HANDLE;
         VkRenderPass rp = VK_NULL_HANDLE;
@@ -7734,12 +7770,19 @@ private:
         VkRenderPass rp;
         VkFramebuffer fb;
         VkImageView src_view;
+        VkImageView src_view2;  // kPostTemporal: the history
+        bool two = false;
         uint32_t w, h, push_size;
         uint32_t push[20];
     };
     VkShaderModule post_vs_ = VK_NULL_HANDLE, post_fsr_vs_ = VK_NULL_HANDLE, post_fs_[kPostKinds] = {};
-    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
-    VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE, post_set_layout2_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_layout_ = VK_NULL_HANDLE, post_layout2_ = VK_NULL_HANDLE;
+    Image post_hist_[2];  // temporal smoothing: this frame's result / the previous one (alternating)
+    int post_hist_w_ = 0;
+    bool post_hist_valid_ = false;
+    std::chrono::steady_clock::time_point post_hist_last_{};
+    uint64_t post_temporal_frames_ = 0, post_temporal_moving_ = 0;
     VkSampler post_sampler_ = VK_NULL_HANDLE;
     std::vector<PostPipe> post_pipes_;
     bool post_ready_ = false, post_failed_ = false, fsr_ready_ = false;
@@ -7787,6 +7830,7 @@ private:
         fsr_ready_ = module(kFsr1VertSpv, sizeof kFsr1VertSpv, &post_fsr_vs_) &&
                      module(kFsr1EasuSpv, sizeof kFsr1EasuSpv, &post_fs_[kPostEasu]) &&
                      module(kFsr1RcasSpv, sizeof kFsr1RcasSpv, &post_fs_[kPostRcas]);
+        if (fsr_ready_) module(kTemporalSpv, sizeof kTemporalSpv, &post_fs_[kPostTemporal]);
 #endif
         VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
                                           nullptr};
@@ -7801,6 +7845,13 @@ private:
         pl.pushConstantRangeCount = 1;
         pl.pPushConstantRanges = &pr;
         if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout_) != VK_SUCCESS) return false;
+        VkDescriptorSetLayoutBinding binds2[2] = {bind, bind};
+        binds2[1].binding = 1;
+        li.bindingCount = 2;
+        li.pBindings = binds2;
+        if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &post_set_layout2_) != VK_SUCCESS) return false;
+        pl.pSetLayouts = &post_set_layout2_;
+        if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout2_) != VK_SUCCESS) return false;
         VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
         sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -7855,7 +7906,7 @@ private:
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = kind == kPostEasu || kind == kPostRcas ? post_fsr_vs_ : post_vs_;
+        stages[0].module = kind == kPostEasu || kind == kPostRcas || kind == kPostTemporal ? post_fsr_vs_ : post_vs_;
         stages[0].pName = "main";
         stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = post_fs_[kind];
@@ -7892,7 +7943,7 @@ private:
         ci.pMultisampleState = &ms;
         ci.pColorBlendState = &cb;
         ci.pDynamicState = &dy;
-        ci.layout = post_layout_;
+        ci.layout = kind == kPostTemporal ? post_layout2_ : post_layout_;
         ci.renderPass = rp;
         VkPipeline pipe = VK_NULL_HANDLE;
         if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
@@ -7925,10 +7976,10 @@ private:
         return fb;
     }
     // Recorder thread: a descriptor set of post_set_layout_ from the slot's pool (a full pool continues in another).
-    bool AllocPostSet(VkDescriptorSet* set) {
+    bool AllocPostSet(VkDescriptorSet* set, bool two = false) {
         VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dai.descriptorSetCount = 1;
-        dai.pSetLayouts = &post_set_layout_;
+        dai.pSetLayouts = two ? &post_set_layout2_ : &post_set_layout_;
         for (int tries = 0; tries < 3; tries++) {
             dai.descriptorPool = desc_pool_;
             if (vkAllocateDescriptorSets(device_, &dai, set) == VK_SUCCESS) return true;
@@ -7946,16 +7997,18 @@ private:
     // Recorder thread: one full-target pass sampling job.src_view.
     void RecordPostPass(VkCommandBuffer cb, const PostJob& j) {
         VkDescriptorSet set = VK_NULL_HANDLE;
-        if (!AllocPostSet(&set)) {
+        if (!AllocPostSet(&set, j.two)) {
             LogOnce("postfx_set", "post-processing: no descriptor set");
             return;
         }
-        VkDescriptorImageInfo ii{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkPipelineLayout layout = j.two ? post_layout2_ : post_layout_;
+        VkDescriptorImageInfo ii[2] = {{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {post_sampler_, j.src_view2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
         VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         wr.dstSet = set;
-        wr.descriptorCount = 1;
+        wr.descriptorCount = j.two ? 2 : 1;
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wr.pImageInfo = &ii;
+        wr.pImageInfo = ii;
         vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
         const VkRect2D area{{0, 0}, {j.w, j.h}};
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -7964,8 +8017,8 @@ private:
         bi.renderArea = area;
         vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.pipe);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout_, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cb, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
         const VkViewport vp{0.0f, 0.0f, float(j.w), float(j.h), 0.0f, 1.0f};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &area);
@@ -7975,14 +8028,18 @@ private:
         InvalidateBoundState();
     }
     // One pass: `src` (sampled) into `dst` (drawn), both whole. False (nothing recorded) when it cannot be done.
-    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words) {
+    // src2: a second sampled image (kPostTemporal: the history).
+    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words, Image* src2 = nullptr) {
         VkRenderPass rp = VK_NULL_HANDLE;
         const VkPipeline pipe = PostPipeline(kind, dst.vk_format, &rp);
         if (!pipe) return false;
         static const uint8_t kIdentity[4] = {2, 3, 4, 5};
         Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (src2) Transition(*src2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         const VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src.aspect, kIdentity);
+        const VkImageView sv2 = src2 ? View(*src2, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src2->aspect, kIdentity) : VK_NULL_HANDLE;
+        if (src2 && !sv2) return false;
         const VkImageView dv = AttachmentView(dst);
         const VkFramebuffer fb = dv ? PostFramebuffer(rp, dv, uint32_t(dst.width), uint32_t(dst.height)) : VK_NULL_HANDLE;
         if (!sv || !fb) return false;
@@ -7991,6 +8048,8 @@ private:
         j.rp = rp;
         j.fb = fb;
         j.src_view = sv;
+        j.src_view2 = sv2;
+        j.two = src2 != nullptr;
         j.w = uint32_t(dst.width);
         j.h = uint32_t(dst.height);
         j.push_size = push_words * 4;
@@ -8017,16 +8076,23 @@ private:
         }
         bool done = false;
         if (c.fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
-            // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at 70% sharpness (PR #47's default).
+            // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at fsr_sharpness (default 70%).
             const float iw = float(in->width), ih = float(in->height), ow = float(dst.width), oh = float(dst.height);
             const uint32_t easu[16] = {FloatBits(iw / ow), FloatBits(ih / oh), FloatBits(0.5f * iw / ow - 0.5f),
                                        FloatBits(0.5f * ih / oh - 0.5f), FloatBits(1.0f / iw), FloatBits(1.0f / ih),
                                        FloatBits(1.0f / iw), FloatBits(-1.0f / ih), FloatBits(-1.0f / iw),
                                        FloatBits(2.0f / ih), FloatBits(1.0f / iw), FloatBits(2.0f / ih), FloatBits(0.0f),
                                        FloatBits(4.0f / ih), 0, 0};
-            const float stops = 2.0f * (1.0f - 0.70f);  // 0 stops = the sharpest
-            const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
-            done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16) && PostPass(kPostRcas, post_fsr_tmp_, dst, rcas, 4);
+            // fsr_sharpness 0..100 % (default 70, the previous fixed value): RCAS's constant is 2^-stops with 0 stops the
+            // sharpest and 2 the softest; 0 % turns the sharpening off (constant 0: RCAS passes the picture through).
+            const float sharp = float(std::clamp(c.fsr_sharpness, 0, 100)) / 100.0f;
+            const uint32_t rcas[4] = {FloatBits(sharp <= 0.0f ? 0.0f : std::exp2(-2.0f * (1.0f - sharp))), 0, 0, 0};
+            done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16);
+            Image* sharpen_src = &post_fsr_tmp_;
+            if (done && c.fsr >= 2) {
+                if (Image* t = PostTemporal(post_fsr_tmp_)) sharpen_src = t;
+            }
+            done = done && PostPass(kPostRcas, *sharpen_src, dst, rcas, 4);
         } else if (c.fsr && !fsr_ready_) {
             LogOnce("fsr_missing", "fsr: FSR 1 is not available (not in this build, or its shaders failed): plain blit");
         }
@@ -8036,6 +8102,43 @@ private:
             LOGI(kTag, "post-processing active: %s%s, %dx%d -> %dx%d", in != &src ? (c.fxaa >= 2 ? "FXAA quality" : "FXAA fast") : "",
                  done ? (in != &src ? " + FSR 1" : "FSR 1") : " + blit", src.width, src.height, dst.width, dst.height);
         return true;
+    }
+    // Temporal smoothing (settings fsr = 2): `cur` (the EASU output) blended with the previous result into the other
+    // history image, which is returned (null: not done, e.g. the pass is missing). The history starts over (a plain
+    // copy of `cur`) when its images were (re)made or no frame went through for 250 ms (a pause, a loading screen).
+    Image* PostTemporal(Image& cur) {
+        if (!post_fs_[kPostTemporal]) {
+            LogOnce("temporal_missing", "temporal smoothing: its shader is not in this build: FSR 1 alone");
+            return nullptr;
+        }
+        const VkImage h0 = post_hist_[0].image, h1 = post_hist_[1].image;
+        if (!PostEnsureImage(post_hist_[0], cur, cur.width, cur.height) ||
+            !PostEnsureImage(post_hist_[1], cur, cur.width, cur.height))
+            return nullptr;
+        const auto now = std::chrono::steady_clock::now();
+        const bool reset = !post_hist_valid_ || h0 != post_hist_[0].image || h1 != post_hist_[1].image ||
+                           now - post_hist_last_ > std::chrono::milliseconds(250);
+        Image& out = post_hist_[post_hist_w_];
+        Image& prev = post_hist_[post_hist_w_ ^ 1];
+        // inv_out, neighbourhood spacing (the enlargement: taps one source pixel apart), reset, history weight at rest.
+        const float spacing = std::max(1.0f, float(cur.width) / float(std::max(1, sharp_rw_)));
+        // The history is only trusted while the camera is still: without motion vectors a turning view blends
+        // mismatched frames (soft, blurry). While it moves (OccCamera) the weight is 0 (the frame as it is, which also
+        // keeps the history current) and it eases back to 0.875 over kTemporalEase frames once the view rests.
+        constexpr uint32_t kTemporalEase = 8;
+        const float rest = float(std::min(occ_still_, kTemporalEase)) / float(kTemporalEase);
+        const float w_hist = 0.875f * rest;
+        if (w_hist < 0.875f) post_temporal_moving_++;
+        const uint32_t push[8] = {FloatBits(1.0f / float(cur.width)), FloatBits(1.0f / float(cur.height)),
+                                  FloatBits(spacing), FloatBits(reset ? 1.0f : 0.0f), FloatBits(w_hist), 0, 0, 0};
+        if (!PostPass(kPostTemporal, cur, out, push, 8, &prev)) return nullptr;
+        post_hist_w_ ^= 1;
+        post_hist_valid_ = true;
+        post_hist_last_ = now;
+        if (post_temporal_frames_++ == 0)
+            LOGI(kTag, "temporal smoothing active at %dx%d (frames blended, no motion vectors: moving things may trail)",
+                 cur.width, cur.height);
+        return &out;
     }
     void SharpBlit(Image& from, Image& to) {
         Transition(from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
