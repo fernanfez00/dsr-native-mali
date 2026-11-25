@@ -508,7 +508,11 @@ public final class SettingsMenu {
         toggle("sharp_hud", Strings.t("sharp_t"), Strings.t("sharp_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("fxaa", Strings.t("fxaa_t"), Strings.t("fxaa_n") + " " + Strings.t("changes_next"), new String[] {"0", "1", "2"},
                 new String[] {Strings.t("off"), Strings.t("fxaa_fast"), Strings.t("fxaa_quality")}, "0");
-        toggle("fsr", Strings.t("fsr_t"), Strings.t("fsr_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        choice("fsr", Strings.t("fsr_t"), Strings.t("fsr_n") + " " + Strings.t("temporal_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "1", "2"}, new String[] {Strings.t("off"), "FSR 1", Strings.t("fsr_temporal")}, "0");
+        choice("fsr_sharpness", Strings.t("fsrs_t"), Strings.t("fsrs_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "25", "50", "70", "85", "100"},
+                new String[] {Strings.t("off"), "25 %", "50 %", "70 %", "85 %", "100 %"}, "70");
         choice("shadow_quality", Strings.t("shq_t"), Strings.t("shq_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2", "3"},
                 new String[] {Strings.t("shq_off"), Strings.t("shq_low"), Strings.t("shq_med"), Strings.t("shq_high")}, "3");
@@ -531,6 +535,7 @@ public final class SettingsMenu {
         TextView maliHeader = subsection(Strings.t("sec_mali"));
         note(Strings.t("gpu_n"));
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        toggle("bc_normals", Strings.t("bcn_t"), Strings.t("bcn_n") + " " + Strings.t("changes_next"), "1", "0", "1");
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_next"),
                 new String[] {"4", "6", "8"}, new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
