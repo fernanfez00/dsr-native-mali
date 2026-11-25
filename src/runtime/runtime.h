@@ -61,7 +61,9 @@ struct RuntimeConfig {
     // fxaa 0 = off, 1 = FXAA 3.11 fast (for Mali), 2 = quality; fsr = FSR 1 upscaling (EASU + RCAS sharpening) instead
     // of the bilinear enlargement.
     int fxaa = 0;
-    bool fsr = false;
+    int fsr = 0;  // 0 off, 1 FSR 1, 2 FSR 1 + Arm ASR style temporal smoothing (frames blended, no motion vectors)
+    // fsr_sharpness: RCAS sharpening after the enlargement (FSR 1 and ASR), 0..100 %; 0 = none. 70 = what it was fixed at.
+    int fsr_sharpness = 70;
     // shadow_quality: 0 = no shadows (the shadow map pass is not drawn, lookups say "lit"), 1 = 512, 2 = 1024,
     // 3 = the game's 2048 (1024 with performance_mode).
     int shadow_quality = 3;
@@ -89,6 +91,9 @@ struct RuntimeConfig {
     // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2); BC3 too with bc3_etc2
     // (4x smaller than RGBA8, but lossier: off by default).
     bool bc_etc2 = true;
+    // bc_normals: BC1 / BC3 textures that look like tangent-space normal maps stay decoded RGBA8 instead of ETC2 (ETC2
+    // cannot hold three independent channels: coloured speckles on faces and skin). 0 = ETC2 for them too.
+    bool bc_normals = true;
     bool bc3_etc2 = false;
     // tex_cache_mb (settings menu "Texture disk cache", from pull request #59): size limit (MB) of the on-disk
     // cache of those conversions, ETC2 and ASTC (cache folder, tex_cache.dat/.idx): the next run reads converted
