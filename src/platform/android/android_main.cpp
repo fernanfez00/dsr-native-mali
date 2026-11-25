@@ -544,6 +544,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "tex_cache_mb")) cfg->tex_cache_mb = std::clamp(v, 0, 4096);
             else if (!strcmp(key, "bc_astc")) cfg->bc_astc = v != 0;
             else if (!strcmp(key, "astc_block")) cfg->astc_block = v == 6 || v == 8 ? v : 4;
+            else if (!strcmp(key, "mali_bc")) cfg->mali_bc = v == 1 || v == 2 ? v : 0;
             else if (!strcmp(key, "aspect_ratio")) {
                 cfg->aspect_ratio = value;
                 have_aspect = true;
@@ -586,7 +587,6 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "settings_version")) settings_version = v;
             else if (!strcmp(key, "mali_barriers")) cfg->mali_barriers = v != 0;
             else if (!strcmp(key, "mali_tile_turbo")) cfg->mali_tile_turbo = v != 0;
-            else if (!strcmp(key, "late_depth")) cfg->late_depth = v != 0;
             else if (!strcmp(key, "sharp_hud")) cfg->sharp_hud = v != 0;
             else if (!strcmp(key, "fxaa")) cfg->fxaa = std::clamp(v, 0, 2);
             else if (!strcmp(key, "fsr")) cfg->fsr = std::clamp(v, 0, 2);
@@ -683,15 +683,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          cfg->hole_test);
     // The newer graphics settings (one line, so a report shows what was tried).
     LOGI(kTag, "settings: sharp_hud %d, fsr %d, fsr_sharpness %d, fxaa %d, shadow_quality %d, anisotropy %d, skip_hidden %d, skip_prepass %d, "
-         "bc_astc %d, astc_block %d, bc3_etc2 %d, bc_normals %d, tex_cache_mb %d, geo_cache_mb %d, performance_mode %d",
+         "bc_astc %d, astc_block %d, mali_bc %d, bc3_etc2 %d, bc_normals %d, tex_cache_mb %d, geo_cache_mb %d, performance_mode %d",
          int(cfg->sharp_hud), cfg->fsr, cfg->fsr_sharpness, cfg->fxaa, cfg->shadow_quality, cfg->anisotropy, cfg->skip_hidden,
-         int(cfg->skip_prepass), int(cfg->bc_astc), cfg->astc_block, int(cfg->bc3_etc2), int(cfg->bc_normals), cfg->tex_cache_mb, cfg->geo_cache_mb,
+         int(cfg->skip_prepass), int(cfg->bc_astc), cfg->astc_block, cfg->mali_bc, int(cfg->bc3_etc2), int(cfg->bc_normals), cfg->tex_cache_mb, cfg->geo_cache_mb,
          int(cfg->performance_mode));
-    LOGI(kTag, "settings: sharp_hud %d, fsr %d, fxaa %d, shadow_quality %d, anisotropy %d, skip_hidden %d, skip_prepass %d, "
-         "bc_astc %d, astc_block %d, bc3_etc2 %d, tex_cache_mb %d, geo_cache_mb %d, performance_mode %d, late_depth %d",
-         int(cfg->sharp_hud), int(cfg->fsr), cfg->fxaa, cfg->shadow_quality, cfg->anisotropy, cfg->skip_hidden,
-         int(cfg->skip_prepass), int(cfg->bc_astc), cfg->astc_block, int(cfg->bc3_etc2), cfg->tex_cache_mb, cfg->geo_cache_mb,
-         int(cfg->performance_mode), int(cfg->late_depth));
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
          g_touch.opacity, g_touch.camera_speed, g_touch.camera_invert ? ", camera inverted" : "");
