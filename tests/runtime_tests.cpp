@@ -27,6 +27,7 @@
 static int g_failures = 0;
 #include "hle/nvn/astc_encode.h"
 #include "hle/nvn/etc_encode.h"
+#include "hle/nvn/normal_map.h"
 #include "hle/nvn/parallel.h"
 #include "hle/nvn/tex_disk_cache.h"
 #include "runtime/cheat_vm.h"
@@ -713,6 +714,95 @@ static void TestAstcBlockSizes() {
     }
 }
 
+// Faces: smooth skin gradients with sharp dark features (eyes, brows, lips) in the same 4x4 blocks. The encoder shares the
+// differential-mode delta between both subblocks and refines the bases, so a dark edge no longer drags one half of a block
+// to a wrong colour: PSNR stays above 38.5 dB and no texel is more than 58 levels off (the old encoder: 38.3 dB, 63).
+static void TestEtcSkin() {
+    using namespace dsr::hle::nvn;
+    const int W = 128, H = 128, bxn = W / 4, byn = H / 4;
+    std::vector<uint8_t> img(size_t(W) * H * 4);
+    uint32_t seed = 3;
+    auto rnd = [&] { return (seed = seed * 1103515245u + 12345u) >> 16; };
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const double u = x / double(W), v = y / double(H);
+            double r = 205 - 60 * (u - 0.5) * (u - 0.5) * 4 - 25 * v, g = 150 - 45 * (u - 0.5) * (u - 0.5) * 4 - 30 * v,
+                   b = 120 - 35 * v - 20 * (u - 0.5) * (u - 0.5) * 4;
+            const double n = (int(rnd() % 9) - 4) * 0.5;
+            r += n, g += n * 0.8, b += n * 0.7;
+            for (int e = 0; e < 2; e++) {
+                const double cx = e ? 0.68 : 0.32, d = std::sqrt((u - cx) * (u - cx) * 4 + (v - 0.38) * (v - 0.38) * 16);
+                if (d < 0.12) r = 30, g = 22, b = 20;
+            }
+            if (std::fabs(v - 0.72) < 0.02 && u > 0.35 && u < 0.65) r = 150, g = 50, b = 55;
+            uint8_t* p = &img[(size_t(y) * W + x) * 4];
+            p[0] = uint8_t(std::clamp(r, 0.0, 255.0)), p[1] = uint8_t(std::clamp(g, 0.0, 255.0));
+            p[2] = uint8_t(std::clamp(b, 0.0, 255.0)), p[3] = 255;
+        }
+    for (int punch = 0; punch < 2; punch++) {  // RGB8 (BC1 without alpha, BC3 colour) and RGB8A1 (BC1 with alpha)
+        std::vector<uint8_t> out(EtcLevelBytes(W, H, 1));
+        EncodeEtc2Rgb(out.data(), img.data(), W, H, 1, punch != 0);
+        double se = 0;
+        int max_err = 0;
+        for (int by = 0; by < byn; by++)
+            for (int bx = 0; bx < bxn; bx++) {
+                uint8_t d[16][4];
+                DecodeEtc2RgbBlock(&out[(size_t(by) * bxn + bx) * 8], punch != 0, d);
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++)
+                        for (int c = 0; c < 3; c++) {
+                            const int e = int(d[y * 4 + x][c]) - img[(size_t(by * 4 + y) * W + bx * 4 + x) * 4 + c];
+                            se += double(e) * e;
+                            max_err = std::max(max_err, std::abs(e));
+                        }
+            }
+        const double mse = se / (double(W) * H * 3);
+        CHECK(10 * std::log10(255.0 * 255.0 / mse) > 38.5);
+        CHECK(max_err <= 58);
+    }
+}
+
+// Normal maps (BC1 RGB normals, BC3 DXT5nm) are recognised from the mean colour of a small mip level, so they can stay
+// uncompressed instead of going through ETC2; albedo, single-level and linear textures are left alone.
+static void TestNormalMapDetect() {
+    using namespace dsr::hle::nvn;
+    auto make = [&](BcKind k, int w, int h, int levels, int r, int g, int b, int a, TextureLayout* layout) {
+        TextureState t;
+        t.format = k == BcKind::BC1 ? 66 : 68;
+        t.width = w;
+        t.height = h;
+        t.levels = levels;
+        *layout = ComputeLayout(t);
+        std::vector<uint8_t> mem(layout->total + 4096, 0);
+        const uint16_t c565 = uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        for (size_t lv = 0; lv < layout->levels.size(); lv++) {
+            const LevelLayout& l = layout->levels[lv];
+            std::vector<uint8_t> blocks(size_t(l.row_bytes) * l.rows, 0);
+            const int bpb = k == BcKind::BC1 ? 8 : 16;
+            for (size_t o = 0; o + bpb <= blocks.size(); o += bpb) {
+                uint8_t* c = &blocks[o + (bpb - 8)];
+                if (k == BcKind::BC3) blocks[o] = blocks[o + 1] = uint8_t(a);
+                c[0] = c[2] = uint8_t(c565 & 255);
+                c[1] = c[3] = uint8_t(c565 >> 8);
+            }
+            SwizzleLevel(mem.data() + l.offset, blocks.data(), l);
+        }
+        return mem;
+    };
+    TextureLayout L;
+    float mean[4];
+    auto mem = make(BcKind::BC1, 256, 256, 9, 128, 128, 255, 255, &L);
+    CHECK(BcMeanColor(mem.data(), L, BcKind::BC1, mean) && MeanLooksLikeNormalMap(mean, BcKind::BC1));
+    mem = make(BcKind::BC1, 256, 256, 9, 200, 150, 100, 255, &L);
+    CHECK(BcMeanColor(mem.data(), L, BcKind::BC1, mean) && !MeanLooksLikeNormalMap(mean, BcKind::BC1));
+    mem = make(BcKind::BC3, 342, 342, 9, 255, 128, 0, 128, &L);  // DXT5nm: x in alpha, y in green
+    CHECK(BcMeanColor(mem.data(), L, BcKind::BC3, mean) && MeanLooksLikeNormalMap(mean, BcKind::BC3));
+    mem = make(BcKind::BC3, 342, 342, 9, 200, 150, 100, 255, &L);
+    CHECK(BcMeanColor(mem.data(), L, BcKind::BC3, mean) && !MeanLooksLikeNormalMap(mean, BcKind::BC3));
+    mem = make(BcKind::BC1, 256, 256, 1, 128, 128, 255, 255, &L);  // one level: nothing to average
+    CHECK(!BcMeanColor(mem.data(), L, BcKind::BC1, mean));
+}
+
 static void TestEtcEncode() {
     using namespace dsr::hle::nvn;
     const int W = 37, H = 29;  // edges not on block boundaries
@@ -1029,6 +1119,8 @@ int main() {
         {"shader_translator", TestShaderTranslator},
         {"block_linear", TestBlockLinear},
         {"etc_encode", TestEtcEncode},
+        {"etc_skin", TestEtcSkin},
+        {"normal_map", TestNormalMapDetect},
         {"astc_encode", TestAstcEncode},
         {"astc_block_sizes", TestAstcBlockSizes},
         {"tex_disk_cache", TestTexDiskCache},
