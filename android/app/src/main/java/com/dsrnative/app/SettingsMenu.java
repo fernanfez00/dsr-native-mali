@@ -534,6 +534,9 @@ public final class SettingsMenu {
         final int maliFirst = mBody.getChildCount() + 1;  // after the group's header row
         TextView maliHeader = subsection(Strings.t("sec_mali"));
         note(Strings.t("gpu_n"));
+        choice("mali_bc", Strings.t("malibc_t"), Strings.t("malibc_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "1", "2"},
+                new String[] {Strings.t("malibc_0"), Strings.t("malibc_1"), Strings.t("malibc_2")}, "0");
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("bc_normals", Strings.t("bcn_t"), Strings.t("bcn_n") + " " + Strings.t("changes_next"), "1", "0", "1");
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
@@ -546,8 +549,6 @@ public final class SettingsMenu {
                 "0");
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("mali_tile_turbo", Strings.t("turbo_t"), Strings.t("turbo_n") + " " + Strings.t("changes_next"), "1",
-                "0", "0");
-        toggle("late_depth", Strings.t("ldepth_t"), Strings.t("ldepth_n") + " " + Strings.t("changes_next"), "1",
                 "0", "0");
         foldable(maliHeader, Strings.t("sec_mali"), maliFirst, mBody.getChildCount());
     }
