@@ -588,7 +588,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "mali_tile_turbo")) cfg->mali_tile_turbo = v != 0;
             else if (!strcmp(key, "sharp_hud")) cfg->sharp_hud = v != 0;
             else if (!strcmp(key, "fxaa")) cfg->fxaa = std::clamp(v, 0, 2);
-            else if (!strcmp(key, "fsr")) cfg->fsr = v != 0;
+            else if (!strcmp(key, "fsr")) cfg->fsr = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "bc_normals")) cfg->bc_normals = v != 0;
+            else if (!strcmp(key, "fsr_sharpness")) cfg->fsr_sharpness = std::clamp(v, 0, 100);
             else if (!strcmp(key, "shadow_quality")) cfg->shadow_quality = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
@@ -679,10 +681,10 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), int(cfg->mali_tile_turbo), int(cfg->performance_mode), cfg->texture_mip_skip, int(cfg->lighter_post_fx), cfg->present_mode.c_str(),
          cfg->hole_test);
     // The newer graphics settings (one line, so a report shows what was tried).
-    LOGI(kTag, "settings: sharp_hud %d, fsr %d, fxaa %d, shadow_quality %d, anisotropy %d, skip_hidden %d, skip_prepass %d, "
-         "bc_astc %d, astc_block %d, bc3_etc2 %d, tex_cache_mb %d, geo_cache_mb %d, performance_mode %d",
-         int(cfg->sharp_hud), int(cfg->fsr), cfg->fxaa, cfg->shadow_quality, cfg->anisotropy, cfg->skip_hidden,
-         int(cfg->skip_prepass), int(cfg->bc_astc), cfg->astc_block, int(cfg->bc3_etc2), cfg->tex_cache_mb, cfg->geo_cache_mb,
+    LOGI(kTag, "settings: sharp_hud %d, fsr %d, fsr_sharpness %d, fxaa %d, shadow_quality %d, anisotropy %d, skip_hidden %d, skip_prepass %d, "
+         "bc_astc %d, astc_block %d, bc3_etc2 %d, bc_normals %d, tex_cache_mb %d, geo_cache_mb %d, performance_mode %d",
+         int(cfg->sharp_hud), cfg->fsr, cfg->fsr_sharpness, cfg->fxaa, cfg->shadow_quality, cfg->anisotropy, cfg->skip_hidden,
+         int(cfg->skip_prepass), int(cfg->bc_astc), cfg->astc_block, int(cfg->bc3_etc2), int(cfg->bc_normals), cfg->tex_cache_mb, cfg->geo_cache_mb,
          int(cfg->performance_mode));
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",
