@@ -2,7 +2,10 @@ package com.dsrnative.app;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.LightingColorFilter;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.RectF;
@@ -15,6 +18,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -102,6 +108,135 @@ public final class TouchControls extends View implements InputManager.InputDevic
 
     /** True while the player moves the controls. */
     static volatile boolean sEditing;
+
+    // ---- skins (settings.txt touch_skin) ---------------------------------------------------------------------------
+    // A skin is a set of PNG images drawn in place of the plain shapes: built in (assets/skins/<id>/) or the
+    // player's own (Download/DSRNative/skins/<folder>/). Names: a b x y l r zl zr minus plus l3 lock dpad_up dpad_down
+    // dpad_left dpad_right stick_base stick_nub ring (the camera stick); <name>_lit is used while pressed (without
+    // it, the image is drawn brighter). Each image is fitted into its button, keeping its proportions; a missing
+    // image falls back to the plain shape. The Dark Souls skin (by v39192503-ux, issue #33) is the default.
+    static final String SKIN_DEFAULT = "dark_souls", SKIN_CLASSIC = "classic";
+    static final String[] SKIN_IMAGES = {"a", "b", "x", "y", "l", "r", "zl", "zr", "minus", "plus", "l3", "lock",
+            "dpad_up", "dpad_down", "dpad_left", "dpad_right", "stick_base", "stick_nub", "ring"};
+    /** The images of the skin in use (name -> bitmap); empty: the plain shapes. */
+    private static volatile Map<String, Bitmap> sSkin = new HashMap<>();
+    private static String sSkinName = "";
+
+    /** The player's skins folder (next to settings.txt). */
+    static File skinsDir(String settingsPath) {
+        File parent = new File(settingsPath == null ? "" : settingsPath).getParentFile();
+        return new File(parent == null ? new File(".") : parent, "skins");
+    }
+
+    /** The player's own skins: folders of the skins folder with at least one known image. */
+    static List<String> folderSkins(String settingsPath) {
+        List<String> out = new ArrayList<>();
+        File[] dirs = skinsDir(settingsPath).listFiles();
+        if (dirs == null) return out;
+        for (File d : dirs) {
+            if (!d.isDirectory() || d.getName().equals(SKIN_DEFAULT) || d.getName().equals(SKIN_CLASSIC)) continue;
+            for (String n : SKIN_IMAGES)
+                if (new File(d, n + ".png").isFile()) {
+                    out.add(d.getName());
+                    break;
+                }
+        }
+        java.util.Collections.sort(out, String.CASE_INSENSITIVE_ORDER);
+        return out;
+    }
+
+    /** Creates the skins folder with a short README the first time (where to put a skin, and its file names). */
+    static void prepareSkinsDir(String settingsPath) {
+        try {
+            File dir = skinsDir(settingsPath);
+            File readme = new File(dir, "README.txt");
+            if (readme.exists() || (!dir.isDirectory() && !dir.mkdirs())) return;
+            StringBuilder b = new StringBuilder();
+            b.append("Touch control skins. Make a folder here for each skin (its name is shown in the settings menu,\n")
+                    .append("Touch tab, Skin) and put PNG images in it, named:\n\n");
+            for (String n : SKIN_IMAGES) b.append("  ").append(n).append(".png\n");
+            b.append("\nring.png is the camera stick, which appears where the right side of the screen is touched.\n")
+                    .append("<name>_lit.png (for example a_lit.png) is shown while the button is pressed; without it the\n")
+                    .append("image is drawn brighter. Images are fitted into their button keeping their proportions,\n")
+                    .append("and any image left out is drawn as the plain button. Square images of 160 to 384 pixels\n")
+                    .append("work well (larger ones are reduced).\n");
+            try (FileOutputStream o = new FileOutputStream(readme)) {
+                o.write(b.toString().getBytes("UTF-8"));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Loads a skin (on a worker thread) and redraws the controls with it. */
+    static void setSkin(final Context context, final String name, final String settingsPath) {
+        final String n = name == null || name.isEmpty() ? SKIN_DEFAULT : name;
+        if (n.equals(sSkinName)) return;
+        sSkinName = n;
+        final Context app = context.getApplicationContext();
+        new Thread(() -> {
+            Map<String, Bitmap> m = new HashMap<>();
+            if (!n.equals(SKIN_CLASSIC)) {
+                File dir = n.equals(SKIN_DEFAULT) ? null : new File(skinsDir(settingsPath), n);
+                for (String base : SKIN_IMAGES)
+                    for (String img : new String[] {base, base + "_lit"}) {
+                        Bitmap bm = loadSkinImage(app, n, dir, img);
+                        if (bm != null) m.put(img, bm);
+                    }
+            }
+            android.util.Log.i("DSRNative", "touch controls: skin " + n + " (" + m.size() + " images)");
+            synchronized (TouchControls.class) {
+                if (!n.equals(sSkinName)) return;  // another skin was picked meanwhile
+                sSkin = m;
+            }
+            final TouchControls v = sView;
+            if (v != null) v.postInvalidate();
+        }, "dsr-skin").start();
+    }
+
+    /** One image of a skin, or null: built in (dir null) from the APK's assets, else from the folder. */
+    private static Bitmap loadSkinImage(Context app, String skin, File dir, String img) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            if (dir == null) {
+                try (InputStream in = app.getAssets().open("skins/" + skin + "/" + img + ".png")) {
+                    return BitmapFactory.decodeStream(in);
+                }
+            }
+            File f = new File(dir, img + ".png");
+            if (!f.isFile()) return null;
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getPath(), o);
+            o.inJustDecodeBounds = false;
+            o.inSampleSize = 1;
+            while (Math.max(o.outWidth, o.outHeight) / o.inSampleSize > 512) o.inSampleSize *= 2;  // memory bound
+            return BitmapFactory.decodeFile(f.getPath(), o);
+        } catch (Exception | OutOfMemoryError e) {
+            return null;  // missing or unreadable: the plain shape
+        }
+    }
+
+    /** The skin image name of a button. */
+    private static String skinName(int bit) {
+        switch (bit) {
+            case A: return "a";
+            case B: return "b";
+            case X: return "x";
+            case Y: return "y";
+            case L: return "l";
+            case R: return "r";
+            case ZL: return "zl";
+            case ZR: return "zr";
+            case MINUS: return "minus";
+            case PLUS: return "plus";
+            case L3: return "l3";
+            case R3: return "lock";
+            case UP: return "dpad_up";
+            case DOWN: return "dpad_down";
+            case LEFT: return "dpad_left";
+            case RIGHT: return "dpad_right";
+            default: return "";
+        }
+    }
 
     /**
      * Lets the player move the controls (shown for it even when they are off or hidden). Save writes the layout to
@@ -741,6 +876,7 @@ public final class TouchControls extends View implements InputManager.InputDevic
             return true;
         }
         final int action = e.getActionMasked();
+        if (edgeSwipe(e)) return true;
         if (!mShown) {
             if (action == MotionEvent.ACTION_DOWN) checkDoubleTap(e.getX(), e.getY());
             return true;
@@ -770,6 +906,49 @@ public final class TouchControls extends View implements InputManager.InputDevic
         sendState();
         invalidateIfChanged();
         return true;
+    }
+
+    // ---- swipe in from the left edge: opens the settings menu ------------------------------------------------------
+    // A finger that comes down within EDGE_DP of the left edge and moves right by a sixth of the screen's width
+    // (mostly sideways) opens the menu, whatever it was pressing (let go first). Without the touch controls, the
+    // same gesture is caught by native code (android_main.cpp, OnInput).
+    static final float EDGE_DP = 24f;
+    private final boolean[] mEdge = new boolean[16];
+    private final float[] mEdgeX = new float[16], mEdgeY = new float[16];
+
+    private boolean edgeSwipe(MotionEvent e) {
+        final int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            int i = e.getActionIndex(), id = e.getPointerId(i);
+            if (id >= 0 && id < 16) {
+                mEdge[id] = e.getX(i) <= EDGE_DP * mDensity;
+                mEdgeX[id] = e.getX(i);
+                mEdgeY[id] = e.getY(i);
+            }
+        } else if (action == MotionEvent.ACTION_MOVE) {
+            for (int i = 0; i < e.getPointerCount(); i++) {
+                int id = e.getPointerId(i);
+                if (id < 0 || id >= 16 || !mEdge[id]) continue;
+                float dx = e.getX(i) - mEdgeX[id], dy = Math.abs(e.getY(i) - mEdgeY[id]);
+                if (dy > 0.5f * Math.max(dx, 1f) && dy > 24 * mDensity) {
+                    mEdge[id] = false;  // mostly up or down: not the gesture
+                } else if (dx >= getWidth() / 6f) {
+                    mEdge[id] = false;
+                    android.util.Log.i("DSRNative", "swipe from the left edge: opening the settings menu");
+                    releaseAll();
+                    sendState();
+                    invalidate();
+                    SettingsMenu.show(mActivity);
+                    return true;
+                }
+            }
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            int id = e.getPointerId(e.getActionIndex());
+            if (id >= 0 && id < 16) mEdge[id] = false;
+        } else if (action == MotionEvent.ACTION_CANCEL) {
+            java.util.Arrays.fill(mEdge, false);
+        }
+        return false;
     }
 
     private void checkDoubleTap(float x, float y) {
@@ -963,15 +1142,46 @@ public final class TouchControls extends View implements InputManager.InputDevic
 
     // ---- drawing --------------------------------------------------------------------------------------------
 
+    private final Paint mBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final LightingColorFilter mPressedFilter = new LightingColorFilter(0xFFFFFFFF, 0x00383838);
+    private final RectF mDst = new RectF();
+
+    /**
+     * Draws a skin image fitted into a w x h box at (cx, cy), keeping its proportions; brighter when pressed and the
+     * skin has no _lit image. False if the skin has no such image (the plain shape is drawn instead).
+     */
+    private boolean drawSkin(Canvas c, Map<String, Bitmap> skin, String name, boolean on, float cx, float cy, float w,
+            float h, int alpha) {
+        Bitmap bm = on ? skin.get(name + "_lit") : null;
+        boolean brighten = false;
+        if (bm == null) {
+            bm = skin.get(name);
+            brighten = on;
+        }
+        if (bm == null) return false;
+        float s = Math.min(w / bm.getWidth(), h / bm.getHeight());
+        float dw = bm.getWidth() * s, dh = bm.getHeight() * s;
+        mDst.set(cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2);
+        mBitmapPaint.setAlpha(alpha);
+        mBitmapPaint.setColorFilter(brighten ? mPressedFilter : null);
+        c.drawBitmap(bm, null, mDst, mBitmapPaint);
+        return true;
+    }
+
     @Override
     protected void onDraw(Canvas c) {
         if (!mShown) return;
         if (mEditing) c.drawColor(0x50000000);
+        final Map<String, Bitmap> skin = sSkin;
         // Stick (the knob stays inside the ring).
         final float bx = mStickBaseX, by = mStickBaseY;
-        mFill.setColor(mEditing && ("stick".equals(mDragGroup) || "stick".equals(mSelGroup)) ? 0xA0C9A55C : 0x40000000);
-        c.drawCircle(bx, by, mStickRadius, mFill);
-        c.drawCircle(bx, by, mStickRadius, mStroke);
+        final boolean stickSel = mEditing && ("stick".equals(mDragGroup) || "stick".equals(mSelGroup));
+        if (stickSel || !drawSkin(c, skin, "stick_base", mStickPointer >= 0, bx, by, 2 * mStickRadius,
+                2 * mStickRadius, 255)) {
+            mFill.setColor(stickSel ? 0xA0C9A55C : 0x40000000);
+            c.drawCircle(bx, by, mStickRadius, mFill);
+            c.drawCircle(bx, by, mStickRadius, mStroke);
+        }
         float kx = bx, ky = by;
         if (mStickPointer >= 0) {
             float dx = mStickX - bx, dy = mStickY - by, len = (float) Math.sqrt(dx * dx + dy * dy);
@@ -982,29 +1192,38 @@ public final class TouchControls extends View implements InputManager.InputDevic
             kx = bx + dx;
             ky = by + dy;
         }
-        mFill.setColor(mStickPointer >= 0 ? 0xA0FFFFFF : 0x60FFFFFF);
-        c.drawCircle(kx, ky, mStickRadius * 0.45f, mFill);
+        if (!drawSkin(c, skin, "stick_nub", mStickPointer >= 0, kx, ky, mStickRadius, mStickRadius, 255)) {
+            mFill.setColor(mStickPointer >= 0 ? 0xA0FFFFFF : 0x60FFFFFF);
+            c.drawCircle(kx, ky, mStickRadius * 0.45f, mFill);
+        }
         // Camera stick, only while touched, faint: 10% opaque on screen (whatever touch_opacity is).
         if (mRStickPointer >= 0) {
             final int a = Math.max(1, Math.min(255, Math.round(255 * 0.10f / Math.max(0.1f, getAlpha()))));
-            mFill.setColor(a << 24);
-            c.drawCircle(mRBaseX, mRBaseY, mRRadius, mFill);
-            mStroke.setAlpha(a);
-            c.drawCircle(mRBaseX, mRBaseY, mRRadius, mStroke);
-            mStroke.setAlpha(0xFF);
+            // A skin's camera ring is an image of its own: shown at 40% (the plain one, a faint outline, at 10%).
+            final int sa = Math.max(1, Math.min(255, Math.round(255 * 0.40f / Math.max(0.1f, getAlpha()))));
+            if (!drawSkin(c, skin, "ring", false, mRBaseX, mRBaseY, 2 * mRRadius, 2 * mRRadius, sa)) {
+                mFill.setColor(a << 24);
+                c.drawCircle(mRBaseX, mRBaseY, mRRadius, mFill);
+                mStroke.setAlpha(a);
+                c.drawCircle(mRBaseX, mRBaseY, mRRadius, mStroke);
+                mStroke.setAlpha(0xFF);
+            }
             float dx = mRX - mRBaseX, dy = mRY - mRBaseY, len = (float) Math.sqrt(dx * dx + dy * dy);
             if (len > mRRadius) {
                 dx = dx / len * mRRadius;
                 dy = dy / len * mRRadius;
             }
-            mFill.setColor((a << 24) | 0xFFFFFF);
-            c.drawCircle(mRBaseX + dx, mRBaseY + dy, mRRadius * 0.45f, mFill);
+            if (!drawSkin(c, skin, "stick_nub", true, mRBaseX + dx, mRBaseY + dy, mRRadius, mRRadius, sa)) {
+                mFill.setColor((a << 24) | 0xFFFFFF);
+                c.drawCircle(mRBaseX + dx, mRBaseY + dy, mRRadius * 0.45f, mFill);
+            }
         }
         // Buttons.
         for (Button b : mButtons) {
             boolean on = b.pressCount > 0;
-            mFill.setColor(mEditing && (b.group.equals(mDragGroup) || b.group.equals(mSelGroup)) ? 0xC0C9A55C
-                    : on ? 0x90FFFFFF : 0x50000000);
+            boolean sel = mEditing && (b.group.equals(mDragGroup) || b.group.equals(mSelGroup));
+            if (!sel && drawSkin(c, skin, skinName(b.bit), on, b.cx, b.cy, b.w, b.round ? b.w : b.h, 255)) continue;
+            mFill.setColor(sel ? 0xC0C9A55C : on ? 0x90FFFFFF : 0x50000000);
             if (b.round) {
                 c.drawCircle(b.cx, b.cy, b.w / 2, mFill);
                 c.drawCircle(b.cx, b.cy, b.w / 2, mStroke);

@@ -67,7 +67,20 @@ public final class SettingsMenu {
     /** 1: the GPU samples BC textures itself, 0: it does not (converted on the CPU), -1: not known yet. */
     static native int nativeGpuHasBc();
 
-    static final int REQ_DRIVER = 4101, REQ_FOLDER = 4102;
+    // Cheats (native runtime/cheats.h); text as UTF-8 bytes.
+    /** "build\tID\tfile" then per cheat "on\tmaster\tname\terror"; empty before the game has started. */
+    static native byte[] nativeCheats();
+    static native boolean nativeCheatSet(int index, boolean on);
+    /** "+added\tunusable", or why nothing was added. */
+    static native byte[] nativeCheatAdd(byte[] text);
+    /** The first problem with the cheats in `text`, or empty. */
+    static native byte[] nativeCheatCheck(byte[] text);
+    static native boolean nativeCheatDelete(int index);
+    static native byte[] nativeCheatText(int index);
+    /** "" until the cheats start, "-" if nothing to report, else the cheats turned off after a crash. */
+    static native byte[] nativeCheatWarning();
+
+    static final int REQ_DRIVER = 4101, REQ_FOLDER = 4102, REQ_CHEATS = 4103;
 
     private static String sSettingsPath = "", sDriversDir = "", sRunningDriver = "system", sGameDir = "",
             sDefaultGameDir = "";
@@ -85,8 +98,61 @@ public final class SettingsMenu {
         Strings.setLanguage(v.containsKey("language") ? v.get("language") : "en-US");
         TouchControls.sRecenter = !"0".equals(v.get("touch_camera_recenter"));
         TouchControls.setLayout(v.get("touch_layout"));
+        TouchControls.prepareSkinsDir(settingsPath);
+        TouchControls.setSkin(activity, v.get("touch_skin"), settingsPath);
         if ("1".equals(v.get("fps_counter"))) FpsCounter.apply(activity, true);
+        if (!"0".equals(v.get("keep_alive"))) {  // on unless turned off
+            KeepAliveService.apply(activity, true);
+            KeepAliveService.askNotificationPermission(activity);
+        }
         showFirstLaunchTip(activity);
+        checkCheatWarning(activity, 0);
+    }
+
+    /**
+     * The game crashed last time soon after cheats started: they were turned off (runtime/cheats.cpp). Tells the
+     * player once, when the cheats have started (polled for up to a minute).
+     */
+    private static void checkCheatWarning(final Activity activity, final int attempt) {
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (activity.isFinishing()) return;
+            String w;
+            try {
+                w = str(nativeCheatWarning());
+            } catch (Throwable e) {
+                return;
+            }
+            if (w.isEmpty()) {
+                if (attempt < 30) checkCheatWarning(activity, attempt + 1);
+                return;
+            }
+            if (w.equals("-")) return;
+            if (sOpen != null || TouchControls.sEditing) {  // after the menu or editor closes
+                final String names = w;
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                        () -> showCheatWarning(activity, names), 3000);
+                return;
+            }
+            showCheatWarning(activity, w);
+        }, attempt == 0 ? 2500 : 2000);
+    }
+
+    private static void showCheatWarning(final Activity activity, final String names) {
+        if (activity.isFinishing()) return;
+        try {
+            AlertDialog d = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(Strings.t("cheat_crash_t"))
+                    .setMessage(Strings.t("cheat_crash", names))
+                    .setPositiveButton(Strings.t("ok"), null)
+                    .create();
+            d.setOnDismissListener(x -> {
+                if (sOpen == null && !TouchControls.sEditing) nativeMenuOpen(false);
+            });
+            nativeMenuOpen(true);  // the game waits while it shows
+            GameActivity.showImmersive(d);
+        } catch (Exception e) {
+            android.util.Log.w("DSRNative", "cheats: could not show the crash warning", e);
+        }
     }
 
     /** The first time the game starts: how to open this menu. */
@@ -98,7 +164,7 @@ public final class SettingsMenu {
             try {
                 AlertDialog d = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle(Strings.t("tip_t"))
-                        .setMessage(Strings.t("tip"))
+                        .setMessage(Strings.t("tip") + " " + Strings.t("tip_swipe"))
                         .setPositiveButton(Strings.t("ok"), null)
                         .create();
                 d.setOnDismissListener(x -> {
@@ -129,11 +195,13 @@ public final class SettingsMenu {
 
     /** From GameActivity.onActivityResult: true if the result was for the menu. */
     static boolean onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
-        if (requestCode != REQ_DRIVER && requestCode != REQ_FOLDER) return false;
+        if (requestCode != REQ_DRIVER && requestCode != REQ_FOLDER && requestCode != REQ_CHEATS) return false;
         Uri uri = resultCode == Activity.RESULT_OK && data != null ? data.getData() : null;
         if (sOpen == null || uri == null) return true;
         if (requestCode == REQ_DRIVER)
             sOpen.importDriver(uri);
+        else if (requestCode == REQ_CHEATS)
+            sOpen.importCheats(uri);
         else
             sOpen.chooseGameFolder(uri);
         return true;
@@ -269,8 +337,9 @@ public final class SettingsMenu {
     private Dialog mDialog;
     private LinearLayout mBody;
     private ScrollView mScroll;
-    private static final String[] TAB_KEYS = {"tab_driver", "tab_settings", "tab_graphics", "tab_touch", "tab_language"};
-    private static final int TAB_GRAPHICS = 2, TAB_TOUCH = 3, TAB_LANGUAGE = 4;
+    private static final String[] TAB_KEYS = {"tab_driver", "tab_settings", "tab_graphics", "tab_touch", "tab_cheats",
+            "tab_language"};
+    private static final int TAB_GRAPHICS = 2, TAB_TOUCH = 3, TAB_CHEATS = 4, TAB_LANGUAGE = 5;
     private final TextView[] mTabs = new TextView[TAB_KEYS.length];
     private TextView mHint, mClose, mScaleLabel;
     private int mTab = 0;
@@ -405,6 +474,7 @@ public final class SettingsMenu {
             case 1: buildSettingsTab(); break;
             case TAB_GRAPHICS: buildGraphicsTab(); break;
             case TAB_TOUCH: buildTouchTab(); break;
+            case TAB_CHEATS: buildCheatsTab(); break;
             default: buildLanguageTab(); break;
         }
         mScroll.scrollTo(0, 0);
@@ -414,9 +484,11 @@ public final class SettingsMenu {
 
     private void buildGraphicsTab() {
         section(Strings.t("sec_display"));
-        choice("fps", Strings.t("fps_t"), Strings.t("fps_auto_n") + " " + Strings.t("changes_now"),
-                new String[] {"30", "45", "60", "auto"},
-                new String[] {"30 fps", "45 fps", "60 fps", Strings.t("fps_auto")}, "60");
+        choice("fps", Strings.t("fps_t"), Strings.t("fps_auto_n") + " "
+                        + Strings.t("fps_unl_n", Math.max(60, Math.min(144, GameActivity.displayMaxHz()))) + " "
+                        + Strings.t("changes_now"),
+                new String[] {"30", "45", "60", "auto", "unlocked"},
+                new String[] {"30 fps", "45 fps", "60 fps", Strings.t("fps_auto"), Strings.t("fps_unl")}, "60");
         choice("min_fps", Strings.t("minfps_t"), Strings.t("minfps_n") + " " + Strings.t("changes_now"),
                 new String[] {"15", "20", "30"}, new String[] {"15 fps", "20 fps", "30 fps"}, "20");
         choice("scale_filter", Strings.t("scalef_t"), Strings.t("scalef_n") + " " + Strings.t("changes_now"),
@@ -460,6 +532,8 @@ public final class SettingsMenu {
         toggle("skip_post", Strings.t("post_t"), Strings.t("post_n") + " " + Strings.t("changes_now"), "1", "0", "0");
         toggle("skip_post_plus", Strings.t("postplus_t"), Strings.t("postplus_n") + " " + Strings.t("changes_now"), "1", "0",
                 "0");
+        toggle("lighter_post_fx", Strings.t("lpost_t"), Strings.t("lpost_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
         choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_now"),
                 new String[] {"0", "1", "2", "3"},
                 new String[] {Strings.t("q_off"), Strings.t("hidden_std"), Strings.t("hidden_ext"), Strings.t("hidden_max")}, "0");
@@ -482,9 +556,10 @@ public final class SettingsMenu {
                 new String[] {"4", "6", "8"},
                 new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
         toggle("bc5_astc", Strings.t("bc5_t"), Strings.t("bc5_n") + " " + Strings.t("changes_new_tex"), "1", "0", "0");
+        choice("tex_cache_mb", Strings.t("texc_t"), Strings.t("texc_n") + " " + Strings.t("changes_next"),
+                new String[] {"512", "1024", "256", "0"},
+                new String[] {"512 MB", "1024 MB", "256 MB", Strings.t("off")}, "512");
         toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_new_tex"), "1", "0",
-                "0");
-        toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         choice("geo_cache_mb", Strings.t("geo_t"), Strings.t("geo_n") + " " + Strings.t("changes_next"),
                 new String[] {"192", "128", "96", "64"}, new String[] {"192 MB", "128 MB", "96 MB", "64 MB"}, "192");
@@ -502,6 +577,14 @@ public final class SettingsMenu {
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
 
+    // Drivers that come with the app (assets/drivers/<name>.zip; the native side copies them out of the APK).
+    private static final String[] BUNDLED_DRIVERS = {"Turnip_Gen8_V39"};
+
+    private static boolean isBundledDriver(String d) {
+        for (String b : BUNDLED_DRIVERS) if (b.equals(d)) return true;
+        return false;
+    }
+
     private static String driverLabel(String d) {
         return d == null || d.isEmpty() || d.equals("system") ? Strings.t("system_driver") : d;
     }
@@ -515,6 +598,7 @@ public final class SettingsMenu {
         if (chosen == null || chosen.isEmpty()) chosen = "system";
         List<String> drivers = new ArrayList<>();
         drivers.add("system");
+        for (String b : BUNDLED_DRIVERS) drivers.add(b);
         File dir = new File(sDriversDir);
         File[] files = dir.listFiles();
         if (files != null) {
@@ -530,7 +614,8 @@ public final class SettingsMenu {
         for (final String d : drivers) {
             String label = d.equals("system") ? Strings.t("system_driver") + " " + Strings.t("default_mark") : d;
             if (d.equals(sRunningDriver)) label += "   • " + Strings.t("mark_in_use");
-            if (!d.equals("system") && !new File(dir, d).isFile()) label += "   • " + Strings.t("mark_missing");
+            if (!d.equals("system") && !isBundledDriver(d) && !new File(dir, d).isFile())
+                label += "   • " + Strings.t("mark_missing");
             final TextView row = chip(label, false);
             row.setSelected(d.equals(chosen));
             row.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
@@ -609,6 +694,9 @@ public final class SettingsMenu {
     private void buildSettingsTab() {
         section(Strings.t("sec_game"));
         toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
+        toggle("keep_alive", Strings.t("keep_t"), Strings.t("keep_n") + " " + Strings.t("changes_now"), "1", "0", "1");
+        toggle("detailed_logs", Strings.t("logs_t"), Strings.t("logs_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
         addCloseButton(8);
 
         section(Strings.t("sec_controls"));
@@ -758,7 +846,17 @@ public final class SettingsMenu {
 
     private void buildTouchTab() {
         section(Strings.t("sec_touch"));
-        toggle("touch_controls", Strings.t("touch_t"), Strings.t("changes_now"), "1", "0", "1");
+        toggle("touch_controls", Strings.t("touch_t"), Strings.t("changes_now") + " " + Strings.t("tip_swipe"), "1",
+                "0", "1");
+        List<String> folders = TouchControls.folderSkins(sSettingsPath);
+        String[] skinValues = new String[2 + folders.size()], skinLabels = new String[2 + folders.size()];
+        skinValues[0] = TouchControls.SKIN_DEFAULT;
+        skinLabels[0] = Strings.t("skin_ds");
+        skinValues[1] = TouchControls.SKIN_CLASSIC;
+        skinLabels[1] = Strings.t("skin_classic");
+        for (int i = 0; i < folders.size(); i++) skinValues[2 + i] = skinLabels[2 + i] = folders.get(i);
+        choice("touch_skin", Strings.t("skin_t"), Strings.t("skin_n"), skinValues, skinLabels,
+                TouchControls.SKIN_DEFAULT);
         choice("touch_opacity", Strings.t("opacity_t"), null, new String[] {"0.3", "0.5", "0.7", "1.0"},
                 new String[] {"30%", "50%", "70%", "100%"}, "0.7");
         choice("touch_camera_speed", Strings.t("camspeed_t"), null, new String[] {"0.75", "1.0", "1.5", "2.0"},
@@ -785,7 +883,7 @@ public final class SettingsMenu {
             }
             mValues.put("touch_layout", "");
             TouchControls.setLayout("");
-            Toast.makeText(mA, Strings.t("layout_reset_done"), Toast.LENGTH_SHORT).show();
+            toast(Strings.t("layout_reset_done"));
         });
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -859,7 +957,7 @@ public final class SettingsMenu {
                         return;
                     }
                     storePresets(mA, presets);
-                    Toast.makeText(mA, Strings.t("preset_saved", n), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_saved", n));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNegativeButton(Strings.t("cancel"), null)
@@ -877,14 +975,14 @@ public final class SettingsMenu {
                     }
                     mValues.put("touch_layout", layout);
                     TouchControls.setLayout(layout);
-                    Toast.makeText(mA, Strings.t("preset_loaded", name), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_loaded", name));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNeutralButton(Strings.t("preset_delete"), (dlg, w) -> {
                     JSONObject presets = loadPresets(mA);
                     presets.remove(name);
                     storePresets(mA, presets);
-                    Toast.makeText(mA, Strings.t("preset_deleted", name), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_deleted", name));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNegativeButton(Strings.t("cancel"), null)
@@ -907,6 +1005,266 @@ public final class SettingsMenu {
                 nativeMenuOpen(false);
             }
         });
+    }
+
+
+    // ---- Cheats tab ---------------------------------------------------------------------------------------------
+
+    private static final java.nio.charset.Charset UTF8 = java.nio.charset.StandardCharsets.UTF_8;
+
+    private static String str(byte[] b) {
+        return b == null ? "" : new String(b, UTF8);
+    }
+
+    private void buildCheatsTab() {
+        section(Strings.t("sec_cheats"));
+        String list;
+        try {
+            list = str(nativeCheats());
+        } catch (Throwable e) {
+            list = "";
+        }
+        if (list.isEmpty()) {
+            note(Strings.t("cheats_nogame"));
+            return;
+        }
+        String[] lines = list.split("\n");
+        String[] head = lines[0].split("\t", -1);
+        final String file = head.length > 2 ? head[2] : "";
+        final String folder = file.lastIndexOf('/') > 0 ? file.substring(0, file.lastIndexOf('/')) : file;
+        note(Strings.t("cheats_n", head.length > 1 ? head[1] : "?", file));
+        if (lines.length == 1) note(Strings.t("cheats_none"));
+        for (int i = 1; i < lines.length; i++) cheatRow(i - 1, lines[i].split("\t", -1));
+
+        section(Strings.t("sec_cheats_add"));
+        TextView imp = chip(Strings.t("cheat_import"), false);
+        imp.setGravity(Gravity.CENTER);
+        imp.setOnClickListener(v -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                mA.startActivityForResult(i, REQ_CHEATS);
+            } catch (Exception e) {
+                popup(Strings.t("no_fm_t"), Strings.t("cheat_no_picker", folder));
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        mBody.addView(imp, lp);
+        TextView type = chip(Strings.t("cheat_type"), false);
+        type.setGravity(Gravity.CENTER);
+        type.setOnClickListener(v -> typeCheatDialog("", ""));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.topMargin = dp(8);
+        mBody.addView(type, tlp);
+    }
+
+    /** One cheat: name, ON / OFF (master codes are always on; unusable ones say why). Long press: codes, delete. */
+    private void cheatRow(final int index, String[] f) {
+        final String name = f.length > 2 ? f[2] : "?";
+        final boolean master = f.length > 1 && "1".equals(f[1]);
+        final String error = f.length > 3 ? f[3] : "";
+        LinearLayout row = new LinearLayout(mA);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(10), dp(14), dp(10));
+        row.setFocusable(true);
+        row.setClickable(true);
+        row.setLongClickable(true);
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, rounded(0xFF3A3A3A, 10, 0xFFFFFFFF));
+        bg.addState(new int[] {android.R.attr.state_pressed}, rounded(0xFF3A3A3A, 10, 0));
+        bg.addState(new int[] {}, rounded(CARD, 10, 0));
+        row.setBackground(bg);
+        LinearLayout texts = new LinearLayout(mA);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(text(name, 15, TEXT, true));
+        if (!error.isEmpty())
+            texts.addView(text(Strings.t("cheat_bad", error), 12, 0xFFE07A5F, false));
+        else if (master)
+            texts.addView(text(Strings.t("cheat_master"), 12, DIM, false));
+        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final TextView state = new TextView(mA);
+        state.setTextSize(14);
+        state.setTypeface(Typeface.DEFAULT_BOLD);
+        state.setGravity(Gravity.CENTER);
+        state.setMinWidth(dp(64));
+        state.setPadding(dp(12), dp(6), dp(12), dp(6));
+        final boolean[] on = {f.length > 0 && "1".equals(f[0])};
+        final Runnable paint = () -> {
+            state.setText(!error.isEmpty() ? "—" : on[0] ? Strings.t("on") : Strings.t("off"));
+            state.setTextColor(on[0] ? 0xFF151515 : TEXT);
+            state.setBackground(rounded(on[0] ? GOLD : 0xFF444444, 14, 0));
+        };
+        paint.run();
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.leftMargin = dp(12);
+        row.addView(state, slp);
+        row.setOnClickListener(v -> {
+            if (master || !error.isEmpty()) {
+                cheatDialog(index, name);
+                return;
+            }
+            boolean ok;
+            try {
+                ok = nativeCheatSet(index, !on[0]);
+            } catch (Throwable e) {
+                ok = false;
+            }
+            if (!ok) {
+                showTab(TAB_CHEATS);  // the list changed underneath (e.g. a file was edited)
+                return;
+            }
+            on[0] = !on[0];
+            paint.run();
+        });
+        row.setOnLongClickListener(v -> {
+            cheatDialog(index, name);
+            return true;
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(10);
+        mBody.addView(row, lp);
+    }
+
+    /** A cheat's codes, with Delete. */
+    private void cheatDialog(final int index, final String name) {
+        String codes;
+        try {
+            codes = str(nativeCheatText(index)).trim();
+        } catch (Throwable e) {
+            codes = "";
+        }
+        TextView t = text(codes, 13, TEXT, false);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setTextIsSelectable(true);
+        t.setPadding(dp(20), dp(8), dp(20), dp(8));
+        ScrollView sv = new ScrollView(mA);
+        sv.addView(t);
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(name)
+                .setView(sv)
+                .setPositiveButton(Strings.t("close"), null)
+                .setNeutralButton(Strings.t("preset_delete"), (dlg, w) -> {
+                    boolean ok;
+                    try {
+                        ok = nativeCheatDelete(index);
+                    } catch (Throwable e) {
+                        ok = false;
+                    }
+                    if (ok) toast(Strings.t("preset_deleted", name));
+                    else popup(Strings.t("tab_cheats"), Strings.t("cheat_del_failed"));
+                    if (mTab == TAB_CHEATS) showTab(TAB_CHEATS);
+                })
+                .create();
+        GameActivity.showImmersive(d);
+    }
+
+    /** Name and codes typed in; checked before they are saved (the dialog comes back with the problem). */
+    private void typeCheatDialog(String nameText, String codesText) {
+        final EditText name = new EditText(mA);
+        name.setSingleLine(true);
+        name.setHint(Strings.t("cheat_name"));
+        name.setText(nameText);
+        name.setTextColor(TEXT);
+        name.setHintTextColor(DIM);
+        final EditText codes = new EditText(mA);
+        codes.setHint(Strings.t("cheat_codes"));
+        codes.setText(codesText);
+        codes.setTypeface(Typeface.MONOSPACE);
+        codes.setMinLines(4);
+        codes.setGravity(Gravity.TOP | Gravity.START);
+        codes.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        codes.setTextColor(TEXT);
+        codes.setHintTextColor(DIM);
+        LinearLayout box = new LinearLayout(mA);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        box.addView(codes, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        ScrollView sv = new ScrollView(mA);
+        sv.addView(box);
+        AlertDialog d = new AlertDialog.Builder(mA, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(Strings.t("cheat_type"))
+                .setView(sv)
+                .setPositiveButton(Strings.t("save"), (dlg, w) -> {
+                    String n = name.getText().toString().replace('[', ' ').replace(']', ' ').trim();
+                    String c = codes.getText().toString().trim();
+                    if (n.isEmpty()) n = Strings.t("cheat_name");
+                    String block = "[" + n + "]\n" + c + "\n";
+                    String problem;
+                    try {
+                        problem = str(nativeCheatCheck(block.getBytes(UTF8)));
+                    } catch (Throwable e) {
+                        problem = e.toString();
+                    }
+                    if (!problem.isEmpty()) {
+                        final String fn = n;
+                        AlertDialog err = new AlertDialog.Builder(mA,
+                                android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                                .setTitle(Strings.t("tab_cheats"))
+                                .setMessage(problem)
+                                .setPositiveButton(Strings.t("ok"), (x, y) -> typeCheatDialog(fn, c))
+                                .create();
+                        GameActivity.showImmersive(err);
+                        return;
+                    }
+                    addCheats(block);
+                })
+                .setNegativeButton(Strings.t("cancel"), null)
+                .create();
+        GameActivity.showImmersive(d);
+    }
+
+    private void importCheats(Uri uri) {
+        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+        try (InputStream in = mA.getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new IOException("cannot open the file");
+            byte[] b = new byte[1 << 16];
+            int n;
+            while ((n = in.read(b)) > 0) {
+                buf.write(b, 0, n);
+                if (buf.size() > (2 << 20)) throw new IOException("the file is larger than 2 MB");
+            }
+        } catch (IOException e) {
+            popup(Strings.t("tab_cheats"), e.getMessage());
+            return;
+        }
+        addCheats(new String(buf.toByteArray(), UTF8));
+    }
+
+    private void addCheats(String text) {
+        String r;
+        try {
+            r = str(nativeCheatAdd(text.getBytes(UTF8)));
+        } catch (Throwable e) {
+            r = e.toString();
+        }
+        if (mTab == TAB_CHEATS) showTab(TAB_CHEATS);
+        if (!r.startsWith("+")) {
+            popup(Strings.t("tab_cheats"), r);
+            return;
+        }
+        String[] p = r.substring(1).split("\t");
+        int added = 0, bad = 0;
+        try {
+            added = Integer.parseInt(p[0]);
+            bad = p.length > 1 ? Integer.parseInt(p[1]) : 0;
+        } catch (NumberFormatException ignored) {
+        }
+        if (bad > 0)
+            popup(Strings.t("tab_cheats"), Strings.t("cheats_added_bad", added, bad));
+        else
+            toast(Strings.t("cheats_added", added));
     }
 
     // ---- Language tab -------------------------------------------------------------------------------------------
@@ -1093,17 +1451,35 @@ public final class SettingsMenu {
      * texture_mip_skip and turns it on; off: puts the remembered values back.
      */
     private void performanceScale(boolean on) {
-        if (on && gpuLacksBc()) {
-            String mip = mValues.containsKey("texture_mip_skip") ? mValues.get("texture_mip_skip") : "0";
-            writeSetting("texture_mip_skip_before_perf", mip);
-            mValues.put("texture_mip_skip_before_perf", mip);
-            if (writeSetting("texture_mip_skip", "1")) mValues.put("texture_mip_skip", "1");
-        } else if (!on) {
-            String before = mValues.get("texture_mip_skip_before_perf");
-            if (before != null && !before.isEmpty()) {  // performance mode had turned it on: restored
-                if (writeSetting("texture_mip_skip", before)) mValues.put("texture_mip_skip", before);
-                writeSetting("texture_mip_skip_before_perf", "");
-                mValues.put("texture_mip_skip_before_perf", "");
+        // On GPUs without BC support (the weaker ones: Mali), performance mode also turns on texture mip skip and
+        // lighter post-processing; turning it off puts back what they were.
+        for (String key : new String[] {"texture_mip_skip", "lighter_post_fx"}) {
+            if (on && gpuLacksBc()) {
+                String was = mValues.containsKey(key) ? mValues.get(key) : "0";
+                writeSetting(key + "_before_perf", was);
+                mValues.put(key + "_before_perf", was);
+                if (writeSetting(key, "1")) mValues.put(key, "1");
+            } else if (!on) {
+                String before = mValues.get(key + "_before_perf");
+                if (before != null && !before.isEmpty()) {  // performance mode had turned it on: restored
+                    if (writeSetting(key, before)) mValues.put(key, before);
+                    writeSetting(key + "_before_perf", "");
+                    mValues.put(key + "_before_perf", "");
+                }
+            }
+        }
+        // Performance mode also shrinks the geometry cache to 64 MB (less RAM for 4 GB phones); off puts back what it was.
+        if (on) {
+            String was = mValues.containsKey("geo_cache_mb") ? mValues.get("geo_cache_mb") : "192";
+            writeSetting("geo_cache_mb_before_perf", was);
+            mValues.put("geo_cache_mb_before_perf", was);
+            if (writeSetting("geo_cache_mb", "64")) mValues.put("geo_cache_mb", "64");
+        } else {
+            String before = mValues.get("geo_cache_mb_before_perf");
+            if (before != null && !before.isEmpty()) {
+                if (writeSetting("geo_cache_mb", before)) mValues.put("geo_cache_mb", before);
+                writeSetting("geo_cache_mb_before_perf", "");
+                mValues.put("geo_cache_mb_before_perf", "");
             }
         }
         String cur = mValues.containsKey("render_scale") ? mValues.get("render_scale") : "1.00";
@@ -1136,6 +1512,14 @@ public final class SettingsMenu {
         }
         if (key.equals("fps_counter")) {
             FpsCounter.apply(mA, "1".equals(value));
+            now = true;
+        } else if (key.equals("keep_alive")) {
+            boolean on = "1".equals(value);
+            KeepAliveService.apply(mA, on);
+            if (on) KeepAliveService.askNotificationPermission(mA);
+            now = true;
+        } else if (key.equals("touch_skin")) {
+            TouchControls.setSkin(mA, value, sSettingsPath);
             now = true;
         } else if (key.equals("touch_camera_recenter")) {
             TouchControls.sRecenter = !"0".equals(value);
@@ -1170,6 +1554,41 @@ public final class SettingsMenu {
         t.setLetterSpacing(0.08f);
         t.setPadding(0, dp(mBody.getChildCount() == 0 ? 2 : 18), 0, dp(2));
         mBody.addView(t);
+    }
+
+    // A sub-heading row that folds the settings below it away (tap or A to open / close).
+    private static boolean sMaliOpen = false;  // remembered while the app runs
+
+    private TextView subsection(String title) {
+        TextView t = text("", 14, GOLD, true);
+        t.setPadding(dp(14), dp(12), dp(14), dp(12));
+        t.setFocusable(true);
+        t.setClickable(true);
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, rounded(0xFF3A3A3A, 10, 0xFFFFFFFF));
+        bg.addState(new int[] {android.R.attr.state_pressed}, rounded(0xFF3A3A3A, 10, 0));
+        bg.addState(new int[] {}, rounded(CARD, 10, 0));
+        t.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(12);
+        mBody.addView(t, lp);
+        return t;
+    }
+
+    // Views [first, end) of mBody are shown or hidden by `header`.
+    private void foldable(final TextView header, final String title, int first, int end) {
+        final List<View> kids = new ArrayList<>();
+        for (int i = first; i < end && i < mBody.getChildCount(); i++) kids.add(mBody.getChildAt(i));
+        final Runnable paint = () -> {
+            header.setText((sMaliOpen ? "\u25BE  " : "\u25B8  ") + title);
+            for (View k : kids) k.setVisibility(sMaliOpen ? View.VISIBLE : View.GONE);
+        };
+        paint.run();
+        header.setOnClickListener(v -> {
+            sMaliOpen = !sMaliOpen;
+            paint.run();
+        });
     }
 
     private void note(String s) {
@@ -1268,6 +1687,16 @@ public final class SettingsMenu {
                 .setNegativeButton(Strings.t("cancel"), null)
                 .create();
         GameActivity.showImmersive(d);
+    }
+
+    // One message at a time: a new one replaces the one on screen (Android queues toasts, so changing several settings
+    // in a row showed "Changes at the next start" again and again long after).
+    private Toast mToast;
+
+    private void toast(String text) {
+        if (mToast != null) mToast.cancel();
+        mToast = Toast.makeText(mA, text, Toast.LENGTH_SHORT);
+        mToast.show();
     }
 
     private void popup(String title, String message) {

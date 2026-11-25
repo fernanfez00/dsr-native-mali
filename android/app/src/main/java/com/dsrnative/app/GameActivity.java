@@ -51,6 +51,27 @@ public class GameActivity extends NativeActivity {
         return sStorage;
     }
 
+    // The screen's highest refresh rate at its current resolution (fps = unlocked paces up to it). Read by native.
+    private static volatile int sDisplayHz = 60;
+
+    public static int displayMaxHz() {
+        return sDisplayHz;
+    }
+
+    private void readDisplayHz() {
+        try {
+            android.view.Display d = getWindowManager().getDefaultDisplay();
+            android.view.Display.Mode cur = d.getMode();
+            int hz = Math.round(cur.getRefreshRate());
+            for (android.view.Display.Mode m : d.getSupportedModes())
+                if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight())
+                    hz = Math.max(hz, Math.round(m.getRefreshRate()));
+            sDisplayHz = Math.max(30, hz);
+        } catch (Exception e) {
+            sDisplayHz = 60;
+        }
+    }
+
     // ---- game folder chosen by the player (when the game is not in Download/DSRNative/game) -----------------
     static final int REQ_GAME_FOLDER = 4103;
     // 0 = not asked, 1 = the player is choosing (dialog or picker up), 2 = chosen (takeGameFolder). Read by native.
@@ -445,12 +466,36 @@ public class GameActivity extends NativeActivity {
         return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
+    // Checked at every launch: with access nothing is shown; without it the player is asked (again after coming
+    // back from the settings screen without turning it on), because without it the app cannot reach its folder
+    // (game folder setting, saves) and would run from its private folder instead.
     private void requestStorageAccess() {
         if (hasStorageAccess()) {
             sStorage = 1;
             return;
         }
+        sStorage = 0;
+        showStorageDialog();
+    }
+
+    private AlertDialog mStorageDialog;
+
+    private void showStorageDialog() {
+        if (mStorageDialog != null && mStorageDialog.isShowing()) return;
+        final int lang = Strings.deviceLanguage();
+        mStorageDialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(Strings.tl(lang, "perm_t"))
+                .setMessage(Strings.tl(lang, "perm_n"))
+                .setCancelable(false)
+                .setPositiveButton(Strings.tl(lang, "perm_open"), (dlg, which) -> openStorageSettings())
+                .setNegativeButton(Strings.tl(lang, "perm_later"), (dlg, which) -> sStorage = 2)
+                .create();
+        showImmersive(mStorageDialog);
+    }
+
+    private void openStorageSettings() {
         mAsked = true;
+        mPausedSinceAsk = false;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
@@ -471,7 +516,15 @@ public class GameActivity extends NativeActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        sStorage = hasStorageAccess() ? 1 : 2;
+        if (requestCode == KeepAliveService.REQ_NOTIFICATIONS) {
+            // Allowed: started again so its notification is posted now (it was not shown without the permission).
+            if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                KeepAliveService.apply(this, true);
+            return;
+        }
+        mAsked = false;
+        if (hasStorageAccess()) sStorage = 1;
+        else showStorageDialog();
     }
 
     @Override
@@ -483,6 +536,7 @@ public class GameActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        readDisplayHz();
         requestStorageAccess();
         Window w = getWindow();
         w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -495,11 +549,20 @@ public class GameActivity extends NativeActivity {
     }
 
     @Override
+    protected void onDestroy() {
+        KeepAliveService.apply(this, false);  // the notification goes with the game
+        super.onDestroy();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
-        // Back from the "All files access" settings screen: the answer is final for this launch.
-        if (mAsked && mPausedSinceAsk && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-            sStorage = hasStorageAccess() ? 1 : 2;
+        // Back from the "All files access" settings screen: on, the game starts; still off, asked again.
+        if (mAsked && mPausedSinceAsk && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            mAsked = false;
+            if (hasStorageAccess()) sStorage = 1;
+            else if (sStorage == 0) showStorageDialog();
+        }
         hideSystemBars();
     }
 
