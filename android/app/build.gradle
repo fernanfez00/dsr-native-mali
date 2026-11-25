@@ -12,8 +12,11 @@ android {
         // API 29+: ELF TLS (TLSDESC) used by the x18 transition code.
         minSdk 29
         targetSdk 34
-        // CI sets GITHUB_RUN_NUMBER, so every GitHub build installs as a newer version.
-        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int)
+        // One fixed versionCode for every build, so any build installs over any other, older ones included
+        // (Android refuses a lower versionCode: "package appears to be invalid"). Builds up to CI run 389 used the
+        // run number; 1000 is above all of those (and forks' run numbers), so they also install over it as upgrades.
+        // Builds are told apart by versionName (the CI run number).
+        versionCode 1000
         versionName "0.1.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
         ndk {
             abiFilters 'arm64-v8a'
