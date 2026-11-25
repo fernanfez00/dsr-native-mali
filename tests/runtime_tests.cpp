@@ -632,11 +632,13 @@ static void TestAstcEncode() {
             p[2] = hole ? 0 : uint8_t(((x ^ y) & 8) ? 220 : 30);
             p[3] = hole ? 0 : 255;
         }
-    for (int mode = 0; mode < 2; mode++) {
+    for (int run = 0; run < 4; run++) {  // runs 2, 3: the quick (preview) encode
+        const int mode = run & 1;
+        const bool quick = run >= 2;
         const std::vector<uint8_t>& img = mode ? cut : pal;
         const int bxn = (W + 3) / 4, byn = (H + 3) / 4;
         std::vector<uint8_t> out(AstcLevelBytes(W, H, 1));
-        EncodeAstc4x4(out.data(), img.data(), W, H, 1);
+        EncodeAstc4x4(out.data(), img.data(), W, H, 1, quick);
         double se = 0;
         long n = 0;
         int alpha_wrong = 0;
@@ -662,7 +664,7 @@ static void TestAstcEncode() {
             }
         CHECK(understood);
         CHECK(alpha_wrong == 0);
-        CHECK(n > 0 && se / n < (mode ? 40.0 * 40.0 / 4 : 4.0 * 4.0));  // palettes: PSNR ~36 dB; noisy cut-out picture: ~28 dB
+        CHECK(n > 0 && se / n < (mode ? 40.0 * 40.0 / 4 : 4.0 * 4.0) * (quick ? 3 : 1));  // palettes: PSNR ~36 dB; noisy cut-out picture: ~28 dB
     }
 }
 

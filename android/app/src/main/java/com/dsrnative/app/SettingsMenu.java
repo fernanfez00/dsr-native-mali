@@ -547,6 +547,8 @@ public final class SettingsMenu {
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("mali_tile_turbo", Strings.t("turbo_t"), Strings.t("turbo_n") + " " + Strings.t("changes_next"), "1",
                 "0", "0");
+        toggle("late_depth", Strings.t("ldepth_t"), Strings.t("ldepth_n") + " " + Strings.t("changes_next"), "1",
+                "0", "0");
         foldable(maliHeader, Strings.t("sec_mali"), maliFirst, mBody.getChildCount());
     }
 

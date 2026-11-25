@@ -945,6 +945,7 @@ public:
         if (recording_) WriteBackSmallTargets();
         if (recording_) {
             EndRendering();
+            FlushLateDepth();
             FlushEarlyClears();
             ProfListEnd();
             SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE);
@@ -1854,6 +1855,9 @@ private:
         // mali_tile_turbo (experimental, Mali only; from PR #73 by Dann-os3d): see LayoutScope.
         const bool is_mali = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
         tile_turbo_ = dsr::GetRuntime().config.mali_tile_turbo && is_mali;
+        late_depth_ = dsr::GetRuntime().config.late_depth;
+        no_bloom_ = dsr::GetRuntime().config.lighter_post_fx;
+        if (late_depth_) LOGI(kTag, "settings late_depth = 1: depth read by shaders is copied at pass ends (no split)");
         if (tile_turbo_)
             LOGI(kTag, "settings mali_tile_turbo = 1: layout-scoped barriers (unknown layouts keep the full barrier)");
         else if (dsr::GetRuntime().config.mali_tile_turbo)
@@ -2930,12 +2934,12 @@ private:
             case BcTo::Astc:
                 rgba.resize(size_t(j.w) * size_t(hh) * 4);
                 BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
-                EncodeAstc(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                EncodeAstc(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab, quick);
                 break;
             case BcTo::AstcLa:  // BC5: decoded to two channels (R8G8), encoded as luminance + alpha
                 rgba.resize(size_t(j.w) * size_t(hh) * 2);
                 BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
-                EncodeAstcLA(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                EncodeAstcLA(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab, quick);
                 break;
         }
     }
@@ -4613,6 +4617,10 @@ private:
         if (!rendering_ && key == ended_key_ && ended_line_) resumed_passes_[ended_line_]++;
         EndRendering();
         ended_line_ = 0;
+        // Work done between passes (and the copies / clears recorded since the last pass started) is its own
+        // interval when there is any, not part of the previous pass's time.
+        if (!late_depth_q_.empty() || !early_clears_.empty()) ProfStamp("between passes");
+        FlushLateDepth();
         FlushEarlyClears(&colors, depth);
         ProfMark(colors, depth, w, h);
         if (depth && depth->depth_exported && dsr::GetRuntime().config.lrz_workaround) LrzTouch(*depth);
@@ -4942,6 +4950,18 @@ private:
         if (!snap) return nullptr;
         auto& gen = snapshot_gen_[snap_ref.addr];
         if (gen != depth_gen_ + 1) {
+            // late_depth: the depth buffer is in the open pass (a copy now splits it: its tiles stored, copied and
+            // loaded again, about once a frame). Shaders read the copy taken when that pass ends (last frame's
+            // depth, the first time in a frame) and the copy is made then (FlushLateDepth).
+            if (late_depth_ && rendering_ && InOpenPass(&depth) && snap->written &&
+                snap->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && !capture_active_) {
+                bool queued = false;
+                for (const LateDepth& l : late_depth_q_) queued |= l.snap == snap_ref.addr;
+                if (!queued && late_depth_q_.size() < 8)
+                    late_depth_q_.push_back({depth.addr, depth.serial, snap_ref.addr, snap->serial});
+                late_depth_reads_++;
+                return snap;
+            }
             EndRendering();
             CopyImage(depth, CopyRegion{}, *snap, CopyRegion{}, 0);
             snap->written = true;
@@ -4953,6 +4973,58 @@ private:
             Transition(*snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
         return snap;
+    }
+
+    // Fragment programs of the bloom chain (identified in frame captures of 1.0.0 and 1.0.3; the same shaders on
+    // every device): bright pass, its blurs and the upsampling.
+    static bool IsBloomShader(uint64_t h) {
+        return h == 0xc3d56b6401ccb572ull || h == 0x512397bbc420f850ull || h == 0x9b44066e84ff04c6ull ||
+               h == 0x82aa25701a19c22bull;
+    }
+    bool no_bloom_ = false;
+    uint64_t bloom_skipped_ = 0;
+    // A colour target the game would have drawn into, cleared to transparent black instead (a pending clear done at
+    // the next pass boundary: no pass of its own).
+    void BlackOut(Image& img, int layer, int level) {
+        if (InOpenPass(&img)) EndRendering();
+        if (img.clear_pending) FlushClear(img);
+        img.clear_pending = true;
+        img.clear_value = VkClearValue{};
+        img.clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        img.clear_layer = layer;
+        img.clear_level = level;
+        img.clear_early = true;
+        img.written = true;
+        img.cpu_source = false;
+        clears_deferred_++;
+        EarlyClear(&img);
+    }
+
+    // late_depth (settings, experimental): depth copies for shaders made at pass ends instead of splitting a pass.
+    struct LateDepth {
+        uint64_t depth, depth_serial, snap, snap_serial;
+    };
+    bool late_depth_ = false;
+    std::vector<LateDepth> late_depth_q_;
+    uint64_t late_depth_reads_ = 0, late_depth_copies_ = 0;
+    void FlushLateDepth() {
+        if (late_depth_q_.empty() || rendering_) return;
+        for (const LateDepth& l : late_depth_q_) {
+            auto d = images_.find(l.depth), sn = images_.find(l.snap);
+            if (d == images_.end() || sn == images_.end() || d->second.serial != l.depth_serial ||
+                sn->second.serial != l.snap_serial)
+                continue;
+            Image& depth = d->second;
+            Image& snap = sn->second;
+            const VkImageLayout back = depth.layout;
+            CopyImage(depth, CopyRegion{}, snap, CopyRegion{}, 0);
+            snap.written = true;
+            snapshot_gen_[l.snap] = depth_gen_ + 1;
+            if (back == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) Transition(depth, back);
+            Transition(snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            late_depth_copies_++;
+        }
+        late_depth_q_.clear();
     }
 
     // 1x1 stand-in of a dimension: white (missing textures) or opaque black (`black`: placeholders of the wrong
@@ -5114,6 +5186,18 @@ private:
                 shadow_draws_skipped_++;
                 return;
             }
+        }
+        // lighter_post_fx: no bloom. The bloom chain (frame captures: bright pass, blurs at 1/4 and 1/8 size and the
+        // upsampling, about ten one-draw passes, ~1.5 ms of GPU time a frame on a Mali-G68) is not drawn; its targets
+        // are cleared to black instead (at a pass boundary), so the final combine adds nothing. The game's own
+        // switch for it (debug menu "Bloom") is never read.
+        if (no_bloom_ && st_.program[1] && IsBloomShader(st_.program[1]->hash)) {
+            Begin();
+            for (int i = 0; i < st_.num_rt && size_t(i) < st_.rts.size(); i++)
+                if (Image* img = GetImage(st_.rts[size_t(i)], false); img && !IsDepthFormat(img->nvn_format))
+                    BlackOut(*img, st_.rts[size_t(i)].layer, st_.rts[size_t(i)].level);
+            if (bloom_skipped_++ == 0) LOGI(kTag, "lighter post-processing: bloom passes not drawn");
+            return;
         }
         Shader* vs = GetShader(*st_.program[0], vopt);
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
@@ -7282,6 +7366,10 @@ private:
              (unsigned long long)clears_deferred_, (unsigned long long)clears_in_pass_, (unsigned long long)clears_flushed_,
              (unsigned long long)pass_barriers_, (unsigned long long)lrz_touches_, (unsigned long long)shader_depth_draws_);
         clears_deferred_ = clears_in_pass_ = clears_flushed_ = pass_barriers_ = lrz_touches_ = shader_depth_draws_ = 0;
+        if (late_depth_reads_ || late_depth_copies_)
+            LOGI(kTag, "late_depth: %llu draws read the depth copied at a pass end, %llu copies made there",
+                 (unsigned long long)late_depth_reads_, (unsigned long long)late_depth_copies_);
+        late_depth_reads_ = late_depth_copies_ = 0;
         if (clears_early_ || clears_breaking_)
             LOGI(kTag, "separate clears: %llu done early at a pass boundary, %llu still ended an open pass",
                  (unsigned long long)clears_early_, (unsigned long long)clears_breaking_);

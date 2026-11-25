@@ -31,11 +31,12 @@ size_t AstcLevelBytes(int width, int height, int depth, int block = 4);
 // RGBA8 -> ASTC of block x block (4, 6 or 8) texels, slices of width x height texels one after another. 4x4 is
 // EncodeAstc4x4. In the bigger blocks the weights are a coarser grid than the texels (the decoder interpolates
 // them): opaque blocks use a 6x5 grid (6x6 block) or 5x5 (8x8), blocks with alpha 4x5. 8 bits per endpoint value.
-void EncodeAstc(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, int block);
+// quick: a coarser, faster encode (the preview shown while the full one runs in the background).
+void EncodeAstc(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, int block, bool quick = false);
 
 // Two-channel texels (R, G: rows of width * 2 bytes) -> ASTC luminance+alpha blocks, dual plane: R is the
 // luminance, G the alpha, each with its own endpoints and its own 4x4 weight grid.
-void EncodeAstcLA(uint8_t* out, const uint8_t* rg, int width, int height, int depth, int block);
+void EncodeAstcLA(uint8_t* out, const uint8_t* rg, int width, int height, int depth, int block, bool quick = false);
 
 // Decodes one block of `block` x block texels written by EncodeAstc / EncodeAstcLA (and EncodeAstc4x4) into
 // RGBA texels, row-major (y * block + x), for tests: the kinds of block this file writes only (false otherwise).
@@ -43,7 +44,7 @@ bool DecodeAstcBlock(const uint8_t* block_bytes, int block, uint8_t out[64][4]);
 
 // Encodes `depth` slices of width x height RGBA8 texels (rows of width * 4 bytes), blocks row by row (each block's
 // rows are row-major, as ASTC wants). Edge texels beyond the image are replicated from the nearest one.
-void EncodeAstc4x4(uint8_t* out, const uint8_t* rgba, int width, int height, int depth);
+void EncodeAstc4x4(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, bool quick = false);
 
 // Decodes one block written by EncodeAstc4x4 into 16 RGBA texels, row-major (y * 4 + x): for tests. Other kinds of
 // ASTC block are not understood (returns false).

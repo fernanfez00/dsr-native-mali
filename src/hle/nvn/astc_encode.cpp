@@ -20,6 +20,15 @@ size_t AstcLevelBytes(int width, int height, int depth, int block) {
 
 namespace {
 
+// Quick (preview) encode on this thread: the endpoints from the principal axis's extent, refined once instead of
+// several times (the full encode follows in the background; see vk_backend.cpp DeferBcJobs).
+thread_local bool t_quick = false;
+struct QuickScope {
+    bool old;
+    explicit QuickScope(bool q) : old(t_quick) { t_quick = q; }
+    ~QuickScope() { t_quick = old; }
+};
+
 // ASTC block layout used here (128 bits, bit 0 = least significant bit of byte 0):
 //   [0..10]   block mode 0x42: 2D, 4x4 weight grid, one plane, weights of 2 bits (values 0..3)
 //   [11..12]  partitions - 1 = 0
@@ -112,13 +121,40 @@ void EncodeBlock(const uint8_t px[16][4], uint8_t out[16]) {
             lo[c] = std::min(lo[c], p[i][c]);
             hi[c] = std::max(hi[c], p[i][c]);
         }
+    Candidate best;
+    if (t_quick) {
+        // Preview: the bounding box's corners as endpoints (the diagonal that follows the texels' main
+        // correlation, per channel pair against the brightest-range channel), weights by projection on it.
+        int ref = 0;
+        for (int c = 1; c < nc; c++)
+            if (hi[c] - lo[c] > hi[ref] - lo[ref]) ref = c;
+        float d[4];
+        for (int c = 0; c < nc; c++) {
+            float cr = 0;  // sign of the covariance with the reference channel
+            for (int i = 0; i < 16; i++) cr += (p[i][c] - mean[c]) * (p[i][ref] - mean[ref]);
+            if (cr < 0) std::swap(lo[c], hi[c]);
+            best.e0[c] = ClampByte(lo[c]), best.e1[c] = ClampByte(hi[c]);
+            d[c] = float(best.e1[c] - best.e0[c]);
+        }
+        for (int c = nc; c < 4; c++) best.e0[c] = best.e1[c] = 255;
+        float dd = 0;
+        for (int c = 0; c < nc; c++) dd += d[c] * d[c] * cw[c];
+        const float inv = dd > 0 ? 3.0f / dd : 0;
+        for (int i = 0; i < 16; i++) {
+            float t = 0;
+            for (int c = 0; c < nc; c++) t += (p[i][c] - float(best.e0[c])) * d[c] * cw[c];
+            const int k = int(t * inv + 0.5f);
+            best.q[i] = uint8_t(k < 0 ? 0 : k > 3 ? 3 : k);
+        }
+        best.err = 0;
+    } else {
     float cov[4][4] = {};
     for (int i = 0; i < 16; i++)
         for (int a = 0; a < nc; a++)
             for (int b = 0; b < nc; b++) cov[a][b] += (p[i][a] - mean[a]) * (p[i][b] - mean[b]);
     float axis[4] = {0, 0, 0, 0};
     for (int c = 0; c < nc; c++) axis[c] = (hi[c] - lo[c]) * (c == 3 ? 2.0f : 1.0f) + 1e-3f;
-    for (int it = 0; it < 8; it++) {
+    for (int it = 0, its = t_quick ? 3 : 8; it < its; it++) {
         float v[4] = {0, 0, 0, 0}, len = 0;
         for (int a = 0; a < nc; a++)
             for (int b = 0; b < nc; b++) v[a] += cov[a][b] * axis[b];
@@ -142,7 +178,6 @@ void EncodeBlock(const uint8_t px[16][4], uint8_t out[16]) {
     }
 
     // Alternate between the best weights for the endpoints and the best endpoints (least squares) for the weights.
-    Candidate best;
     best.err = 1e30f;
     for (int c = 0; c < 4; c++) best.e0[c] = best.e1[c] = 255;
     memset(best.q, 0, sizeof(best.q));
@@ -173,6 +208,7 @@ void EncodeBlock(const uint8_t px[16][4], uint8_t out[16]) {
             f1[c] = float((a00 * b1 - a01 * b0) / det);
         }
     }
+    }  // full encode
 
     // CEM 8 / 12 read the endpoints in swapped, "blue contracted" form when the second one's RGB sum is smaller:
     // keep the first the darker (swapping the weights too; the weights are symmetric).
@@ -201,7 +237,8 @@ void EncodeBlock(const uint8_t px[16][4], uint8_t out[16]) {
 
 }  // namespace
 
-void EncodeAstc4x4(uint8_t* out, const uint8_t* rgba, int width, int height, int depth) {
+void EncodeAstc4x4(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, bool quick) {
+    QuickScope qs(quick);
     const int bxn = (width + 3) / 4, byn = (height + 3) / 4;
     for (int z = 0; z < std::max(1, depth); z++) {
         const uint8_t* slice = rgba + size_t(z) * size_t(width) * size_t(height) * 4;
@@ -322,7 +359,7 @@ void FitBlock(const float p[64][4], int nc, const float cw[4], const Grid& g, Fi
             for (int b = 0; b < nc; b++) cov[a][b] += (p[i][a] - mean[a]) * (p[i][b] - mean[b]);
     float axis[4] = {0, 0, 0, 0};
     for (int c = 0; c < nc; c++) axis[c] = (hi[c] - lo[c]) * (c == 3 ? 2.0f : 1.0f) + 1e-3f;
-    for (int it = 0; it < 8; it++) {
+    for (int it = 0, its = t_quick ? 3 : 8; it < its; it++) {
         float v[4] = {0, 0, 0, 0}, len = 0;
         for (int a = 0; a < nc; a++)
             for (int b = 0; b < nc; b++) v[a] += cov[a][b] * axis[b];
@@ -362,7 +399,7 @@ void FitBlock(const float p[64][4], int nc, const float cw[4], const Grid& g, Fi
     out.err = 1e30f;
     for (int c = 0; c < 4; c++) out.e0[c] = out.e1[c] = 255;
     memset(out.q, 0, sizeof(out.q));
-    for (int iter = 0; iter < 3; iter++) {
+    for (int iter = 0, iters = t_quick ? 1 : 3; iter < iters; iter++) {
         int e0[4] = {255, 255, 255, 255}, e1[4] = {255, 255, 255, 255};
         for (int c = 0; c < nc; c++) e0[c] = ClampByte(f0[c]), e1[c] = ClampByte(f1[c]);
         float lut[4][65];  // the decoded channel at every interpolated weight
@@ -544,16 +581,18 @@ void EncodeBlocks(uint8_t* out, const uint8_t* src, int bpp, int width, int heig
 
 }  // namespace
 
-void EncodeAstc(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, int block) {
+void EncodeAstc(uint8_t* out, const uint8_t* rgba, int width, int height, int depth, int block, bool quick) {
+    QuickScope qs(quick);
     const int bw = AstcBlockDim(block);
     if (bw == 4) {
-        EncodeAstc4x4(out, rgba, width, height, depth);
+        EncodeAstc4x4(out, rgba, width, height, depth, quick);
         return;
     }
     EncodeBlocks(out, rgba, 4, width, height, depth, bw, EncodeBlockGrid);
 }
 
-void EncodeAstcLA(uint8_t* out, const uint8_t* rg, int width, int height, int depth, int block) {
+void EncodeAstcLA(uint8_t* out, const uint8_t* rg, int width, int height, int depth, int block, bool quick) {
+    QuickScope qs(quick);
     EncodeBlocks(out, rg, 2, width, height, depth, AstcBlockDim(block), EncodeBlockLA);
 }
 

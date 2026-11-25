@@ -361,8 +361,8 @@ void RecordSleep(uintptr_t ret, uintptr_t frame, int64_t ns) {
 
 namespace dsr::hle::os {
 // From GetSystemTick: a poller thread (MarkPoller; the game is offline, so its network timing does not matter) that
-// has run 0.5 ms without sleeping naps 1.5 ms. That bounds it to about a quarter of a core, and the nap is short
-// in case it holds a lock the game also takes.
+// has run 0.5 ms without sleeping naps 5 ms. That bounds it to about a tenth of a core (1.5 ms naps still left it
+// 1.5-2.4 s of CPU per 10 s on a Mali phone); the nap is short enough in case it holds a lock the game takes.
 void PollerClockRead() {
     if (!t_current || !t_current->poller.load(std::memory_order_relaxed)) return;
     const int64_t now = NowTicks();
@@ -370,10 +370,10 @@ void PollerClockRead() {
     if (now - t_poller_run_start < kTickFrequency / 2000) return;  // 0.5 ms
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true))
-        LOGI(kTag, "'%s' reads the clock without sleeping: it naps 1.5 ms after each 0.5 ms of running "
+        LOGI(kTag, "'%s' reads the clock without sleeping: it naps 5 ms after each 0.5 ms of running "
              "(offline network polling)", t_current->name.c_str());
     PollerSleep(0);  // lowers its priority once
-    timespec ts{0, 1'500'000};
+    timespec ts{0, 5'000'000};
     nanosleep(&ts, nullptr);
     t_poller_run_start = NowTicks();
 }

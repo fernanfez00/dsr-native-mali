@@ -38,6 +38,10 @@ struct RuntimeConfig {
     // mali_tile_turbo (experimental, Mali GPUs only): image layout transitions scoped to the stages and accesses their
     // layouts name, instead of waiting for / blocking all GPU work (vk_backend.cpp, LayoutScope).
     bool mali_tile_turbo = false;
+    // late_depth (experimental, tile-based GPUs): when shaders read the depth buffer of the pass being drawn (soft
+    // particles, fog: about once a frame), they get the copy made when that pass last ended (a frame old at first)
+    // instead of the pass being split for a copy. May show slight edge errors on soft particles in fast motion.
+    bool late_depth = false;
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
     float gamma = 1.0f;           // extra display gamma applied through the game's brightness ramp (> 1 lifts shadows)
     std::string present_mode = "fifo";  // swapchain present mode: fifo (vsync, default), mailbox, fifo_relaxed, immediate (FIFO if unsupported)
@@ -134,7 +138,8 @@ struct RuntimeConfig {
     // it saved; the render thread copies.
     bool recorder_copies = false;
     // lighter_post_fx = 1: no ambient occlusion, depth of field, camera motion blur or light shafts (the engine's own
-    // switches; read at start-up). The menu turns it on with performance mode on GPUs without BC support.
+    // switches; read at start-up), and no bloom (its passes are skipped by vk_backend.cpp: the engine's bloom switch
+    // is never read). The menu turns it on with performance mode on GPUs without BC support.
     bool lighter_post_fx = false;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;

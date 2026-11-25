@@ -277,7 +277,8 @@ void ApplyLighterPostFx(Runtime& rt, const GameBuild& b) {
             LOGW("hooks", "lighter post-processing: %s", err.c_str());
             return;
         }
-    LOGI("hooks", "lighter post-processing: no ambient occlusion, depth of field, camera motion blur or light shafts");
+    LOGI("hooks", "lighter post-processing: no ambient occlusion, depth of field, camera motion blur or light shafts "
+                  "(bloom: not drawn by the renderer)");
 }
 
 // Effect cluster overflow (a crash in the game itself). The render tasks draw a particle effect cluster
