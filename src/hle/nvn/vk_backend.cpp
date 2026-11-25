@@ -1588,6 +1588,68 @@ private:
         VkImage src = VK_NULL_HANDLE;  // the game's frame (in TRANSFER_SRC layout), or none: black
         int sw = 0, sh = 0;
     };
+    // ---- presentation check: twice (presents 300 and 1200), the middle row of what went to the screen and of the
+    // game's frame are read back and compared in the log (a black screen with a good frame: the copy to the screen).
+    VkBuffer pcheck_buf_ = VK_NULL_HANDLE;
+    VkDeviceMemory pcheck_mem_ = VK_NULL_HANDLE;
+    uint64_t pcheck_presents_ = 0;
+    bool sc_readable_ = false;
+    static constexpr uint32_t kCheckPixels = 256;
+    bool PresentCheckRecord(VkImage sc, const PresentJob& pj) {
+        ++pcheck_presents_;
+        if (!sc_readable_ || (pcheck_presents_ != 300 && pcheck_presents_ != 1200)) return false;
+        if (!pcheck_buf_) {
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = kCheckPixels * 4 * 2;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            if (vkCreateBuffer(device_, &bci, nullptr, &pcheck_buf_) != VK_SUCCESS) return false;
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(device_, pcheck_buf_, &req);
+            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex =
+                FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(device_, &ai, nullptr, &pcheck_mem_) != VK_SUCCESS) {
+                vkDestroyBuffer(device_, pcheck_buf_, nullptr);
+                pcheck_buf_ = VK_NULL_HANDLE;
+                return false;
+            }
+            vkBindBufferMemory(device_, pcheck_buf_, pcheck_mem_, 0);
+        }
+        CmdImageBarrier(cmd_, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        const uint32_t dw = sc_extent_.width, dh = sc_extent_.height;
+        VkBufferImageCopy c{};
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.bufferOffset = 0;
+        c.imageExtent = {std::min(kCheckPixels, dw), 1, 1};
+        c.imageOffset = {int32_t(dw - c.imageExtent.width) / 2, int32_t(dh / 2), 0};
+        vkCmdCopyImageToBuffer(cmd_, sc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pcheck_buf_, 1, &c);
+        c.bufferOffset = kCheckPixels * 4;
+        c.imageExtent = {std::min<uint32_t>(kCheckPixels, uint32_t(pj.sw)), 1, 1};
+        c.imageOffset = {int32_t(uint32_t(pj.sw) - c.imageExtent.width) / 2, pj.sh / 2, 0};
+        vkCmdCopyImageToBuffer(cmd_, pj.src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pcheck_buf_, 1, &c);
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0,
+                             nullptr);
+        return true;
+    }
+    void PresentCheckRead() {
+        vkQueueWaitIdle(queue_);  // twice per run
+        void* mapped = nullptr;
+        if (vkMapMemory(device_, pcheck_mem_, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) return;
+        const uint8_t* p = static_cast<const uint8_t*>(mapped);
+        double m[2][3] = {};
+        for (int k = 0; k < 2; k++)
+            for (uint32_t i = 0; i < kCheckPixels; i++)
+                for (int c = 0; c < 3; c++) m[k][c] += p[k * kCheckPixels * 4 + i * 4 + c] / (255.0 * kCheckPixels);
+        vkUnmapMemory(device_, pcheck_mem_);
+        const bool frame_lit = m[1][0] + m[1][1] + m[1][2] > 0.03, screen_dark = m[0][0] + m[0][1] + m[0][2] < 0.005;
+        LOGI(kTag, "present check (present %llu): screen image middle row %.3f %.3f %.3f, game frame %.3f %.3f %.3f%s",
+             (unsigned long long)pcheck_presents_, m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2],
+             frame_lit && screen_dark ? ": the copy to the screen image FAILED" : "");
+    }
     static void CmdImageBarrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1632,6 +1694,18 @@ private:
             h = dh;
         } else {
             vkCmdClearColorImage(cmd_, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+            // The blit below writes the same image: without a barrier the two transfers may run in any order or
+            // overlap. A Mali-G51 (driver 18.0) showed only black whenever the frame did not fill the screen (the
+            // clear landed after the blit); newer drivers happened to keep the order.
+            VkImageMemoryBarrier wb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            wb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            wb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            wb.oldLayout = wb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            wb.srcQueueFamilyIndex = wb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            wb.image = sc;
+            wb.subresourceRange = range;
+            vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                                 nullptr, 1, &wb);
         }
         if (pj.src) {
             const int x = (dw - w) / 2, y = (dh - h) / 2;
@@ -1644,8 +1718,11 @@ private:
             vkCmdBlitImage(cmd_, pj.src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &blit, w == pj.sw && h == pj.sh ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         }
-        CmdImageBarrier(cmd_, sc, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        const bool check = pj.src && PresentCheckRecord(sc, pj);
+        CmdImageBarrier(cmd_, sc, check ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         SubmitSlot(i, acquire_sem_, render_sem_);
+        if (check) PresentCheckRead();
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pi.waitSemaphoreCount = 1;
         pi.pWaitSemaphores = &render_sem_;
@@ -2270,6 +2347,9 @@ private:
         ci.imageExtent = extent;
         ci.imageArrayLayers = 1;
         ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // Readable when the surface allows it: the presentation check (PresentCheckRecord) reads it back.
+        sc_readable_ = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+        if (sc_readable_) ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = transform;
         ci.compositeAlpha = alpha;
