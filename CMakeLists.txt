@@ -48,7 +48,7 @@ if(DSR_GLSLC)
   add_custom_command(OUTPUT "${DSR_GEN_DIR}/fsr1_spv.h"
       COMMAND ${CMAKE_COMMAND} -DGLSLC=${DSR_GLSLC} -DSRC_DIR=${DSR_SHADERS_DIR} -DOUT=${DSR_GEN_DIR}/fsr1_spv.h
               -DWORK=${DSR_GEN_DIR} -P "${CMAKE_SOURCE_DIR}/cmake/build_fsr1_spv.cmake"
-      DEPENDS "${DSR_SHADERS_DIR}/fsr1.vert" "${DSR_SHADERS_DIR}/fsr1_easu.frag" "${DSR_SHADERS_DIR}/fsr1_rcas.frag"
+      DEPENDS "${DSR_SHADERS_DIR}/fsr1.vert" "${DSR_SHADERS_DIR}/fsr1_easu.frag" "${DSR_SHADERS_DIR}/fsr1_rcas.frag" "${DSR_SHADERS_DIR}/temporal_smooth.frag"
               "${CMAKE_SOURCE_DIR}/cmake/build_fsr1_spv.cmake"
       VERBATIM)
   add_custom_target(dsr_fsr1_shaders DEPENDS "${DSR_GEN_DIR}/fsr1_spv.h")
