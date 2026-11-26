@@ -50,7 +50,6 @@
 #include "hle/nvn/astc_encode.h"
 #include "hle/nvn/postfx_spv.h"
 #ifdef DSR_HAVE_FSR1
-#include "hle/nvn/normal_map.h"
 #include "fsr1_spv.h"  // generated at build time from src/hle/nvn/shaders (cmake/build_fsr1_spv.cmake)
 #endif
 #include "hle/nvn/etc_encode.h"
@@ -945,6 +944,7 @@ public:
         if (recording_) WriteBackSmallTargets();
         if (recording_) {
             EndRendering();
+            FlushLateDepth();
             FlushEarlyClears();
             ProfListEnd();
             SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE);
@@ -1780,11 +1780,6 @@ private:
         LOGI(kTag, "GPU: %s, Vulkan %u.%u.%u, driver 0x%x (%u.%u)", props_.deviceName, VK_VERSION_MAJOR(props_.apiVersion),
              VK_VERSION_MINOR(props_.apiVersion), VK_VERSION_PATCH(props_.apiVersion), props_.driverVersion,
              VK_VERSION_MAJOR(props_.driverVersion), VK_VERSION_MINOR(props_.driverVersion));
-        // mali_bc (Mali only, experimental; the BC support of the malisx2 driver): 0 = native BC when the driver
-        // reports it (malisx2 does on Mali-G52 / G57 / G610), 1 = the same after a test of every BC format (then BC
-        // textures are used as they are), 2 = never native BC on Mali: converted to ASTC / ETC2 / decoded.
-        is_mali_ = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
-        mali_bc_ = is_mali_ ? GetRuntime().config.mali_bc : 0;
         // Qualcomm's Adreno 6xx drivers (512.x before 512.514) do not expose the BC texture formats the GPU
         // supports; BCeNabler (libadrenotools) patches the driver in memory to expose them, which saves the
         // software decoding (and BC6H/BC7 then look right).
@@ -1821,7 +1816,7 @@ private:
         if (v13) have.pNext = &have13;
         vkGetPhysicalDeviceFeatures2(phys_, &have);
         VkPhysicalDeviceFeatures en{};
-        en.textureCompressionBC = have.features.textureCompressionBC && mali_bc_ != 2;
+        en.textureCompressionBC = have.features.textureCompressionBC;
         en.textureCompressionETC2 = have.features.textureCompressionETC2;
         en.textureCompressionASTC_LDR = have.features.textureCompressionASTC_LDR;
         en.samplerAnisotropy = have.features.samplerAnisotropy;
@@ -1894,9 +1889,9 @@ private:
                  hud_box_h_, rw);
         }
         // FXAA and FSR 1 work on the screen-sized image too (the 3D picture is enlarged into it), so either turns it on.
-        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud || rc.fxaa || rc.fsr) {
+        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud || rc.fxaa || rc.fsr || rc.fsr3) {
             const int rw = rc.render_width, rh = rc.render_height;
-            const bool postfx = rc.fxaa || rc.fsr;
+            const bool postfx = rc.fxaa || rc.fsr || rc.fsr3;
             // Performance mode caps the screen-sized image at 720 lines: at 1080 the enlarge, FSR/FXAA and the HUD
             // draws cost a slow GPU about what a 0.75 render scale saves (a Mali G68 log: 1922x1080, ~28 ms frames).
             const int cap_h = rc.performance_mode ? 720 : 1080;
@@ -1913,7 +1908,7 @@ private:
                 sharp_w_ = std::min(4096, int(std::lround(double(target_h) * rw / rh)) & ~1);
                 LOGI(kTag, "sharp_hud: the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d%s%s",
                      rw, rh, sharp_w_, sharp_h_, rc.fxaa ? (rc.fxaa >= 2 ? ", FXAA quality" : ", FXAA fast") : "",
-                     rc.fsr ? ", FSR 1" : "");
+                     rc.fsr3 ? ", FSR 3-style temporal upscaler" : rc.fsr ? ", FSR 1" : "");
             } else {
                 LOGI(kTag, "sharp_hud: off, the render size (%dx%d) is already as sharp as the screen allows (%d lines)", rw,
                      rh, target_h);
@@ -1934,8 +1929,11 @@ private:
         if (mali_barriers_)
             LOGI(kTag, "settings mali_barriers = 1: narrow layout barriers, render targets readable when their pass ends");
         // mali_tile_turbo (experimental, Mali only; from PR #73 by Dann-os3d): see LayoutScope.
-        const bool is_mali = is_mali_;
+        const bool is_mali = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
         tile_turbo_ = dsr::GetRuntime().config.mali_tile_turbo && is_mali;
+        late_depth_ = dsr::GetRuntime().config.late_depth;
+        no_bloom_ = dsr::GetRuntime().config.lighter_post_fx;
+        if (late_depth_) LOGI(kTag, "settings late_depth = 1: depth read by shaders is copied at pass ends (no split)");
         if (tile_turbo_)
             LOGI(kTag, "settings mali_tile_turbo = 1: layout-scoped barriers (unknown layouts keep the full barrier)");
         else if (dsr::GetRuntime().config.mali_tile_turbo)
@@ -2405,8 +2403,7 @@ private:
     // memory and the sampling bandwidth). Images of each BC format are created here as a test; if all work, BC
     // textures are used as they are.
     void ProbePatchedBc() {
-        if (is_mali_) LogMaliBc();
-        if (!bc_patched_ && mali_bc_ != 1) return;
+        if (!bc_patched_) return;
         VkFormatProperties fp{};
         vkGetPhysicalDeviceFormatProperties(phys_, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &fp);
         static const VkFormat kFormats[] = {
@@ -2438,16 +2435,6 @@ private:
                     if (format_list_) ci.pNext = &fl;
                 }
                 VkImage image = VK_NULL_HANDLE;
-                // mali_bc = 1: the driver's own answers are truthful (malisx2), so a format it does not take is
-                // not even created (a driver may assert on a format it never offered).
-                if (!bc_patched_) {
-                    VkImageFormatProperties ifp{};
-                    if (vkGetPhysicalDeviceImageFormatProperties(phys_, f, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-                                                                 ci.usage, ci.flags, &ifp) != VK_SUCCESS) {
-                        if (!failed++) first_failed = int(f);
-                        continue;
-                    }
-                }
                 const VkResult r = vkCreateImage(device_, &ci, nullptr, &image);
                 VkMemoryRequirements req{};
                 if (r == VK_SUCCESS) vkGetImageMemoryRequirements(device_, image, &req);
@@ -2458,32 +2445,9 @@ private:
             }
         }
         bc_forced_ = failed == 0;
-        LOGI(kTag, "BC textures: %s reports features 0x%x for BC1; test images: %s (%d failed, first format %d)%s",
-             bc_patched_ ? "patched driver" : "Mali driver (mali_bc = 1)", fp.optimalTilingFeatures,
-             failed ? "FAILED" : "ok", failed, first_failed,
-             bc_forced_ ? " - BC textures used as they are (not decoded)"
-                        : " - BC textures stay converted (ASTC / ETC2) or decoded on upload");
-    }
-
-    // One line per run on Mali: what the driver says about BC and what mali_bc does with it.
-    void LogMaliBc() {
-        static const VkFormat kFormats[] = {
-            VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK, VK_FORMAT_BC4_UNORM_BLOCK,
-            VK_FORMAT_BC5_UNORM_BLOCK,      VK_FORMAT_BC6H_UFLOAT_BLOCK, VK_FORMAT_BC7_UNORM_BLOCK};
-        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-        char got[64];
-        size_t n = 0;
-        static const char* kNames[] = {"BC1", "BC3", "BC4", "BC5", "BC6H", "BC7"};
-        for (size_t i = 0; i < 6; i++) {
-            VkFormatProperties p{};
-            vkGetPhysicalDeviceFormatProperties(phys_, kFormats[i], &p);
-            if ((p.optimalTilingFeatures & need) == need)
-                n += size_t(snprintf(got + n, sizeof(got) - n, "%s%s", n ? " " : "", kNames[i]));
-        }
-        if (!n) snprintf(got, sizeof(got), "none");
-        LOGI(kTag, "BC textures on Mali: the driver samples %s (feature textureCompressionBC %d), mali_bc = %d (%s)", got,
-             int(features_.textureCompressionBC), mali_bc_,
-             mali_bc_ == 2 ? "never native: BC converted" : mali_bc_ == 1 ? "tested, then native" : "native when the driver has it");
+        LOGI(kTag, "BC textures: patched driver reports features 0x%x for BC1; test images: %s (%d failed, first format %d)%s",
+             fp.optimalTilingFeatures, failed ? "FAILED" : "ok", failed, first_failed,
+             bc_forced_ ? " - BC textures used as they are (not decoded)" : " - BC textures stay decoded on upload");
     }
 
     // What a BC texture is converted into when the GPU cannot sample BC: ETC2 when the GPU has it (BC1 always;
@@ -2524,7 +2488,6 @@ private:
         VkFormat chosen = VK_FORMAT_UNDEFINED;
         VkFormatFeatureFlags feats = 0;
         for (VkFormat f : ImageCandidates(nvn_format)) {
-            if (mali_bc_ == 2 && BcKindOf(nvn_format) != BcKind::None) break;  // mali_bc = 2: BC is converted
             VkFormatProperties p;
             vkGetPhysicalDeviceFormatProperties(phys_, f, &p);
             // Driver patched by BCeNabler: BC images work, though the format query still reports nothing.
@@ -2810,7 +2773,6 @@ private:
                  (unsigned long long)img.addr);
         return &images_.emplace(t.addr, std::move(img)).first->second;
     }
-    int normal_maps_logged_ = 0;
     Image* CreateImage(const TexRef& t, bool park_drawn = false) {
         VkFormatFeatureFlags feats = 0;
         VkFormat vf = PickFormat(t.tex.format, &feats);
@@ -2840,28 +2802,6 @@ private:
                     img.bc_to = to;
                     break;
                 }
-        // Normal maps (BC1 / BC3) do not go through ETC2, see normal_map.h: kept as decoded RGBA8 (small ones only).
-        if (img.bc != BcKind::None && (img.bc_to == BcTo::Etc2 || img.bc_to == BcTo::Etc2Rgba8) &&
-            dsr::GetRuntime().config.bc_normals && int64_t(t.tex.width) * t.tex.height <= 1024 * 1024 &&
-            GuestRangeValid(t.addr, layout.total)) {
-            float mean[4];
-            if (BcMeanColor(reinterpret_cast<const uint8_t*>(t.addr), layout, img.bc, mean) &&
-                MeanLooksLikeNormalMap(mean, img.bc)) {
-                const VkFormat df = ConvertedFormat(t.tex.format, BcTo::Decoded);
-                VkFormatProperties dp;
-                vkGetPhysicalDeviceFormatProperties(phys_, df, &dp);
-                const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-                if ((dp.optimalTilingFeatures & need) == need) {
-                    vf = df;
-                    feats = dp.optimalTilingFeatures;
-                    img.vk_format = vf;
-                    img.bc_to = BcTo::Decoded;
-                    if (++normal_maps_logged_ <= 12)
-                        LOGI(kTag, "normal map kept uncompressed (RGBA8, not ETC2): %dx%d format %d, mean colour %.0f %.0f %.0f %.0f",
-                             t.tex.width, t.tex.height, t.tex.format, mean[0], mean[1], mean[2], mean[3]);
-                }
-            }
-        }
         img.width = t.tex.width;
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
@@ -3050,12 +2990,12 @@ private:
             case BcTo::Astc:
                 rgba.resize(size_t(j.w) * size_t(hh) * 4);
                 BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
-                EncodeAstc(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                EncodeAstc(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab, quick);
                 break;
             case BcTo::AstcLa:  // BC5: decoded to two channels (R8G8), encoded as luminance + alpha
                 rgba.resize(size_t(j.w) * size_t(hh) * 2);
                 BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
-                EncodeAstcLA(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                EncodeAstcLA(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab, quick);
                 break;
         }
     }
@@ -4733,6 +4673,10 @@ private:
         if (!rendering_ && key == ended_key_ && ended_line_) resumed_passes_[ended_line_]++;
         EndRendering();
         ended_line_ = 0;
+        // Work done between passes (and the copies / clears recorded since the last pass started) is its own
+        // interval when there is any, not part of the previous pass's time.
+        if (!late_depth_q_.empty() || !early_clears_.empty()) ProfStamp("between passes");
+        FlushLateDepth();
         FlushEarlyClears(&colors, depth);
         ProfMark(colors, depth, w, h);
         if (depth && depth->depth_exported && dsr::GetRuntime().config.lrz_workaround) LrzTouch(*depth);
@@ -5062,6 +5006,18 @@ private:
         if (!snap) return nullptr;
         auto& gen = snapshot_gen_[snap_ref.addr];
         if (gen != depth_gen_ + 1) {
+            // late_depth: the depth buffer is in the open pass (a copy now splits it: its tiles stored, copied and
+            // loaded again, about once a frame). Shaders read the copy taken when that pass ends (last frame's
+            // depth, the first time in a frame) and the copy is made then (FlushLateDepth).
+            if (late_depth_ && rendering_ && InOpenPass(&depth) && snap->written &&
+                snap->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && !capture_active_) {
+                bool queued = false;
+                for (const LateDepth& l : late_depth_q_) queued |= l.snap == snap_ref.addr;
+                if (!queued && late_depth_q_.size() < 8)
+                    late_depth_q_.push_back({depth.addr, depth.serial, snap_ref.addr, snap->serial});
+                late_depth_reads_++;
+                return snap;
+            }
             EndRendering();
             CopyImage(depth, CopyRegion{}, *snap, CopyRegion{}, 0);
             snap->written = true;
@@ -5073,6 +5029,58 @@ private:
             Transition(*snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
         return snap;
+    }
+
+    // Fragment programs of the bloom chain (identified in frame captures of 1.0.0 and 1.0.3; the same shaders on
+    // every device): bright pass, its blurs and the upsampling.
+    static bool IsBloomShader(uint64_t h) {
+        return h == 0xc3d56b6401ccb572ull || h == 0x512397bbc420f850ull || h == 0x9b44066e84ff04c6ull ||
+               h == 0x82aa25701a19c22bull;
+    }
+    bool no_bloom_ = false;
+    uint64_t bloom_skipped_ = 0;
+    // A colour target the game would have drawn into, cleared to transparent black instead (a pending clear done at
+    // the next pass boundary: no pass of its own).
+    void BlackOut(Image& img, int layer, int level) {
+        if (InOpenPass(&img)) EndRendering();
+        if (img.clear_pending) FlushClear(img);
+        img.clear_pending = true;
+        img.clear_value = VkClearValue{};
+        img.clear_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        img.clear_layer = layer;
+        img.clear_level = level;
+        img.clear_early = true;
+        img.written = true;
+        img.cpu_source = false;
+        clears_deferred_++;
+        EarlyClear(&img);
+    }
+
+    // late_depth (settings, experimental): depth copies for shaders made at pass ends instead of splitting a pass.
+    struct LateDepth {
+        uint64_t depth, depth_serial, snap, snap_serial;
+    };
+    bool late_depth_ = false;
+    std::vector<LateDepth> late_depth_q_;
+    uint64_t late_depth_reads_ = 0, late_depth_copies_ = 0;
+    void FlushLateDepth() {
+        if (late_depth_q_.empty() || rendering_) return;
+        for (const LateDepth& l : late_depth_q_) {
+            auto d = images_.find(l.depth), sn = images_.find(l.snap);
+            if (d == images_.end() || sn == images_.end() || d->second.serial != l.depth_serial ||
+                sn->second.serial != l.snap_serial)
+                continue;
+            Image& depth = d->second;
+            Image& snap = sn->second;
+            const VkImageLayout back = depth.layout;
+            CopyImage(depth, CopyRegion{}, snap, CopyRegion{}, 0);
+            snap.written = true;
+            snapshot_gen_[l.snap] = depth_gen_ + 1;
+            if (back == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) Transition(depth, back);
+            Transition(snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            late_depth_copies_++;
+        }
+        late_depth_q_.clear();
     }
 
     // 1x1 stand-in of a dimension: white (missing textures) or opaque black (`black`: placeholders of the wrong
@@ -5235,6 +5243,18 @@ private:
                 return;
             }
         }
+        // lighter_post_fx: no bloom. The bloom chain (frame captures: bright pass, blurs at 1/4 and 1/8 size and the
+        // upsampling, about ten one-draw passes, ~1.5 ms of GPU time a frame on a Mali-G68) is not drawn; its targets
+        // are cleared to black instead (at a pass boundary), so the final combine adds nothing. The game's own
+        // switch for it (debug menu "Bloom") is never read.
+        if (no_bloom_ && st_.program[1] && IsBloomShader(st_.program[1]->hash)) {
+            Begin();
+            for (int i = 0; i < st_.num_rt && size_t(i) < st_.rts.size(); i++)
+                if (Image* img = GetImage(st_.rts[size_t(i)], false); img && !IsDepthFormat(img->nvn_format))
+                    BlackOut(*img, st_.rts[size_t(i)].layer, st_.rts[size_t(i)].level);
+            if (bloom_skipped_++ == 0) LOGI(kTag, "lighter post-processing: bloom passes not drawn");
+            return;
+        }
         Shader* vs = GetShader(*st_.program[0], vopt);
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
@@ -5338,12 +5358,6 @@ private:
                 }
             }
         }
-        // Camera motion (skip_hidden Gentle, temporal smoothing): sampled from the frame's first opaque, depth-tested
-        // world draw with a colour target (OccCamera).
-        if ((dsr::GetRuntime().config.skip_hidden || dsr::GetRuntime().config.fsr >= 2) && occ_cam_frame_ != occ_frame_ &&
-            !colors.empty() && colors[0] && depth && depth->width >= 256 && st_.depth.depth_test &&
-            st_.color.blend_enable == 0 && !capture_active_)
-            OccCamera();
         // ---- skip_hidden (experimental; from PR #47): world draws that covered no pixel lately are left out ----------
         uint64_t occ_key = 0;
         bool occ_query = false;
@@ -5915,6 +5929,14 @@ private:
         // sharp_hud: viewport, scissor and HUD box worked out for the frame's own size, then scaled to the sharp image.
         const VkExtent2D dyn_extent = sharp_src ? VkExtent2D{uint32_t(sharp_rw_), uint32_t(sharp_rh_)} : extent;
         DynamicState(dyn_extent, modes, &d.dyn);
+        // fsr3: the scene's own draws (a depth buffer used, at the render size) are shifted by the frame's sub-pixel
+        // jitter. Shifting the viewport is the same as adding the offset to clip space, with no change to the game's
+        // shaders; the post passes that read the scene 1:1 inherit the shift and the temporal pass takes it out.
+        if (fsr_jitter_on_ && depth && !sharp_src && (st_.depth.depth_test || st_.depth.depth_write) &&
+            extent.width == uint32_t(sharp_rw_) && extent.height == uint32_t(sharp_rh_)) {
+            d.dyn.vp.x += fsr_jx_;
+            d.dyn.vp.y += fsr_jy_;
+        }
         // Other aspect ratios (aspect_ratio): the game lays its HUD and menus out for 1280x720 and stretches that
         // over the whole (wider or narrower) frame. Every draw made with that 1280x720 2D projection (several
         // shaders: quads, text, bars) goes into a centred 16:9 box instead: 1280x720 in the middle of wider frames,
@@ -7358,10 +7380,6 @@ private:
                  "copy, %llu frames shown without (a later draw needed the frame's depth buffer)",
                  (unsigned long long)sharp_draws_, (unsigned long long)sharp_restarts_, (unsigned long long)sharp_dropped_);
         sharp_draws_ = sharp_restarts_ = sharp_dropped_ = 0;
-        if (dsr::GetRuntime().config.fsr >= 2 && post_temporal_frames_)
-            LOGI(kTag, "temporal smoothing: %llu frames in the last 10 s with the history reduced or off (camera moving)",
-                 (unsigned long long)post_temporal_moving_);
-        post_temporal_moving_ = 0;
         if (dsr::GetRuntime().config.shadow_quality == 0)
             LOGI(kTag, "shadow_quality 0: %llu shadow map draws left out (last 10 s)", (unsigned long long)shadow_draws_skipped_);
         shadow_draws_skipped_ = 0;
@@ -7402,6 +7420,10 @@ private:
              (unsigned long long)clears_deferred_, (unsigned long long)clears_in_pass_, (unsigned long long)clears_flushed_,
              (unsigned long long)pass_barriers_, (unsigned long long)lrz_touches_, (unsigned long long)shader_depth_draws_);
         clears_deferred_ = clears_in_pass_ = clears_flushed_ = pass_barriers_ = lrz_touches_ = shader_depth_draws_ = 0;
+        if (late_depth_reads_ || late_depth_copies_)
+            LOGI(kTag, "late_depth: %llu draws read the depth copied at a pass end, %llu copies made there",
+                 (unsigned long long)late_depth_reads_, (unsigned long long)late_depth_copies_);
+        late_depth_reads_ = late_depth_copies_ = 0;
         if (clears_early_ || clears_breaking_)
             LOGI(kTag, "separate clears: %llu done early at a pass boundary, %llu still ended an open pass",
                  (unsigned long long)clears_early_, (unsigned long long)clears_breaking_);
@@ -7785,8 +7807,6 @@ private:
         return !full;
     }
     bool bc_patched_ = false, bc_forced_ = false;
-    bool is_mali_ = false;       // a Mali GPU (vendor 0x13B5 or "Mali" in its name)
-    int mali_bc_ = 0;            // settings mali_bc (Mali only): 0 auto, 1 tested + native, 2 never native
     bool mip_skip_ = false;      // settings texture_mip_skip
     uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
@@ -7878,8 +7898,6 @@ private:
     // replaces the bilinear blit. Fragment passes over a full-screen triangle in render pass objects (every driver has
     // them): no compute, no storage images. FXAA's SPIR-V is checked in (postfx_spv.h); FSR's is compiled from
     // src/hle/nvn/shaders at build time (DSR_HAVE_FSR1; without glslc the build leaves FSR out).
-    // kPostTemporal (settings fsr = 2, temporal smoothing; PR #47's "Arm ASR" pass): the EASU output blended with the
-    // previous frame's result, the history clamped to the current neighbourhood's colours. Samples two images.
     enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostTemporal, kPostKinds };
     struct PostPipe {
         VkPipeline pipe = VK_NULL_HANDLE;
@@ -7892,20 +7910,41 @@ private:
         VkRenderPass rp;
         VkFramebuffer fb;
         VkImageView src_view;
-        VkImageView src_view2;  // kPostTemporal: the history
-        bool two = false;
+        VkImageView src2_view;        // the temporal pass's history (second binding); null for the others
+        VkDescriptorSetLayout set_layout;
+        VkPipelineLayout layout;
         uint32_t w, h, push_size;
         uint32_t push[20];
     };
     VkShaderModule post_vs_ = VK_NULL_HANDLE, post_fsr_vs_ = VK_NULL_HANDLE, post_fs_[kPostKinds] = {};
-    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE, post_set_layout2_ = VK_NULL_HANDLE;
-    VkPipelineLayout post_layout_ = VK_NULL_HANDLE, post_layout2_ = VK_NULL_HANDLE;
-    Image post_hist_[2];  // temporal smoothing: this frame's result / the previous one (alternating)
-    int post_hist_w_ = 0;
-    bool post_hist_valid_ = false;
-    std::chrono::steady_clock::time_point post_hist_last_{};
-    uint64_t post_temporal_frames_ = 0, post_temporal_moving_ = 0;
+    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
     VkSampler post_sampler_ = VK_NULL_HANDLE;
+    // fsr3 (temporal upscaling): its pass samples two images (the jittered frame and the history).
+    VkDescriptorSetLayout post_tset_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_tlayout_ = VK_NULL_HANDLE;
+    Image post_hist_[2];          // the temporal output at the screen-sized image's size, read one frame later
+    int post_hist_read_ = 0;      // which of the two the next frame reads
+    bool fsr3_ready_ = false;
+    bool fsr_jitter_on_ = false;  // the scene's draws are jittered this frame (a temporal pass follows)
+    float fsr_jx_ = 0.0f, fsr_jy_ = 0.0f;
+    uint32_t fsr_phase_ = 0;
+    uint64_t fsr3_frames_ = 0, fsr3_resets_ = 0;
+    // Halton(2, 3) jitter, in render pixels within [-0.5, 0.5]: 16 phases.
+    static float Halton(uint32_t i, uint32_t b) {
+        float f = 1.0f, r = 0.0f;
+        while (i > 0) {
+            f /= float(b);
+            r += f * float(i % b);
+            i /= b;
+        }
+        return r;
+    }
+    void FsrJitterAdvance() {
+        fsr_phase_ = (fsr_phase_ + 1) % 16;
+        fsr_jx_ = Halton(fsr_phase_ + 1, 2) - 0.5f;
+        fsr_jy_ = Halton(fsr_phase_ + 1, 3) - 0.5f;
+    }
     std::vector<PostPipe> post_pipes_;
     bool post_ready_ = false, post_failed_ = false, fsr_ready_ = false;
     Image post_fxaa_img_;  // FXAA's output at the game's render size
@@ -7952,7 +7991,7 @@ private:
         fsr_ready_ = module(kFsr1VertSpv, sizeof kFsr1VertSpv, &post_fsr_vs_) &&
                      module(kFsr1EasuSpv, sizeof kFsr1EasuSpv, &post_fs_[kPostEasu]) &&
                      module(kFsr1RcasSpv, sizeof kFsr1RcasSpv, &post_fs_[kPostRcas]);
-        if (fsr_ready_) module(kTemporalSpv, sizeof kTemporalSpv, &post_fs_[kPostTemporal]);
+        fsr3_ready_ = fsr_ready_ && module(kFsr3TemporalSpv, sizeof kFsr3TemporalSpv, &post_fs_[kPostTemporal]);
 #endif
         VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
                                           nullptr};
@@ -7967,13 +8006,24 @@ private:
         pl.pushConstantRangeCount = 1;
         pl.pPushConstantRanges = &pr;
         if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout_) != VK_SUCCESS) return false;
-        VkDescriptorSetLayoutBinding binds2[2] = {bind, bind};
-        binds2[1].binding = 1;
-        li.bindingCount = 2;
-        li.pBindings = binds2;
-        if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &post_set_layout2_) != VK_SUCCESS) return false;
-        pl.pSetLayouts = &post_set_layout2_;
-        if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout2_) != VK_SUCCESS) return false;
+        if (fsr3_ready_) {
+            const VkDescriptorSetLayoutBinding tb[2] = {
+                {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+                {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+            VkDescriptorSetLayoutCreateInfo tli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            tli.bindingCount = 2;
+            tli.pBindings = tb;
+            VkPipelineLayoutCreateInfo tpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            tpl.setLayoutCount = 1;
+            tpl.pSetLayouts = &post_tset_layout_;
+            tpl.pushConstantRangeCount = 1;
+            tpl.pPushConstantRanges = &pr;
+            if (vkCreateDescriptorSetLayout(device_, &tli, nullptr, &post_tset_layout_) != VK_SUCCESS ||
+                vkCreatePipelineLayout(device_, &tpl, nullptr, &post_tlayout_) != VK_SUCCESS) {
+                LOGW(kTag, "fsr3: its descriptor layout could not be made: FSR 1 only");
+                fsr3_ready_ = false;
+            }
+        }
         VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
         sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -7983,7 +8033,8 @@ private:
         if (vkCreateSampler(device_, &sci, nullptr, &post_sampler_) != VK_SUCCESS) return false;
         post_failed_ = false;
         post_ready_ = true;
-        LOGI(kTag, "post-processing ready: FXAA fast / quality%s", fsr_ready_ ? ", FSR 1" : " (FSR 1 not in this build)");
+        LOGI(kTag, "post-processing ready: FXAA fast / quality%s%s", fsr_ready_ ? ", FSR 1" : " (FSR 1 not in this build)",
+             fsr3_ready_ ? ", temporal upscaler (fsr3)" : "");
         return true;
     }
     // Whether the passes can work on `f` (sampled or drawn): a filterable, drawable plain 2D colour image.
@@ -7996,18 +8047,20 @@ private:
                (f.features & kNeed) == kNeed;
     }
     // An image like `f` at w x h in `slot`, made (again) when its size or format changed; retired like any image.
-    bool PostEnsureImage(Image& slot, const Image& f, int w, int h) {
-        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == f.vk_format) return true;
+    bool PostEnsureImage(Image& slot, const Image& f, int w, int h, VkFormat fmt = VK_FORMAT_UNDEFINED,
+                         VkFormatFeatureFlags fmt_features = 0) {
+        const VkFormat want = fmt != VK_FORMAT_UNDEFINED ? fmt : f.vk_format;
+        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == want) return true;
         if (slot.image) DestroyImage(slot);
         Image n;
-        n.vk_format = f.vk_format;
+        n.vk_format = want;
         n.nvn_format = f.nvn_format;
         n.target = kTarget2D;
         n.type = VK_IMAGE_TYPE_2D;
         n.width = w;
         n.height = h;
         n.aspect = f.aspect;
-        n.features = f.features;
+        n.features = fmt != VK_FORMAT_UNDEFINED ? fmt_features : f.features;
         if (!AllocImage(n, false, false, &n.image, &n.memory)) return false;
         n.serial = ++image_serial_;
         slot = n;
@@ -8065,7 +8118,7 @@ private:
         ci.pMultisampleState = &ms;
         ci.pColorBlendState = &cb;
         ci.pDynamicState = &dy;
-        ci.layout = kind == kPostTemporal ? post_layout2_ : post_layout_;
+        ci.layout = kind == kPostTemporal ? post_tlayout_ : post_layout_;
         ci.renderPass = rp;
         VkPipeline pipe = VK_NULL_HANDLE;
         if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
@@ -8098,10 +8151,10 @@ private:
         return fb;
     }
     // Recorder thread: a descriptor set of post_set_layout_ from the slot's pool (a full pool continues in another).
-    bool AllocPostSet(VkDescriptorSet* set, bool two = false) {
+    bool AllocPostSet(VkDescriptorSet* set, const VkDescriptorSetLayout* set_layout) {
         VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dai.descriptorSetCount = 1;
-        dai.pSetLayouts = two ? &post_set_layout2_ : &post_set_layout_;
+        dai.pSetLayouts = set_layout;
         for (int tries = 0; tries < 3; tries++) {
             dai.descriptorPool = desc_pool_;
             if (vkAllocateDescriptorSets(device_, &dai, set) == VK_SUCCESS) return true;
@@ -8119,19 +8172,22 @@ private:
     // Recorder thread: one full-target pass sampling job.src_view.
     void RecordPostPass(VkCommandBuffer cb, const PostJob& j) {
         VkDescriptorSet set = VK_NULL_HANDLE;
-        if (!AllocPostSet(&set, j.two)) {
+        if (!AllocPostSet(&set, &j.set_layout)) {
             LogOnce("postfx_set", "post-processing: no descriptor set");
             return;
         }
-        const VkPipelineLayout layout = j.two ? post_layout2_ : post_layout_;
         VkDescriptorImageInfo ii[2] = {{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                                       {post_sampler_, j.src_view2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wr.dstSet = set;
-        wr.descriptorCount = j.two ? 2 : 1;
-        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wr.pImageInfo = ii;
-        vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+                                       {post_sampler_, j.src2_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet wr[2]{};
+        for (int b = 0; b < 2; b++) {
+            wr[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[b].dstSet = set;
+            wr[b].dstBinding = uint32_t(b);
+            wr[b].descriptorCount = 1;
+            wr[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr[b].pImageInfo = &ii[b];
+        }
+        vkUpdateDescriptorSets(device_, j.src2_view ? 2 : 1, wr, 0, nullptr);
         const VkRect2D area{{0, 0}, {j.w, j.h}};
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         bi.renderPass = j.rp;
@@ -8139,8 +8195,8 @@ private:
         bi.renderArea = area;
         vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.pipe);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.layout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, j.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
         const VkViewport vp{0.0f, 0.0f, float(j.w), float(j.h), 0.0f, 1.0f};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &area);
@@ -8150,7 +8206,6 @@ private:
         InvalidateBoundState();
     }
     // One pass: `src` (sampled) into `dst` (drawn), both whole. False (nothing recorded) when it cannot be done.
-    // src2: a second sampled image (kPostTemporal: the history).
     bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words, Image* src2 = nullptr) {
         VkRenderPass rp = VK_NULL_HANDLE;
         const VkPipeline pipe = PostPipeline(kind, dst.vk_format, &rp);
@@ -8161,17 +8216,17 @@ private:
         Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         const VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src.aspect, kIdentity);
         const VkImageView sv2 = src2 ? View(*src2, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src2->aspect, kIdentity) : VK_NULL_HANDLE;
-        if (src2 && !sv2) return false;
         const VkImageView dv = AttachmentView(dst);
         const VkFramebuffer fb = dv ? PostFramebuffer(rp, dv, uint32_t(dst.width), uint32_t(dst.height)) : VK_NULL_HANDLE;
-        if (!sv || !fb) return false;
+        if (!sv || !fb || (src2 && !sv2)) return false;
         PostJob j{};
         j.pipe = pipe;
         j.rp = rp;
         j.fb = fb;
         j.src_view = sv;
-        j.src_view2 = sv2;
-        j.two = src2 != nullptr;
+        j.src2_view = sv2;
+        j.set_layout = src2 ? post_tset_layout_ : post_set_layout_;
+        j.layout = src2 ? post_tlayout_ : post_layout_;
         j.w = uint32_t(dst.width);
         j.h = uint32_t(dst.height);
         j.push_size = push_words * 4;
@@ -8183,84 +8238,107 @@ private:
         dst.attach_unsynced = true;
         return true;
     }
-    // FXAA / FSR 1 for the 3D picture `src` enlarged into the sharp image `dst`; false: not done (the plain blit).
+    // fsr3: the temporal upscaler (shaders/fsr3_temporal.frag) for the 3D picture `in` (rendered with this frame's jitter)
+    // into the screen-sized `dst`, then RCAS. The history is the previous frame's temporal output (two images, read and
+    // written alternately). False: not done (nothing was drawn into dst; the caller falls back to FSR 1 / the blit).
+    VkFormat fsr3_hist_fmt_ = VK_FORMAT_UNDEFINED;
+    VkFormatFeatureFlags fsr3_hist_feat_ = 0;
+    bool fsr3_fmt_checked_ = false;
+    bool FsrTemporal(Image& in, Image& dst) {
+        if (!fsr3_fmt_checked_) {
+            // The history in half floats when the GPU can draw to and filter them (8-bit history drifts and bands).
+            fsr3_fmt_checked_ = true;
+            VkFormatProperties fp;
+            vkGetPhysicalDeviceFormatProperties(phys_, VK_FORMAT_R16G16B16A16_SFLOAT, &fp);
+            constexpr VkFormatFeatureFlags kNeed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                   VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                                   VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            if ((fp.optimalTilingFeatures & kNeed) == kNeed) {
+                fsr3_hist_fmt_ = VK_FORMAT_R16G16B16A16_SFLOAT;
+                fsr3_hist_feat_ = fp.optimalTilingFeatures;
+            }
+        }
+        const VkFormat want = fsr3_hist_fmt_ != VK_FORMAT_UNDEFINED ? fsr3_hist_fmt_ : dst.vk_format;
+        const auto stale = [&](const Image& i) {
+            return !(i.image && i.width == dst.width && i.height == dst.height && i.vk_format == want);
+        };
+        const bool fresh = stale(post_hist_[0]) || stale(post_hist_[1]);
+        if (!PostEnsureImage(post_hist_[0], dst, dst.width, dst.height, fsr3_hist_fmt_, fsr3_hist_feat_) ||
+            !PostEnsureImage(post_hist_[1], dst, dst.width, dst.height, fsr3_hist_fmt_, fsr3_hist_feat_))
+            return false;
+        Image& prev = post_hist_[post_hist_read_];
+        Image& next = post_hist_[post_hist_read_ ^ 1];
+        // The draws of this frame were jittered only if the flag was already on when the frame started.
+        const bool jittered = fsr_jitter_on_;
+        const float iw = float(in.width), ih = float(in.height), ow = float(dst.width), oh = float(dst.height);
+        const uint32_t flags = (PostPerceptual(in.vk_format) ? 1u : 0u) | (fresh || !jittered ? 2u : 0u);
+        const uint32_t tp[10] = {FloatBits(jittered ? fsr_jx_ : 0.0f), FloatBits(jittered ? fsr_jy_ : 0.0f), FloatBits(iw),
+                                 FloatBits(ih), FloatBits(ow), FloatBits(oh), FloatBits(0.12f), flags, FloatBits(1.25f),
+                                 FloatBits(6.0f)};
+        if (!PostPass(kPostTemporal, in, next, tp, 10, &prev)) return false;
+        post_hist_read_ ^= 1;
+        if (flags & 2u) fsr3_resets_++;
+        const float stops = 2.0f * (1.0f - 0.70f);  // RCAS at 70% sharpness, as with FSR 1
+        const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
+        if (!PostPass(kPostRcas, next, dst, rcas, 4)) return false;
+        // The next frame's scene draws are jittered by the next phase (the viewport shift, see Draw).
+        fsr_jitter_on_ = true;
+        FsrJitterAdvance();
+        if (fsr3_frames_++ == 0)
+            LOGI(kTag, "fsr3: temporal upscaler active, %dx%d -> %dx%d, history format %d, 16 jitter phases", in.width,
+                 in.height, dst.width, dst.height, int(next.vk_format));
+        return true;
+    }
+    // FXAA / FSR 1 / the temporal upscaler for the 3D picture `src` enlarged into the sharp image `dst`; false: not done
+    // (the plain blit).
     bool PostEnlarge(Image& src, Image& dst) {
         const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
-        if (!c.fxaa && !c.fsr) return false;
+        if (!c.fxaa && !c.fsr && !c.fsr3) return false;
         if (!PostFxUsable(src) || !PostFxUsable(dst)) {
             LogOnce("postfx_fmt", "post-processing: the frame (format %d) cannot be filtered here: plain blit", src.nvn_format);
+            fsr_jitter_on_ = false;
             return false;
         }
+        const bool temporal = c.fsr3 && fsr3_ready_;
+        if (c.fsr3 && !fsr3_ready_)
+            LogOnce("fsr3_missing", "fsr3: the temporal upscaler is not available (not in this build, or its shaders failed): FSR 1");
         Image* in = &src;
-        if (c.fxaa && PostEnsureImage(post_fxaa_img_, src, src.width, src.height)) {
+        // With fsr3 the temporal pass is the anti-aliasing: FXAA before it would only blur the jittered detail away.
+        if (!temporal && c.fxaa && PostEnsureImage(post_fxaa_img_, src, src.width, src.height)) {
             const uint32_t push[1] = {PostPerceptual(src.vk_format) ? 1u : 0u};
             if (PostPass(c.fxaa >= 2 ? kPostFxaaQuality : kPostFxaaFast, src, post_fxaa_img_, push, 1)) in = &post_fxaa_img_;
         }
         bool done = false;
-        if (c.fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
-            // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at fsr_sharpness (default 70%).
+        bool used_temporal = false;
+        if (temporal) {
+            done = used_temporal = FsrTemporal(*in, dst);
+            if (!done) {
+                fsr_jitter_on_ = false;
+                LogOnce("fsr3_fail", "fsr3: the temporal pass could not be recorded: FSR 1 instead");
+            }
+        }
+        const bool want_fsr = c.fsr || c.fsr3;
+        if (!done && want_fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
+            // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at 70% sharpness (PR #47's default).
             const float iw = float(in->width), ih = float(in->height), ow = float(dst.width), oh = float(dst.height);
             const uint32_t easu[16] = {FloatBits(iw / ow), FloatBits(ih / oh), FloatBits(0.5f * iw / ow - 0.5f),
                                        FloatBits(0.5f * ih / oh - 0.5f), FloatBits(1.0f / iw), FloatBits(1.0f / ih),
                                        FloatBits(1.0f / iw), FloatBits(-1.0f / ih), FloatBits(-1.0f / iw),
                                        FloatBits(2.0f / ih), FloatBits(1.0f / iw), FloatBits(2.0f / ih), FloatBits(0.0f),
                                        FloatBits(4.0f / ih), 0, 0};
-            // fsr_sharpness 0..100 % (default 70, the previous fixed value): RCAS's constant is 2^-stops with 0 stops the
-            // sharpest and 2 the softest; 0 % turns the sharpening off (constant 0: RCAS passes the picture through).
-            const float sharp = float(std::clamp(c.fsr_sharpness, 0, 100)) / 100.0f;
-            const uint32_t rcas[4] = {FloatBits(sharp <= 0.0f ? 0.0f : std::exp2(-2.0f * (1.0f - sharp))), 0, 0, 0};
-            done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16);
-            Image* sharpen_src = &post_fsr_tmp_;
-            if (done && c.fsr >= 2) {
-                if (Image* t = PostTemporal(post_fsr_tmp_)) sharpen_src = t;
-            }
-            done = done && PostPass(kPostRcas, *sharpen_src, dst, rcas, 4);
-        } else if (c.fsr && !fsr_ready_) {
+            const float stops = 2.0f * (1.0f - 0.70f);  // 0 stops = the sharpest
+            const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
+            done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16) && PostPass(kPostRcas, post_fsr_tmp_, dst, rcas, 4);
+        } else if (!done && want_fsr && !fsr_ready_) {
             LogOnce("fsr_missing", "fsr: FSR 1 is not available (not in this build, or its shaders failed): plain blit");
         }
         if (!done && in == &src) return false;  // nothing applied: the caller's blit
         if (!done) SharpBlit(*in, dst);         // FXAA only: its result enlarged by the blit
         if (post_frames_++ == 0)
             LOGI(kTag, "post-processing active: %s%s, %dx%d -> %dx%d", in != &src ? (c.fxaa >= 2 ? "FXAA quality" : "FXAA fast") : "",
-                 done ? (in != &src ? " + FSR 1" : "FSR 1") : " + blit", src.width, src.height, dst.width, dst.height);
+                 done ? (used_temporal ? "FSR 3-style temporal upscaler + RCAS" : in != &src ? " + FSR 1" : "FSR 1") : " + blit",
+                 src.width, src.height, dst.width, dst.height);
         return true;
-    }
-    // Temporal smoothing (settings fsr = 2): `cur` (the EASU output) blended with the previous result into the other
-    // history image, which is returned (null: not done, e.g. the pass is missing). The history starts over (a plain
-    // copy of `cur`) when its images were (re)made or no frame went through for 250 ms (a pause, a loading screen).
-    Image* PostTemporal(Image& cur) {
-        if (!post_fs_[kPostTemporal]) {
-            LogOnce("temporal_missing", "temporal smoothing: its shader is not in this build: FSR 1 alone");
-            return nullptr;
-        }
-        const VkImage h0 = post_hist_[0].image, h1 = post_hist_[1].image;
-        if (!PostEnsureImage(post_hist_[0], cur, cur.width, cur.height) ||
-            !PostEnsureImage(post_hist_[1], cur, cur.width, cur.height))
-            return nullptr;
-        const auto now = std::chrono::steady_clock::now();
-        const bool reset = !post_hist_valid_ || h0 != post_hist_[0].image || h1 != post_hist_[1].image ||
-                           now - post_hist_last_ > std::chrono::milliseconds(250);
-        Image& out = post_hist_[post_hist_w_];
-        Image& prev = post_hist_[post_hist_w_ ^ 1];
-        // inv_out, neighbourhood spacing (the enlargement: taps one source pixel apart), reset, history weight at rest.
-        const float spacing = std::max(1.0f, float(cur.width) / float(std::max(1, sharp_rw_)));
-        // The history is only trusted while the camera is still: without motion vectors a turning view blends
-        // mismatched frames (soft, blurry). While it moves (OccCamera) the weight is 0 (the frame as it is, which also
-        // keeps the history current) and it eases back to 0.875 over kTemporalEase frames once the view rests.
-        constexpr uint32_t kTemporalEase = 8;
-        const float rest = float(std::min(occ_still_, kTemporalEase)) / float(kTemporalEase);
-        const float w_hist = 0.875f * rest;
-        if (w_hist < 0.875f) post_temporal_moving_++;
-        const uint32_t push[8] = {FloatBits(1.0f / float(cur.width)), FloatBits(1.0f / float(cur.height)),
-                                  FloatBits(spacing), FloatBits(reset ? 1.0f : 0.0f), FloatBits(w_hist), 0, 0, 0};
-        if (!PostPass(kPostTemporal, cur, out, push, 8, &prev)) return nullptr;
-        post_hist_w_ ^= 1;
-        post_hist_valid_ = true;
-        post_hist_last_ = now;
-        if (post_temporal_frames_++ == 0)
-            LOGI(kTag, "temporal smoothing active at %dx%d (frames blended, no motion vectors: moving things may trail)",
-                 cur.width, cur.height);
-        return &out;
     }
     void SharpBlit(Image& from, Image& to) {
         Transition(from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
