@@ -1889,9 +1889,9 @@ private:
                  hud_box_h_, rw);
         }
         // FXAA and FSR 1 work on the screen-sized image too (the 3D picture is enlarged into it), so either turns it on.
-        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud || rc.fxaa || rc.fsr) {
+        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud || rc.fxaa || rc.fsr || rc.fsr3) {
             const int rw = rc.render_width, rh = rc.render_height;
-            const bool postfx = rc.fxaa || rc.fsr;
+            const bool postfx = rc.fxaa || rc.fsr || rc.fsr3;
             // Performance mode caps the screen-sized image at 720 lines: at 1080 the enlarge, FSR/FXAA and the HUD
             // draws cost a slow GPU about what a 0.75 render scale saves (a Mali G68 log: 1922x1080, ~28 ms frames).
             const int cap_h = rc.performance_mode ? 720 : 1080;
@@ -1908,7 +1908,7 @@ private:
                 sharp_w_ = std::min(4096, int(std::lround(double(target_h) * rw / rh)) & ~1);
                 LOGI(kTag, "sharp_hud: the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d%s%s",
                      rw, rh, sharp_w_, sharp_h_, rc.fxaa ? (rc.fxaa >= 2 ? ", FXAA quality" : ", FXAA fast") : "",
-                     rc.fsr ? ", FSR 1" : "");
+                     rc.fsr3 ? ", FSR 3-style temporal upscaler" : rc.fsr ? ", FSR 1" : "");
             } else {
                 LOGI(kTag, "sharp_hud: off, the render size (%dx%d) is already as sharp as the screen allows (%d lines)", rw,
                      rh, target_h);
@@ -5929,6 +5929,14 @@ private:
         // sharp_hud: viewport, scissor and HUD box worked out for the frame's own size, then scaled to the sharp image.
         const VkExtent2D dyn_extent = sharp_src ? VkExtent2D{uint32_t(sharp_rw_), uint32_t(sharp_rh_)} : extent;
         DynamicState(dyn_extent, modes, &d.dyn);
+        // fsr3: the scene's own draws (a depth buffer used, at the render size) are shifted by the frame's sub-pixel
+        // jitter. Shifting the viewport is the same as adding the offset to clip space, with no change to the game's
+        // shaders; the post passes that read the scene 1:1 inherit the shift and the temporal pass takes it out.
+        if (fsr_jitter_on_ && depth && !sharp_src && (st_.depth.depth_test || st_.depth.depth_write) &&
+            extent.width == uint32_t(sharp_rw_) && extent.height == uint32_t(sharp_rh_)) {
+            d.dyn.vp.x += fsr_jx_;
+            d.dyn.vp.y += fsr_jy_;
+        }
         // Other aspect ratios (aspect_ratio): the game lays its HUD and menus out for 1280x720 and stretches that
         // over the whole (wider or narrower) frame. Every draw made with that 1280x720 2D projection (several
         // shaders: quads, text, bars) goes into a centred 16:9 box instead: 1280x720 in the middle of wider frames,
@@ -7890,7 +7898,7 @@ private:
     // replaces the bilinear blit. Fragment passes over a full-screen triangle in render pass objects (every driver has
     // them): no compute, no storage images. FXAA's SPIR-V is checked in (postfx_spv.h); FSR's is compiled from
     // src/hle/nvn/shaders at build time (DSR_HAVE_FSR1; without glslc the build leaves FSR out).
-    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostKinds };
+    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostTemporal, kPostKinds };
     struct PostPipe {
         VkPipeline pipe = VK_NULL_HANDLE;
         VkRenderPass rp = VK_NULL_HANDLE;
@@ -7902,6 +7910,9 @@ private:
         VkRenderPass rp;
         VkFramebuffer fb;
         VkImageView src_view;
+        VkImageView src2_view;        // the temporal pass's history (second binding); null for the others
+        VkDescriptorSetLayout set_layout;
+        VkPipelineLayout layout;
         uint32_t w, h, push_size;
         uint32_t push[20];
     };
@@ -7909,6 +7920,31 @@ private:
     VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
     VkSampler post_sampler_ = VK_NULL_HANDLE;
+    // fsr3 (temporal upscaling): its pass samples two images (the jittered frame and the history).
+    VkDescriptorSetLayout post_tset_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_tlayout_ = VK_NULL_HANDLE;
+    Image post_hist_[2];          // the temporal output at the screen-sized image's size, read one frame later
+    int post_hist_read_ = 0;      // which of the two the next frame reads
+    bool fsr3_ready_ = false;
+    bool fsr_jitter_on_ = false;  // the scene's draws are jittered this frame (a temporal pass follows)
+    float fsr_jx_ = 0.0f, fsr_jy_ = 0.0f;
+    uint32_t fsr_phase_ = 0;
+    uint64_t fsr3_frames_ = 0, fsr3_resets_ = 0;
+    // Halton(2, 3) jitter, in render pixels within [-0.5, 0.5]: 16 phases.
+    static float Halton(uint32_t i, uint32_t b) {
+        float f = 1.0f, r = 0.0f;
+        while (i > 0) {
+            f /= float(b);
+            r += f * float(i % b);
+            i /= b;
+        }
+        return r;
+    }
+    void FsrJitterAdvance() {
+        fsr_phase_ = (fsr_phase_ + 1) % 16;
+        fsr_jx_ = Halton(fsr_phase_ + 1, 2) - 0.5f;
+        fsr_jy_ = Halton(fsr_phase_ + 1, 3) - 0.5f;
+    }
     std::vector<PostPipe> post_pipes_;
     bool post_ready_ = false, post_failed_ = false, fsr_ready_ = false;
     Image post_fxaa_img_;  // FXAA's output at the game's render size
@@ -7955,6 +7991,7 @@ private:
         fsr_ready_ = module(kFsr1VertSpv, sizeof kFsr1VertSpv, &post_fsr_vs_) &&
                      module(kFsr1EasuSpv, sizeof kFsr1EasuSpv, &post_fs_[kPostEasu]) &&
                      module(kFsr1RcasSpv, sizeof kFsr1RcasSpv, &post_fs_[kPostRcas]);
+        fsr3_ready_ = fsr_ready_ && module(kFsr3TemporalSpv, sizeof kFsr3TemporalSpv, &post_fs_[kPostTemporal]);
 #endif
         VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
                                           nullptr};
@@ -7969,6 +8006,24 @@ private:
         pl.pushConstantRangeCount = 1;
         pl.pPushConstantRanges = &pr;
         if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout_) != VK_SUCCESS) return false;
+        if (fsr3_ready_) {
+            const VkDescriptorSetLayoutBinding tb[2] = {
+                {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+                {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+            VkDescriptorSetLayoutCreateInfo tli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            tli.bindingCount = 2;
+            tli.pBindings = tb;
+            VkPipelineLayoutCreateInfo tpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            tpl.setLayoutCount = 1;
+            tpl.pSetLayouts = &post_tset_layout_;
+            tpl.pushConstantRangeCount = 1;
+            tpl.pPushConstantRanges = &pr;
+            if (vkCreateDescriptorSetLayout(device_, &tli, nullptr, &post_tset_layout_) != VK_SUCCESS ||
+                vkCreatePipelineLayout(device_, &tpl, nullptr, &post_tlayout_) != VK_SUCCESS) {
+                LOGW(kTag, "fsr3: its descriptor layout could not be made: FSR 1 only");
+                fsr3_ready_ = false;
+            }
+        }
         VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
         sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -7978,7 +8033,8 @@ private:
         if (vkCreateSampler(device_, &sci, nullptr, &post_sampler_) != VK_SUCCESS) return false;
         post_failed_ = false;
         post_ready_ = true;
-        LOGI(kTag, "post-processing ready: FXAA fast / quality%s", fsr_ready_ ? ", FSR 1" : " (FSR 1 not in this build)");
+        LOGI(kTag, "post-processing ready: FXAA fast / quality%s%s", fsr_ready_ ? ", FSR 1" : " (FSR 1 not in this build)",
+             fsr3_ready_ ? ", temporal upscaler (fsr3)" : "");
         return true;
     }
     // Whether the passes can work on `f` (sampled or drawn): a filterable, drawable plain 2D colour image.
@@ -7991,18 +8047,20 @@ private:
                (f.features & kNeed) == kNeed;
     }
     // An image like `f` at w x h in `slot`, made (again) when its size or format changed; retired like any image.
-    bool PostEnsureImage(Image& slot, const Image& f, int w, int h) {
-        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == f.vk_format) return true;
+    bool PostEnsureImage(Image& slot, const Image& f, int w, int h, VkFormat fmt = VK_FORMAT_UNDEFINED,
+                         VkFormatFeatureFlags fmt_features = 0) {
+        const VkFormat want = fmt != VK_FORMAT_UNDEFINED ? fmt : f.vk_format;
+        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == want) return true;
         if (slot.image) DestroyImage(slot);
         Image n;
-        n.vk_format = f.vk_format;
+        n.vk_format = want;
         n.nvn_format = f.nvn_format;
         n.target = kTarget2D;
         n.type = VK_IMAGE_TYPE_2D;
         n.width = w;
         n.height = h;
         n.aspect = f.aspect;
-        n.features = f.features;
+        n.features = fmt != VK_FORMAT_UNDEFINED ? fmt_features : f.features;
         if (!AllocImage(n, false, false, &n.image, &n.memory)) return false;
         n.serial = ++image_serial_;
         slot = n;
@@ -8023,7 +8081,7 @@ private:
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = kind == kPostEasu || kind == kPostRcas ? post_fsr_vs_ : post_vs_;
+        stages[0].module = kind == kPostEasu || kind == kPostRcas || kind == kPostTemporal ? post_fsr_vs_ : post_vs_;
         stages[0].pName = "main";
         stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = post_fs_[kind];
@@ -8060,7 +8118,7 @@ private:
         ci.pMultisampleState = &ms;
         ci.pColorBlendState = &cb;
         ci.pDynamicState = &dy;
-        ci.layout = post_layout_;
+        ci.layout = kind == kPostTemporal ? post_tlayout_ : post_layout_;
         ci.renderPass = rp;
         VkPipeline pipe = VK_NULL_HANDLE;
         if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
@@ -8093,10 +8151,10 @@ private:
         return fb;
     }
     // Recorder thread: a descriptor set of post_set_layout_ from the slot's pool (a full pool continues in another).
-    bool AllocPostSet(VkDescriptorSet* set) {
+    bool AllocPostSet(VkDescriptorSet* set, const VkDescriptorSetLayout* set_layout) {
         VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dai.descriptorSetCount = 1;
-        dai.pSetLayouts = &post_set_layout_;
+        dai.pSetLayouts = set_layout;
         for (int tries = 0; tries < 3; tries++) {
             dai.descriptorPool = desc_pool_;
             if (vkAllocateDescriptorSets(device_, &dai, set) == VK_SUCCESS) return true;
@@ -8114,17 +8172,22 @@ private:
     // Recorder thread: one full-target pass sampling job.src_view.
     void RecordPostPass(VkCommandBuffer cb, const PostJob& j) {
         VkDescriptorSet set = VK_NULL_HANDLE;
-        if (!AllocPostSet(&set)) {
+        if (!AllocPostSet(&set, &j.set_layout)) {
             LogOnce("postfx_set", "post-processing: no descriptor set");
             return;
         }
-        VkDescriptorImageInfo ii{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wr.dstSet = set;
-        wr.descriptorCount = 1;
-        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wr.pImageInfo = &ii;
-        vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+        VkDescriptorImageInfo ii[2] = {{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {post_sampler_, j.src2_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet wr[2]{};
+        for (int b = 0; b < 2; b++) {
+            wr[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[b].dstSet = set;
+            wr[b].dstBinding = uint32_t(b);
+            wr[b].descriptorCount = 1;
+            wr[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr[b].pImageInfo = &ii[b];
+        }
+        vkUpdateDescriptorSets(device_, j.src2_view ? 2 : 1, wr, 0, nullptr);
         const VkRect2D area{{0, 0}, {j.w, j.h}};
         VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         bi.renderPass = j.rp;
@@ -8132,8 +8195,8 @@ private:
         bi.renderArea = area;
         vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.pipe);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout_, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cb, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.layout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, j.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
         const VkViewport vp{0.0f, 0.0f, float(j.w), float(j.h), 0.0f, 1.0f};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &area);
@@ -8143,22 +8206,27 @@ private:
         InvalidateBoundState();
     }
     // One pass: `src` (sampled) into `dst` (drawn), both whole. False (nothing recorded) when it cannot be done.
-    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words) {
+    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words, Image* src2 = nullptr) {
         VkRenderPass rp = VK_NULL_HANDLE;
         const VkPipeline pipe = PostPipeline(kind, dst.vk_format, &rp);
         if (!pipe) return false;
         static const uint8_t kIdentity[4] = {2, 3, 4, 5};
         Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (src2) Transition(*src2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         const VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src.aspect, kIdentity);
+        const VkImageView sv2 = src2 ? View(*src2, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src2->aspect, kIdentity) : VK_NULL_HANDLE;
         const VkImageView dv = AttachmentView(dst);
         const VkFramebuffer fb = dv ? PostFramebuffer(rp, dv, uint32_t(dst.width), uint32_t(dst.height)) : VK_NULL_HANDLE;
-        if (!sv || !fb) return false;
+        if (!sv || !fb || (src2 && !sv2)) return false;
         PostJob j{};
         j.pipe = pipe;
         j.rp = rp;
         j.fb = fb;
         j.src_view = sv;
+        j.src2_view = sv2;
+        j.set_layout = src2 ? post_tset_layout_ : post_set_layout_;
+        j.layout = src2 ? post_tlayout_ : post_layout_;
         j.w = uint32_t(dst.width);
         j.h = uint32_t(dst.height);
         j.push_size = push_words * 4;
@@ -8170,21 +8238,87 @@ private:
         dst.attach_unsynced = true;
         return true;
     }
-    // FXAA / FSR 1 for the 3D picture `src` enlarged into the sharp image `dst`; false: not done (the plain blit).
+    // fsr3: the temporal upscaler (shaders/fsr3_temporal.frag) for the 3D picture `in` (rendered with this frame's jitter)
+    // into the screen-sized `dst`, then RCAS. The history is the previous frame's temporal output (two images, read and
+    // written alternately). False: not done (nothing was drawn into dst; the caller falls back to FSR 1 / the blit).
+    VkFormat fsr3_hist_fmt_ = VK_FORMAT_UNDEFINED;
+    VkFormatFeatureFlags fsr3_hist_feat_ = 0;
+    bool fsr3_fmt_checked_ = false;
+    bool FsrTemporal(Image& in, Image& dst) {
+        if (!fsr3_fmt_checked_) {
+            // The history in half floats when the GPU can draw to and filter them (8-bit history drifts and bands).
+            fsr3_fmt_checked_ = true;
+            VkFormatProperties fp;
+            vkGetPhysicalDeviceFormatProperties(phys_, VK_FORMAT_R16G16B16A16_SFLOAT, &fp);
+            constexpr VkFormatFeatureFlags kNeed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                   VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                                   VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            if ((fp.optimalTilingFeatures & kNeed) == kNeed) {
+                fsr3_hist_fmt_ = VK_FORMAT_R16G16B16A16_SFLOAT;
+                fsr3_hist_feat_ = fp.optimalTilingFeatures;
+            }
+        }
+        const VkFormat want = fsr3_hist_fmt_ != VK_FORMAT_UNDEFINED ? fsr3_hist_fmt_ : dst.vk_format;
+        const auto stale = [&](const Image& i) {
+            return !(i.image && i.width == dst.width && i.height == dst.height && i.vk_format == want);
+        };
+        const bool fresh = stale(post_hist_[0]) || stale(post_hist_[1]);
+        if (!PostEnsureImage(post_hist_[0], dst, dst.width, dst.height, fsr3_hist_fmt_, fsr3_hist_feat_) ||
+            !PostEnsureImage(post_hist_[1], dst, dst.width, dst.height, fsr3_hist_fmt_, fsr3_hist_feat_))
+            return false;
+        Image& prev = post_hist_[post_hist_read_];
+        Image& next = post_hist_[post_hist_read_ ^ 1];
+        // The draws of this frame were jittered only if the flag was already on when the frame started.
+        const bool jittered = fsr_jitter_on_;
+        const float iw = float(in.width), ih = float(in.height), ow = float(dst.width), oh = float(dst.height);
+        const uint32_t flags = (PostPerceptual(in.vk_format) ? 1u : 0u) | (fresh || !jittered ? 2u : 0u);
+        const uint32_t tp[10] = {FloatBits(jittered ? fsr_jx_ : 0.0f), FloatBits(jittered ? fsr_jy_ : 0.0f), FloatBits(iw),
+                                 FloatBits(ih), FloatBits(ow), FloatBits(oh), FloatBits(0.12f), flags, FloatBits(1.25f),
+                                 FloatBits(6.0f)};
+        if (!PostPass(kPostTemporal, in, next, tp, 10, &prev)) return false;
+        post_hist_read_ ^= 1;
+        if (flags & 2u) fsr3_resets_++;
+        const float stops = 2.0f * (1.0f - 0.70f);  // RCAS at 70% sharpness, as with FSR 1
+        const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
+        if (!PostPass(kPostRcas, next, dst, rcas, 4)) return false;
+        // The next frame's scene draws are jittered by the next phase (the viewport shift, see Draw).
+        fsr_jitter_on_ = true;
+        FsrJitterAdvance();
+        if (fsr3_frames_++ == 0)
+            LOGI(kTag, "fsr3: temporal upscaler active, %dx%d -> %dx%d, history format %d, 16 jitter phases", in.width,
+                 in.height, dst.width, dst.height, int(next.vk_format));
+        return true;
+    }
+    // FXAA / FSR 1 / the temporal upscaler for the 3D picture `src` enlarged into the sharp image `dst`; false: not done
+    // (the plain blit).
     bool PostEnlarge(Image& src, Image& dst) {
         const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
-        if (!c.fxaa && !c.fsr) return false;
+        if (!c.fxaa && !c.fsr && !c.fsr3) return false;
         if (!PostFxUsable(src) || !PostFxUsable(dst)) {
             LogOnce("postfx_fmt", "post-processing: the frame (format %d) cannot be filtered here: plain blit", src.nvn_format);
+            fsr_jitter_on_ = false;
             return false;
         }
+        const bool temporal = c.fsr3 && fsr3_ready_;
+        if (c.fsr3 && !fsr3_ready_)
+            LogOnce("fsr3_missing", "fsr3: the temporal upscaler is not available (not in this build, or its shaders failed): FSR 1");
         Image* in = &src;
-        if (c.fxaa && PostEnsureImage(post_fxaa_img_, src, src.width, src.height)) {
+        // With fsr3 the temporal pass is the anti-aliasing: FXAA before it would only blur the jittered detail away.
+        if (!temporal && c.fxaa && PostEnsureImage(post_fxaa_img_, src, src.width, src.height)) {
             const uint32_t push[1] = {PostPerceptual(src.vk_format) ? 1u : 0u};
             if (PostPass(c.fxaa >= 2 ? kPostFxaaQuality : kPostFxaaFast, src, post_fxaa_img_, push, 1)) in = &post_fxaa_img_;
         }
         bool done = false;
-        if (c.fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
+        bool used_temporal = false;
+        if (temporal) {
+            done = used_temporal = FsrTemporal(*in, dst);
+            if (!done) {
+                fsr_jitter_on_ = false;
+                LogOnce("fsr3_fail", "fsr3: the temporal pass could not be recorded: FSR 1 instead");
+            }
+        }
+        const bool want_fsr = c.fsr || c.fsr3;
+        if (!done && want_fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
             // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at 70% sharpness (PR #47's default).
             const float iw = float(in->width), ih = float(in->height), ow = float(dst.width), oh = float(dst.height);
             const uint32_t easu[16] = {FloatBits(iw / ow), FloatBits(ih / oh), FloatBits(0.5f * iw / ow - 0.5f),
@@ -8195,14 +8329,15 @@ private:
             const float stops = 2.0f * (1.0f - 0.70f);  // 0 stops = the sharpest
             const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
             done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16) && PostPass(kPostRcas, post_fsr_tmp_, dst, rcas, 4);
-        } else if (c.fsr && !fsr_ready_) {
+        } else if (!done && want_fsr && !fsr_ready_) {
             LogOnce("fsr_missing", "fsr: FSR 1 is not available (not in this build, or its shaders failed): plain blit");
         }
         if (!done && in == &src) return false;  // nothing applied: the caller's blit
         if (!done) SharpBlit(*in, dst);         // FXAA only: its result enlarged by the blit
         if (post_frames_++ == 0)
             LOGI(kTag, "post-processing active: %s%s, %dx%d -> %dx%d", in != &src ? (c.fxaa >= 2 ? "FXAA quality" : "FXAA fast") : "",
-                 done ? (in != &src ? " + FSR 1" : "FSR 1") : " + blit", src.width, src.height, dst.width, dst.height);
+                 done ? (used_temporal ? "FSR 3-style temporal upscaler + RCAS" : in != &src ? " + FSR 1" : "FSR 1") : " + blit",
+                 src.width, src.height, dst.width, dst.height);
         return true;
     }
     void SharpBlit(Image& from, Image& to) {

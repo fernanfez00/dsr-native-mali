@@ -66,6 +66,10 @@ struct RuntimeConfig {
     // of the bilinear enlargement.
     int fxaa = 0;
     bool fsr = false;
+    // fsr3 = temporal upscaling in the structure of FSR 2 / 3 (experimental, off by default; implies fsr): the scene is
+    // rendered with a sub-pixel jitter and accumulated over frames, then RCAS sharpens it. No motion vectors: moving
+    // parts fall back to spatial upscaling. Replaces FXAA and EASU while it runs.
+    bool fsr3 = false;
     // shadow_quality: 0 = no shadows (the shadow map pass is not drawn, lookups say "lit"), 1 = 512, 2 = 1024,
     // 3 = the game's 2048 (1024 with performance_mode).
     int shadow_quality = 3;
