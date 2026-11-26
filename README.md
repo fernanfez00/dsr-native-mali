@@ -49,6 +49,7 @@ I have yet to test later areas in the game so don't expect performance to be ent
 - [x] Render scale / Graphics options
 - [x] Several language options
 - [x] Optional FSR 1 Support
+- [x] Experimental FSR 3-style temporal upscaler (`fsr3`, no motion vectors; not AMD's FSR 3.1)
 
 ## Roadmap
 
