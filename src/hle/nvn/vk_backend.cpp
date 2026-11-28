@@ -7668,6 +7668,7 @@ private:
     uint32_t geo_seg_gen_[kGeoMaxSegs] = {};
     uint64_t geo_seg_free_after_[kGeoMaxSegs] = {};  // submission after whose completion the segment may be rewritten
     uint64_t geo_drains_ = 0, geo_drain_waits_ = 0, geo_compactions_ = 0;
+    size_t geo_live_after_thin_ = 0;
     bool GeoLive(const GeoEntry& e) const {
         return e.changes >= 2 || e.seg_gen == geo_seg_gen_[std::min<int>(int(e.off / geo_seg_size_), geo_segs_ - 1)];
     }
@@ -7693,8 +7694,11 @@ private:
             geo_seg_free_after_[d] = submit_seq_ + 1;
             geo_drains_++;
             // Forgotten copies stay in the table until they are looked up again: thinned out now and then.
-            if (geo_.size() > 65536) {
+            // Only once it has grown well past what was live last time: a rebuild of a big table costs the render
+            // thread several ms (done at every segment switch, it made the frames uneven).
+            if (geo_.size() > std::max<size_t>(65536, geo_live_after_thin_ * 3)) {
                 geo_.Retain([this](const GeoEntry& e) { return GeoLive(e); });
+                geo_live_after_thin_ = geo_.size();
                 geo_compactions_++;
             }
         }
