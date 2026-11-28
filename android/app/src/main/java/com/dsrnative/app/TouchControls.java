@@ -361,6 +361,50 @@ public final class TouchControls extends View implements InputManager.InputDevic
     private final int[] mKind = new int[16];
     private final Button[] mOn = new Button[16];
     private final float[] mLastX = new float[16], mLastY = new float[16];
+    // Second fingers placed while others are down (ACTION_POINTER_DOWN) arrived at wrong places on an OPPO Pad Air
+    // (Android 13): their position in that one event was the panel's own, not turned with the screen (finger on
+    // the A button at 91%, 70% reported at 18%, 152%), while every later event had it right, so the second button
+    // never registered. A new finger's first move is compared with where it came down: when it is far off and one
+    // of the three turns of the screen puts the down where the move is, the finger is placed again where it really
+    // is, and from then on that turn is applied to every such down at once (sPointerTurn: 1 = 90, 2 = 180, 3 = 270).
+    private static int sPointerTurn = 0;
+    private final boolean[] mFresh = new boolean[16];
+    private final float[] mFreshX = new float[16], mFreshY = new float[16];
+    private final long[] mFreshAt = new long[16];
+
+    private float[] turned(int turn, float x, float y) {
+        final float w = getWidth(), h = getHeight();
+        switch (turn) {
+            case 1: return new float[] {y, h - x};
+            case 2: return new float[] {w - x, h - y};
+            case 3: return new float[] {w - y, x};
+            default: return new float[] {x, y};
+        }
+    }
+
+    // A finger's first move (see sPointerTurn). True when it was placed again.
+    private boolean checkFreshPointer(int id, float x, float y) {
+        if (id < 0 || id >= 16 || !mFresh[id]) return false;
+        mFresh[id] = false;
+        if (android.os.SystemClock.uptimeMillis() - mFreshAt[id] > 250) return false;
+        final float diag = (float) Math.hypot(getWidth(), getHeight());
+        float[] placed = turned(sPointerTurn, mFreshX[id], mFreshY[id]);
+        if (Math.hypot(placed[0] - x, placed[1] - y) < 0.12f * diag) return false;
+        for (int turn = 1; turn <= 3; turn++) {
+            float[] t = turned(turn, mFreshX[id], mFreshY[id]);
+            if (Math.hypot(t[0] - x, t[1] - y) < 0.06f * diag) {
+                if (turn != sPointerTurn)
+                    touchLog("finger " + id + " came down at the wrong place (" + Math.round(100f * mFreshX[id] / getWidth())
+                            + "%, " + Math.round(100f * mFreshY[id] / getHeight()) + "%; Android's position turned "
+                            + (90 * turn) + " degrees): placed where it is, and such positions are turned from now on");
+                sPointerTurn = turn;
+                up(id);
+                down(id, x, y);
+                return true;
+            }
+        }
+        return false;
+    }
 
     // Stick: fixed in place; a finger that comes down on it (or near it) drives it.
     private int mStickPointer = -1;
@@ -990,18 +1034,33 @@ public final class TouchControls extends View implements InputManager.InputDevic
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN: {
-                int i = e.getActionIndex();
-                down(e.getPointerId(i), e.getX(i), e.getY(i));
+                int i = e.getActionIndex(), id = e.getPointerId(i);
+                float x = e.getX(i), y = e.getY(i);
+                if (action == MotionEvent.ACTION_POINTER_DOWN && id >= 0 && id < 16) {
+                    mFresh[id] = true;
+                    mFreshX[id] = x;
+                    mFreshY[id] = y;
+                    mFreshAt[id] = android.os.SystemClock.uptimeMillis();
+                    float[] t = turned(sPointerTurn, x, y);
+                    x = t[0];
+                    y = t[1];
+                }
+                down(id, x, y);
                 logTouch(e, i, "down");
                 break;
             }
             case MotionEvent.ACTION_MOVE:
-                for (int i = 0; i < e.getPointerCount(); i++) move(e.getPointerId(i), e.getX(i), e.getY(i));
+                for (int i = 0; i < e.getPointerCount(); i++) {
+                    int id = e.getPointerId(i);
+                    if (checkFreshPointer(id, e.getX(i), e.getY(i))) continue;
+                    move(id, e.getX(i), e.getY(i));
+                }
                 break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP: {
                 int i = e.getActionIndex();
                 logTouch(e, i, "up");
+                if (e.getPointerId(i) >= 0 && e.getPointerId(i) < 16) mFresh[e.getPointerId(i)] = false;
                 up(e.getPointerId(i));
                 break;
             }
