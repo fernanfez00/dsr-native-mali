@@ -309,6 +309,25 @@ public:
         }
     }
     size_t size() const { return count_; }
+    // Keeps the entries `keep(value)` accepts (a rebuild: pointers from Find are invalid after it).
+    template <typename F>
+    void Retain(F keep) {
+        std::vector<Slot> old;
+        old.swap(slots_);
+        const uint32_t old_gen = gen_;
+        size_t live = 0;
+        for (const Slot& s : old)
+            if (s.gen == old_gen && keep(s.val)) live++;
+        size_t cap = 1024;
+        while (cap < live * 2 + 2) cap *= 2;
+        slots_.assign(cap, Slot{});
+        mask_ = cap - 1;
+        shift_ = 64 - __builtin_ctzll(cap);
+        gen_ = 1;
+        count_ = 0;
+        for (const Slot& s : old)
+            if (s.gen == old_gen && keep(s.val)) Insert(s.key, s.val);
+    }
 
 private:
     struct Slot {
@@ -1608,6 +1627,7 @@ public:
     void Present(const TexRef& tex) override {
         std::lock_guard<std::mutex> lk(m_);
         if (Lost() || !EnsureDevice()) return;
+        FinishUploads();
         ReportDraws();
         ProfCollect();
         occ_frame_++;
@@ -3764,6 +3784,46 @@ private:
         }
     }
 
+    // ---- texture data filled in parallel ----------------------------------------------------------------------
+    // An area loading in (a bonfire rest, a death, a warp) uploads ~280 textures in one frame: deswizzling them one
+    // after another on the render thread held that frame for ~80 ms. Each level's copy is noted when the texture is
+    // uploaded (its place in the stream and the copy command are fixed then) and all of them are done together
+    // before the commands are submitted, the game memory is written or the list ends (EmitPendingCopies): on the
+    // worker pool when there is enough of it.
+    struct UploadJob {
+        uint8_t* dst;
+        const uint8_t* src;
+        LevelLayout level;
+        bool linear;
+        size_t bytes;
+    };
+    std::vector<UploadJob> upload_jobs_;
+    size_t upload_job_bytes_ = 0;
+    uint64_t upload_parallel_batches_ = 0, upload_parallel_bytes_ = 0;
+    double upload_fill_ms_ = 0;
+    void FinishUploads() {
+        if (upload_jobs_.empty()) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        auto run = [this](size_t i) {
+            const UploadJob& j = upload_jobs_[i];
+            if (j.linear) memcpy(j.dst, j.src, j.bytes);
+            else DeswizzleLevel(j.dst, j.src, j.level);
+        };
+        if (upload_job_bytes_ < (2u << 20) || upload_jobs_.size() < 3) {
+            for (size_t i = 0; i < upload_jobs_.size(); i++) run(i);
+        } else {
+            // Biggest first: the pool's threads take the next job as they finish.
+            std::sort(upload_jobs_.begin(), upload_jobs_.end(),
+                      [](const UploadJob& a, const UploadJob& b) { return a.bytes > b.bytes; });
+            WorkPool::Get().Run(upload_jobs_.size(), run);
+            upload_parallel_batches_++;
+            upload_parallel_bytes_ += upload_job_bytes_;
+        }
+        upload_fill_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        upload_jobs_.clear();
+        upload_job_bytes_ = 0;
+    }
+
     // Fills a sampled texture from game memory: deswizzle each level/layer into the stream, then copy.
     void Upload(Image& img, const TexRef& t) {
         img.uploaded = true;
@@ -3860,10 +3920,9 @@ private:
                     bc_decoded_bytes_ += n;
                 } else {
                     VkDeviceSize off = StreamAlloc(n, 16);
-                    if (layout.linear)
-                        memcpy(stream_ptr_ + off, src, n);
-                    else
-                        DeswizzleLevel(stream_ptr_ + off, src, l);
+                    // Filled with the other uploads before the submission (FinishUploads: in parallel).
+                    upload_jobs_.push_back({stream_ptr_ + off, src, l, layout.linear, n});
+                    upload_job_bytes_ += n;
                     r.bufferOffset = off;
                     r.bufferRowLength = uint32_t(l.row_bytes / fi.bytes_per_block * fi.block_w);
                     r.bufferImageHeight = uint32_t(l.rows * fi.block_h);
@@ -7571,8 +7630,12 @@ private:
     // Most geometry (the level, characters) never changes after loading, yet was copied into the stream every
     // frame (~30 MB a frame in Undead Burg). Ranges now live in one persistent buffer and are copied again only
     // when their content changed: small ranges (where per-frame data like particles and UI lives) are hashed in
-    // full, large ones at 256 spots plus both ends. When the buffer fills up it is emptied (after the GPU is
-    // done with it) and refilled.
+    // full, large ones at 256 spots plus both ends. The buffer is a ring of segments (GeoAlloc): copies go into
+    // the current one; when it is full the next one is taken, and the one after that is emptied ahead of time (its
+    // copies are forgotten: what is still drawn is copied again into the current segment as it is used, a little at
+    // a time). It is reused once the GPU has finished every submission that could still read it, which is long
+    // done by then. (It used to be emptied all at once when full: a wait for the GPU and every mesh of the area
+    // copied again in the next frames.)
     VkDeviceSize geo_size_ = 192ull << 20;  // settings geo_cache_mb (read when the cache is created)
     VkBuffer geo_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory geo_mem_ = VK_NULL_HANDLE;
@@ -7595,7 +7658,50 @@ private:
         uint64_t watch = 0;
         uint64_t edge_hash = 0;
         uint32_t stable = 0;
+        uint32_t seg_gen = 0;  // the generation of its segment it was copied in (older: emptied since, see GeoAlloc)
     };
+    static constexpr int kGeoMaxSegs = 16;
+    int geo_segs_ = 8;
+    VkDeviceSize geo_seg_size_ = 24ull << 20;
+    int geo_cur_seg_ = 0;
+    VkDeviceSize geo_seg_off_ = 0;
+    uint32_t geo_seg_gen_[kGeoMaxSegs] = {};
+    uint64_t geo_seg_free_after_[kGeoMaxSegs] = {};  // submission after whose completion the segment may be rewritten
+    uint64_t geo_drains_ = 0, geo_drain_waits_ = 0, geo_compactions_ = 0;
+    bool GeoLive(const GeoEntry& e) const {
+        return e.changes >= 2 || e.seg_gen == geo_seg_gen_[std::min<int>(int(e.off / geo_seg_size_), geo_segs_ - 1)];
+    }
+    // Space for `need` bytes (a multiple of 64), or VK_WHOLE_SIZE (larger than a segment: streamed). Sets *stalled
+    // when it had to submit and wait for the GPU (the draw is then redone: see Draw).
+    VkDeviceSize GeoAlloc(VkDeviceSize need, bool* stalled) {
+        if (need > geo_seg_size_) return VK_WHOLE_SIZE;
+        if (geo_seg_off_ + need > geo_seg_size_) {
+            const int next = (geo_cur_seg_ + 1) % geo_segs_;
+            if (geo_seg_free_after_[next] > completed_seq_) {
+                // Rare (copies filling a segment and a half within one list): the GPU must be done with it first.
+                if (geo_seg_free_after_[next] > submit_seq_) Flush();
+                WaitGpuIdle();
+                geo_drain_waits_++;
+                *stalled = true;
+            }
+            geo_cur_seg_ = next;
+            geo_seg_off_ = 0;
+            // Emptied ahead: the segment after the next one. Its copies are no longer handed out from now on; the
+            // commands recorded so far that use them are in the next submission at the latest.
+            const int d = (geo_cur_seg_ + 2) % geo_segs_;
+            geo_seg_gen_[d]++;
+            geo_seg_free_after_[d] = submit_seq_ + 1;
+            geo_drains_++;
+            // Forgotten copies stay in the table until they are looked up again: thinned out now and then.
+            if (geo_.size() > 65536) {
+                geo_.Retain([this](const GeoEntry& e) { return GeoLive(e); });
+                geo_compactions_++;
+            }
+        }
+        const VkDeviceSize off = VkDeviceSize(geo_cur_seg_) * geo_seg_size_ + geo_seg_off_;
+        geo_seg_off_ += need;
+        return off;
+    }
     // Hash of the parts of a range the write tracking does not protect (its partial first and last pages).
     static uint64_t EdgeHash(const uint8_t* src, size_t size) {
         os::WatchEdge e[2];
@@ -7730,7 +7836,10 @@ private:
         vkBindBufferMemory(device_, geo_buf_, geo_mem_, 0);
         if (vkMapMemory(device_, geo_mem_, 0, geo_size_, 0, &p) != VK_SUCCESS) goto fail;
         geo_ptr_ = static_cast<uint8_t*>(p);
-        LOGI(kTag, "geometry cache: %llu MB", (unsigned long long)(geo_size_ >> 20));
+        geo_segs_ = int(std::clamp<VkDeviceSize>(geo_size_ / (24ull << 20), 4, kGeoMaxSegs));
+        geo_seg_size_ = (geo_size_ / VkDeviceSize(geo_segs_)) & ~VkDeviceSize(63);
+        LOGI(kTag, "geometry cache: %llu MB (%d segments of %llu MB, emptied one at a time)",
+             (unsigned long long)(geo_size_ >> 20), geo_segs_, (unsigned long long)(geo_seg_size_ >> 20));
         return true;
     fail:
         LOGW(kTag, "geometry cache unavailable: vertex data is streamed every frame");
@@ -7789,6 +7898,12 @@ private:
             geo_volatile_++;
             return VK_WHOLE_SIZE;  // rewritten every frame or so: streamed with the list
         }
+        // Its copy was in a segment emptied since: copied again below (as unchanged: not counted as a change).
+        const bool evicted = it && !GeoLive(*it);
+        if (evicted) {
+            it->watch = 0;
+            it->checked_list = 0;
+        }
         if (it && it->checked_list == geo_token_) {
             geo_hits_++;
             return it->off;
@@ -7828,7 +7943,7 @@ private:
         }
         // The same three lists in a row: watched from now on. Its pages are protected first and the range hashed
         // once more after (a write landing while they were being protected is not seen by the fault handler).
-        if (it && it->hash == h && ++it->stable >= 3 && size >= 8192 && os::WatchEnabled()) {
+        if (it && !evicted && it->hash == h && ++it->stable >= 3 && size >= 8192 && os::WatchEnabled()) {
             const uint64_t epoch = os::WatchArm(src, size);
             it->stable = 0;  // not armed (too small for whole pages, pages written too often): tried again later
             if (epoch) {
@@ -7841,37 +7956,36 @@ private:
                 }
             }
         }
-        if (it && it->hash == h) {
+        if (it && !evicted && it->hash == h) {
             geo_hits_++;
             it->checked_list = geo_token_;
             it->interval = std::min<uint32_t>(it->interval * 2, 8);
             it->next_check_list = list_counter_ + it->interval;
             return it->off;
         }
-        const uint32_t changes = it ? it->changes + 1 : 0;
+        const uint32_t changes = !it ? 0 : evicted && it->hash == h ? it->changes : it->changes + 1;
         if (changes >= 2) {
             it->changes = changes;
             geo_volatile_++;
             return VK_WHOLE_SIZE;
         }
         const VkDeviceSize need = (size + 63) & ~VkDeviceSize(63);
-        if (geo_off_ + need > geo_size_) {
-            // Full: start over once the GPU no longer reads any of it.
-            Flush();
-            WaitGpuIdle();
-            geo_.Clear();
-            geo_off_ = 0;
-            geo_resets_++;
+        bool stalled = false;
+        const VkDeviceSize off = GeoAlloc(need, &stalled);
+        it = nullptr;  // the table may have been rebuilt
+        if (off == VK_WHOLE_SIZE) return VK_WHOLE_SIZE;
+        if (stalled) {
+            geo_resets_++;  // a submission and a wait: the draw is redone (Draw)
             InvalidateBoundState();
-            it = nullptr;
         }
-        const VkDeviceSize off = geo_off_;
-        geo_off_ += need;
+        geo_off_ = off + need;
         CopyOut(geo_ptr_ + off, src, size);
         geo_misses_++;
         geo_bytes_ += size;
         // A changed range gets new space (the old copy may still be read by frames in flight).
-        geo_.Insert(key, {h, off, changes, list_counter_ + 1, 1, geo_token_, src, size});
+        GeoEntry e{h, off, changes, list_counter_ + 1, 1, geo_token_, src, size};
+        e.seg_gen = geo_seg_gen_[geo_cur_seg_];
+        geo_.Insert(key, e);
         return off;
     }
 
@@ -7954,12 +8068,16 @@ private:
             deferred_copies_++;
             // Handed over in batches: one per draw (a lock and a thread wake-up each) cost the render thread more
             // than the copies. Copies kept back are handed over before any submission, wait or game-memory write.
-            if (pending_copies_.size() >= 256) EmitPendingCopies();
+            if (pending_copies_.size() >= 256) EmitCopyBatch();
         } else {
             memcpy(dst, src, size);
         }
     }
     void EmitPendingCopies() {
+        FinishUploads();  // texture data of this slot's uploads (every caller is before a submission or a write)
+        EmitCopyBatch();
+    }
+    void EmitCopyBatch() {
         if (pending_copies_.empty()) return;
         if (!Async()) {
             for (const PendingCopy& c : pending_copies_) memcpy(c.dst, c.src, c.size);
@@ -8156,6 +8274,13 @@ private:
              (unsigned long long)deferred_copies_, deferred_bytes_ / 1048576.0, copy_wait_ms_);
         deferred_copies_ = 0;
         deferred_bytes_ = 0;
+        if (upload_fill_ms_ > 0)
+            LOGI(kTag, "texture data filled: %.0f ms on the render thread (%llu big batches, %.1f MB of them on the "
+                 "worker pool)", upload_fill_ms_, (unsigned long long)upload_parallel_batches_,
+                 upload_parallel_bytes_ / 1048576.0);
+        upload_fill_ms_ = 0;
+        upload_parallel_batches_ = 0;
+        upload_parallel_bytes_ = 0;
         copy_wait_ms_ = 0;
         LOGI(kTag, "GPU busy %.0f ms in the last 10 s (%.1f ms per list); geometry hashed ahead: %llu of %llu checks%s",
              gpu_busy_ms_, list_counter_ > stat_lists_ ? gpu_busy_ms_ / double(list_counter_ - stat_lists_) : 0.0,
@@ -8189,10 +8314,13 @@ private:
         occ_judged_ = occ_skipped_ = occ_queried_ = occ_woke_ = occ_moving_frames_ = occ_kept_ = 0;
         prehash_used_ = prehash_inline_ = 0;
         if (geo_buf_) {
-            LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed), %.0f of %llu MB used, "
-                 "%llu resets", (unsigned long long)geo_hits_, (unsigned long long)geo_misses_, geo_bytes_ / 1048576.0,
-                 (unsigned long long)geo_volatile_, geo_off_ / 1048576.0, (unsigned long long)(geo_size_ >> 20),
-                 (unsigned long long)geo_resets_);
+            LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed); segment %d of %d "
+                 "(%llu MB each), %llu emptied ahead, %llu waits for the GPU, %llu table thinnings",
+                 (unsigned long long)geo_hits_, (unsigned long long)geo_misses_, geo_bytes_ / 1048576.0,
+                 (unsigned long long)geo_volatile_, geo_cur_seg_ + 1, geo_segs_,
+                 (unsigned long long)(geo_seg_size_ >> 20), (unsigned long long)geo_drains_,
+                 (unsigned long long)geo_drain_waits_, (unsigned long long)geo_compactions_);
+            geo_drains_ = geo_drain_waits_ = geo_compactions_ = 0;
             geo_hits_ = geo_misses_ = geo_bytes_ = geo_volatile_ = 0;
             const uint64_t pre_bytes = prehash_bytes_.exchange(0);
             if (os::WatchEnabled()) {
