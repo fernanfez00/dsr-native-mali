@@ -133,6 +133,85 @@ void Emit(const Buf& b) {
 #endif
 }
 
+// The memory map around the fault address (/proc/self/maps, read with plain system calls): the mapping holding it,
+// or the ones on either side of the hole it is in, and how many mappings the process has (Linux refuses new ones
+// past ~65530: memory protection changes split them). A SIGSEGV "SEGV_MAPERR" at an address inside the guest heap
+// on a OnePlus 6T had no explanation without it.
+void MapsAround(Buf& b, uint64_t addr) {
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    char chunk[4096], line[256], prev[256] = "", hit[256] = "", next[256] = "";
+    size_t ll = 0;
+    long count = 0;
+    bool found_hit = false, want_next = false;
+    auto hexval = [](const char*& p) {
+        uint64_t v = 0;
+        for (;; p++) {
+            const char c = *p;
+            if (c >= '0' && c <= '9') v = v * 16 + uint64_t(c - '0');
+            else if (c >= 'a' && c <= 'f') v = v * 16 + uint64_t(c - 'a' + 10);
+            else break;
+        }
+        return v;
+    };
+    auto copy = [](char* dst, const char* src) {
+        size_t i = 0;
+        for (; src[i] && i < 255; i++) dst[i] = src[i];
+        dst[i] = 0;
+    };
+    for (;;) {
+        const ssize_t n = read(fd, chunk, sizeof(chunk));
+        if (n <= 0) break;
+        for (ssize_t i = 0; i < n; i++) {
+            const char c = chunk[i];
+            if (c != '\n') {
+                if (ll < sizeof(line) - 1) line[ll++] = c;
+                continue;
+            }
+            line[ll] = 0;
+            ll = 0;
+            count++;
+            const char* p = line;
+            const uint64_t lo = hexval(p);
+            if (*p == '-') p++;
+            const uint64_t hi = hexval(p);
+            if (want_next) {
+                copy(next, line);
+                want_next = false;
+            }
+            if (!found_hit && addr < hi) {
+                found_hit = true;
+                if (addr >= lo) copy(hit, line);
+                else copy(next, line);  // in a hole: this is the mapping after it
+                if (addr >= lo) want_next = true;
+            } else if (!found_hit) {
+                copy(prev, line);
+            }
+        }
+    }
+    close(fd);
+    b.Str("\nmemory map near the fault (");
+    b.Dec(count);
+    b.Str(" mappings):\n");
+    if (prev[0]) {
+        b.Str("  before: ");
+        b.Str(prev);
+        b.Str("\n");
+    }
+    if (hit[0]) {
+        b.Str("  holding it: ");
+        b.Str(hit);
+        b.Str("\n");
+    } else {
+        b.Str("  (not mapped: in the hole between these)\n");
+    }
+    if (next[0]) {
+        b.Str("  after: ");
+        b.Str(next);
+        b.Str("\n");
+    }
+}
+
 void Handler(int sig, siginfo_t* info, void* ctx) {
     if (!g_in_handler) {
         g_in_handler = 1;
@@ -189,6 +268,7 @@ void Handler(int sig, siginfo_t* info, void* ctx) {
         (void)ctx;
         b.Str("\n");
 #endif
+        if ((sig == SIGSEGV || sig == SIGBUS) && info) MapsAround(b, reinterpret_cast<uint64_t>(info->si_addr));
         b.Str("=======================================\n");
         Emit(b);
         WriteNote();
