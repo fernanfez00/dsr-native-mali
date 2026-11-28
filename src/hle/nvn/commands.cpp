@@ -90,19 +90,47 @@ std::shared_ptr<const CmdList> FindHandle(uint64_t h) {
 // page faults included, showed up in profiles).
 std::mutex g_list_pool_mutex;
 std::vector<CmdList> g_list_pool;
-CmdList TakePooledList() {
+// The smallest pooled storage of at least `need` commands (none: an empty list). A pooled list that was too
+// small used to be taken and then grown by reserve(): its old storage was freed on the game's recording thread,
+// and freeing a few MB (munmap of pages in use) took that thread 10-12 ms: a skipped frame (profile of an AYN
+// Thor traversal: main+0x70a280 in munmap via BeginRecording).
+CmdList TakePooledList(size_t need) {
     std::lock_guard<std::mutex> lk(g_list_pool_mutex);
-    if (g_list_pool.empty()) return {};
-    CmdList v = std::move(g_list_pool.back());
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < g_list_pool.size(); i++)
+        if (g_list_pool[i].capacity() >= need &&
+            (best == SIZE_MAX || g_list_pool[i].capacity() < g_list_pool[best].capacity()))
+            best = i;
+    if (best == SIZE_MAX) return {};
+    CmdList v = std::move(g_list_pool[best]);
+    g_list_pool[best] = std::move(g_list_pool.back());
     g_list_pool.pop_back();
     return v;
 }
+// Background thread only (the reaper): clearing runs the commands' destructors, and storage that is not kept is
+// freed here.
 void ReturnPooledList(CmdList&& v) {
     v.clear();
     if (v.capacity() < 256) return;  // small storage is not worth keeping (recordings reserve what they need)
-    std::lock_guard<std::mutex> lk(g_list_pool_mutex);
-    if (g_list_pool.size() < 32) g_list_pool.push_back(std::move(v));
+    CmdList evicted;
+    {
+        std::lock_guard<std::mutex> lk(g_list_pool_mutex);
+        if (g_list_pool.size() < 32) {
+            g_list_pool.push_back(std::move(v));
+            return;
+        }
+        // Full: the larger storage stays (a recording needs room for its previous size and a quarter more).
+        size_t smallest = 0;
+        for (size_t i = 1; i < g_list_pool.size(); i++)
+            if (g_list_pool[i].capacity() < g_list_pool[smallest].capacity()) smallest = i;
+        if (g_list_pool[smallest].capacity() < v.capacity()) {
+            evicted = std::move(g_list_pool[smallest]);
+            g_list_pool[smallest] = std::move(v);
+        }
+    }
+    // `evicted` (or `v`) is freed here, outside the lock.
 }
+void ReapList(const CmdList* l);
 
 // Lists are destroyed on a background thread: whichever thread drops the last reference (usually the game's
 // submit thread) only queues it. Destroying thousands of commands a frame was over half of that thread's time.
@@ -165,9 +193,14 @@ void BeginRecording(void* cb) {
     dsr::platform::PreferFastCores("game command recording thread");  // the game's MTR_* workers
     Recorder& r = RecorderOf(cb);
     r.recording = true;
-    r.cmds.clear();
-    if (r.cmds.capacity() == 0) r.cmds = TakePooledList();
-    if (r.cmds.capacity() < r.last_size) r.cmds.reserve(r.last_size + r.last_size / 4);  // no growth copies
+    const size_t need = r.last_size + r.last_size / 4;  // no growth copies
+    if (!r.cmds.empty() || (r.cmds.capacity() && r.cmds.capacity() < need)) {
+        // Storage that does not fit (or still holds commands) goes to the background thread: freed or pooled there.
+        ReapList(new CmdList(std::move(r.cmds)));
+        r.cmds = CmdList{};
+    }
+    if (r.cmds.capacity() == 0) r.cmds = TakePooledList(need);
+    if (r.cmds.capacity() < need) r.cmds.reserve(need);  // empty: nothing is copied or freed
     r.control_used += kControlBytesPerRecording;
     g_begin_count++;
     // The bound sampler pool is command buffer state: a recording that does not bind one again still uses it.
@@ -198,7 +231,7 @@ uint64_t EndRecording(void* cb) {
         CmdList exact;
         exact.reserve(r.cmds.size());
         for (Cmd& c : r.cmds) exact.push_back(std::move(c));
-        ReturnPooledList(std::move(r.cmds));
+        ReapList(new CmdList(std::move(r.cmds)));  // the moved-from commands and the big storage: freed or pooled there
         r.cmds = std::move(exact);
     }
     std::shared_ptr<const CmdList> list(new CmdList(std::move(r.cmds)), ReapList);
