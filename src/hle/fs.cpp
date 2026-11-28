@@ -230,7 +230,7 @@ struct FsTimer {
                  who ? who : "host", op, detail ? detail : "", (long long)off, bytes, rc, ns / 1e6,
                  (unsigned long)(caller - base), guest ? " ('" : "", guest ? guest : "", guest ? "')" : "");
             // The game's call chain (frame records: [fp] = the caller's fp, [fp + 8] = the return address).
-            const loader::Module& m = dsr::GetRuntime().main;
+            const auto& m = dsr::GetRuntime().main;
             std::string chain;
             uintptr_t fp = frame ? *static_cast<const uintptr_t*>(frame) : 0;
             for (int i = 0; i < 14 && fp && !(fp & 15); i++) {
