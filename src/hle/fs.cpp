@@ -154,6 +154,49 @@ bool TraceSave(const std::string& path) {
     const std::string& dir = dsr::GetRuntime().config.save_dir;
     return path.compare(0, dir.size(), dir) == 0;
 }
+// Save writes: the game rewrites its save slot many times a second. A write of exactly the bytes the last
+// write to the same place left there changes nothing and is skipped (no write, no flush: the flash is spared);
+// changed writes are counted and the first few logged with where they differ (what makes the game save).
+struct SaveCopy {
+    std::vector<uint8_t> data;
+};
+std::mutex g_save_copy_mutex;
+std::unordered_map<std::string, SaveCopy> g_save_copies;  // "path@offset"
+std::atomic<uint64_t> g_save_same{0}, g_save_changed{0};
+// A file replaced, resized, renamed or deleted: what was written before says nothing about it any more.
+void ForgetSaveCopies() {
+    std::lock_guard<std::mutex> lk(g_save_copy_mutex);
+    g_save_copies.clear();
+}
+bool SaveWriteUnchanged(const std::string& path, int64_t off, const void* buf, size_t size) {
+    const std::string& dir = dsr::GetRuntime().config.save_dir;
+    if (path.compare(0, dir.size(), dir) != 0 || size > (8u << 20)) return false;
+    const std::string key = path + "@" + std::to_string(off);
+    const uint8_t* p = static_cast<const uint8_t*>(buf);
+    std::lock_guard<std::mutex> lk(g_save_copy_mutex);
+    SaveCopy& c = g_save_copies[key];
+    if (c.data.size() == size && memcmp(c.data.data(), p, size) == 0) {
+        g_save_same.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    if (c.data.size() == size) {
+        size_t first = SIZE_MAX, last = 0, n = 0;
+        for (size_t i = 0; i < size; i++)
+            if (c.data[i] != p[i]) {
+                first = std::min(first, i);
+                last = i;
+                n++;
+            }
+        static int logged = 0;
+        if (logged++ < 12)
+            LOGI(kTag, "save write changed: %s offset %lld: %zu of %zu bytes differ, from byte 0x%zx to 0x%zx", BaseName(path),
+                 (long long)off, n, size, first, last);
+    }
+    g_save_changed.fetch_add(1, std::memory_order_relaxed);
+    c.data.assign(p, p + size);
+    return false;
+}
+
 // Times one call; `detail` (a file name) and `bytes` describe it in the slow-call report.
 struct FsTimer {
     FsKind kind;
@@ -163,6 +206,7 @@ struct FsTimer {
     int64_t t0 = FsNow();
     // Save trace (see TraceSave): the call, its offset and result.
     const char* op = nullptr;
+    const char* guest = nullptr;  // the game's path, when the call has one
     int64_t off = -1;
     uint32_t rc = 0;
     FsTimer(FsKind k, uintptr_t ret, const char* d = nullptr, size_t b = 0) : kind(k), caller(ret), detail(d), bytes(b) {}
@@ -181,9 +225,9 @@ struct FsTimer {
         if (op) {
             const uintptr_t base = dsr::GetRuntime().main.base();
             const char* who = dsr::hle::os::CurrentThreadName();
-            LOGI(kTag, "save trace: %s %s %s offset %lld, %zu bytes -> 0x%x (%.2f ms, from main+0x%lx)",
+            LOGI(kTag, "save trace: %s %s %s offset %lld, %zu bytes -> 0x%x (%.2f ms, from main+0x%lx)%s%s%s",
                  who ? who : "host", op, detail ? detail : "", (long long)off, bytes, rc, ns / 1e6,
-                 (unsigned long)(caller - base));
+                 (unsigned long)(caller - base), guest ? " ('" : "", guest ? guest : "", guest ? "')" : "");
         }
         FsStat& st = g_fs_stats[kind];
         st.calls.fetch_add(1, std::memory_order_relaxed);
@@ -225,6 +269,10 @@ void FsReport() {
         }
     }
     if (!line.empty()) LOGI(kTag, "file system calls (last 10 s): %s", line.c_str());
+    const uint64_t same = g_save_same.exchange(0), changed = g_save_changed.exchange(0);
+    if (same || changed)
+        LOGI(kTag, "save writes (last 10 s): %llu changed the save, %llu were identical to what was there (skipped)",
+             (unsigned long long)changed, (unsigned long long)same);
 }
 struct FsReportInstall {
     FsReportInstall() { dsr::profiler::SetReportHook(FsReport); }
@@ -368,6 +416,7 @@ HLE_FUNC(_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE, uint32_
          (HostFile * f, int64_t off, const void* buf, size_t size, const int* option)) {
     FS_TIMED(kFsWrite, FS_CALLER, BaseName(f->path), size);
     fs_timer_.Trace((option && (*option & 1)) ? "WriteFile (flush)" : "WriteFile", f->path, off);
+    if (SaveWriteUnchanged(f->path, off, buf, size)) return fs_timer_.Ret(kOk);  // already on disk
     f->dirty = true;
     if (!(f->mode & kAllowAppend)) {
         struct stat st;
@@ -400,6 +449,7 @@ HLE_FUNC(_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE, uint32_t, fs_GetFileSize, (
 HLE_FUNC(_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl, uint32_t, fs_SetFileSize, (HostFile * f, int64_t size)) {
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(f->path));
     fs_timer_.Trace("SetFileSize", f->path, size);
+    ForgetSaveCopies();
     f->dirty = true;
     return fs_timer_.Ret(ftruncate(f->fd, size) == 0 ? kOk : FromErrno(errno));
 }
@@ -407,6 +457,7 @@ HLE_FUNC(_ZN2nn2fs10CreateFileEPKcl, uint32_t, fs_CreateFile, (const char* path,
     RESOLVE_OR_FAIL(path, host);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(host));
     fs_timer_.Trace("CreateFile", host);
+    ForgetSaveCopies();
     MarkDirtyFile(host);
     MarkDirtyDir(host);
     int fd = open(host.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0664);
@@ -419,6 +470,7 @@ HLE_FUNC(_ZN2nn2fs10DeleteFileEPKc, uint32_t, fs_DeleteFile, (const char* path))
     RESOLVE_OR_FAIL(path, host);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(host));
     fs_timer_.Trace("DeleteFile", host);
+    ForgetSaveCopies();
     MarkDirtyDir(host);
     return fs_timer_.Ret(unlink(host.c_str()) == 0 ? kOk : FromErrno(errno));
 }
@@ -427,6 +479,7 @@ HLE_FUNC(_ZN2nn2fs10RenameFileEPKcS2_, uint32_t, fs_RenameFile, (const char* fro
     RESOLVE_OR_FAIL(to, b);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(b));
     fs_timer_.Trace("RenameFile", b);
+    ForgetSaveCopies();
     MarkDirtyDir(a);
     MarkDirtyDir(b);
     struct stat st;
@@ -446,6 +499,7 @@ HLE_FUNC(_ZN2nn2fs15DeleteDirectoryEPKc, uint32_t, fs_DeleteDirectory, (const ch
     RESOLVE_OR_FAIL(path, host);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(host));
     fs_timer_.Trace("DeleteDirectory", host);
+    ForgetSaveCopies();
     MarkDirtyDir(host);
     return fs_timer_.Ret(rmdir(host.c_str()) == 0 ? kOk : FromErrno(errno));
 }
@@ -453,6 +507,7 @@ HLE_FUNC(_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc, uint32_t, fs_DeleteDirectory
     RESOLVE_OR_FAIL(path, host);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(host));
     fs_timer_.Trace("DeleteDirectoryRecursively", host);
+    ForgetSaveCopies();
     MarkDirtyDir(host);
     return fs_timer_.Ret(RemoveTree(host) == 0 ? kOk : FromErrno(errno));
 }
@@ -461,6 +516,7 @@ HLE_FUNC(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc, uint32_t, fs_Get
     RESOLVE_OR_FAIL(path, host);
     FS_TIMED(kFsMeta, FS_CALLER, BaseName(host));
     fs_timer_.Trace("GetEntryType", host);
+    fs_timer_.guest = path;
     struct stat st;
     if (stat(host.c_str(), &st) != 0) return fs_timer_.Ret(FromErrno(errno));
     *out = S_ISDIR(st.st_mode) ? 0 : 1;
