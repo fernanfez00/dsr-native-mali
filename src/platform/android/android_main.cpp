@@ -234,6 +234,30 @@ bool RequestTextImpl(const char* title, const std::u16string& initial, int max_l
     if (!ok) LOGW(kTag, "could not show the text input dialog");
     return ok;
 }
+// platform::ShowNotice: a toast from the activity (GameActivity.showNotice runs it on the UI thread).
+void ShowNoticeImpl(const char* text) {
+    android_app* app = g_app_for_files;
+    if (!app) return;
+    JavaVM* vm = app->activity->vm;
+    JNIEnv* env = nullptr;
+    bool attached_here = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+        attached_here = true;
+    }
+    jobject activity = app->activity->clazz;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID m = env->GetMethodID(cls, "showNotice", "(Ljava/lang/String;)V");
+    if (m && !env->ExceptionCheck()) {
+        jstring jt = env->NewStringUTF(text);
+        env->CallVoidMethod(activity, m, jt);
+        env->DeleteLocalRef(jt);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(cls);
+    if (attached_here) vm->DetachCurrentThread();
+}
+
 int CreateUserFileImpl(const char* name, const char* mime_type) {
     if (!g_app_for_files) return -1;
     std::string why;
@@ -330,6 +354,7 @@ void SetupLogFile(android_app* app) {
     g_app_for_files = app;
     dsr::platform::SetCreateUserFile(&CreateUserFileImpl);
     dsr::platform::SetRequestText(&RequestTextImpl);
+    dsr::platform::SetShowNotice(&ShowNoticeImpl);
     time_t now = time(nullptr);
     tm t;
     localtime_r(&now, &t);

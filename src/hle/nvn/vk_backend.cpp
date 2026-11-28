@@ -1683,6 +1683,8 @@ public:
         Slot& sl = slots_[slot_];
         sl.partial = false;
         sl.ts_written = sl.ts != VK_NULL_HANDLE;
+        sl.draws = drawn_ - slot_draw_mark_;
+        slot_draw_mark_ = drawn_;
         sl.pending = true;
         sl.submits_queued++;
         sl.seq = ++submit_seq_;
@@ -1711,7 +1713,7 @@ public:
     // below) takes over from the next list, loading textures and geometry from game memory again. What only the GPU
     // held (render targets) is lost: a frame or two may look wrong.
     // ======================================================================================================
-    static constexpr int kLostDriver = 1, kLostHung = 2, kLostTest = 3;
+    static constexpr int kLostDriver = 1, kLostHung = 2, kLostTest = 3, kLostSilent = 4;
     bool Lost() const { return lost_.load(std::memory_order_acquire) != 0; }
     int LostReason() const { return lost_.load(std::memory_order_acquire); }
     bool InitFailed() {
@@ -4489,11 +4491,48 @@ private:
         recording_ = false;
         Begin();
     }
+    // Silent GPU fault: some drivers (MediaTek's Mali driver, "MTK_SUPPRESS_DEVICE_LOST") never report a lost device.
+    // After a GPU fault (logcat: "GROUP_ERROR_FATAL") they rebuild the queue themselves; fences still signal and frames
+    // still "present", but the GPU no longer runs what is submitted: the picture freezes while the game goes on
+    // (Infinix X6871 log: GPU busy 15.5 s per 10 s, then 4 ms). Seen here: submissions with many draws that take no
+    // GPU time (their timestamps are missing or a few microseconds apart). Once the GPU has given real timings for
+    // this renderer, 60 such submissions in a row over at least 2 s are handled as a lost GPU (the renderer restarts).
+    uint64_t gpu_good_timings_ = 0, slot_draw_mark_ = 0;
+    int gpu_empty_run_ = 0;
+    std::chrono::steady_clock::time_point gpu_empty_since_{};
+    uint64_t gpu_empty_total_ = 0;
+    void CheckSilentFault(const Slot& sl, double ms) {
+        if (sl.draws < 50) return;  // too little work to tell
+        if (ms >= 0.02) {
+            gpu_good_timings_++;
+            gpu_empty_run_ = 0;
+            return;
+        }
+        gpu_empty_total_++;
+        if (gpu_good_timings_ < 100) return;  // timestamps never worked on this renderer: no judgement
+        const auto now = std::chrono::steady_clock::now();
+        if (gpu_empty_run_++ == 0) {
+            gpu_empty_since_ = now;
+            LOGW(kTag, "a submission of %llu draws took no GPU time (%.3f ms): watching for a silent GPU fault",
+                 (unsigned long long)sl.draws, ms);
+        }
+        if (gpu_empty_run_ >= 60 && now - gpu_empty_since_ >= std::chrono::seconds(2)) {
+            int expected = 0;
+            if (lost_.compare_exchange_strong(expected, kLostSilent))
+                LOGW(kTag, "the GPU has run none of the last %d submissions (%.1f s; the driver hides the fault): "
+                           "handled as a lost GPU (the renderer restarts)",
+                     gpu_empty_run_,
+                     std::chrono::duration<double>(now - gpu_empty_since_).count());
+        }
+    }
     void CollectGpuTime(Slot& sl) {
         if (!sl.ts || !sl.ts_written) return;
         sl.ts_written = false;
-        uint64_t t[2];
-        if (vkGetQueryPoolResults(device_, sl.ts, 0, 2, sizeof(t), t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0]) {
+        uint64_t t[2] = {0, 0};
+        const VkResult qr = vkGetQueryPoolResults(device_, sl.ts, 0, 2, sizeof(t), t, 8, VK_QUERY_RESULT_64_BIT);
+        CheckSilentFault(sl, qr == VK_SUCCESS && t[1] > t[0]
+                                 ? double(t[1] - t[0]) * props_.limits.timestampPeriod / 1e6 : 0.0);
+        if (qr == VK_SUCCESS && t[1] > t[0]) {
             const double ms = double(t[1] - t[0]) * props_.limits.timestampPeriod / 1e6;
             gpu_busy_ms_ += ms;
             // A list split into several submissions (split_submit): its parts' time goes with its last part, so a
@@ -4518,6 +4557,8 @@ private:
         EmitPendingCopies();  // before the submission (they fill this slot's stream)
         Slot& sl = slots_[slot_];
         sl.ts_written = sl.ts != VK_NULL_HANDLE;
+        sl.draws = drawn_ - slot_draw_mark_;
+        slot_draw_mark_ = drawn_;
         sl.pending = true;
         sl.submits_queued++;
         sl.seq = ++submit_seq_;
@@ -9500,6 +9541,7 @@ private:
         std::vector<VkDescriptorPool> extra_pools;  // when `pool` fills up (recorder thread)
         std::vector<VkFramebuffer> framebuffers;    // render pass fallback: destroyed when the slot is reused
         uint64_t submits_queued = 0;                // render thread
+        uint64_t draws = 0;                         // draws recorded into the submission (silent GPU fault check)
         bool partial = false;                       // a list's earlier part (split_submit): GPU time counted with the rest
         uint64_t seq = 0;                           // submit_seq_ of its last submission
         std::atomic<uint64_t> submits_done{0};      // recorder, after vkQueueSubmit
@@ -9580,6 +9622,8 @@ private:
         VulkanBackend* b = cur_.load(std::memory_order_relaxed);
         if (b->Lost()) return Replace(b, b->LostReason() == VulkanBackend::kLostTest ? "test_gpu_lost"
                                          : b->LostReason() == VulkanBackend::kLostHung ? "the GPU hung"
+                                         : b->LostReason() == VulkanBackend::kLostSilent
+                                               ? "the GPU stopped running work (a fault the driver did not report)"
                                                                                        : "the GPU device was lost");
         // A renderer made after a loss that could not start (the driver not ready yet): tried again, a few times.
         if (generation_ > 1 && failed_tries_ < 10 && b->InitFailed() &&
@@ -9592,6 +9636,17 @@ private:
     VulkanBackend* Replace(VulkanBackend* old, const char* why) {
         generation_++;
         LOGW(kTag, "GPU recovery %d: %s, restarting the renderer", generation_ - 1, why);
+        // Told on screen (not for the test setting): the picture may have frozen for a few seconds.
+        if (old->LostReason() != VulkanBackend::kLostTest && old->LostReason() != 0) {
+            const auto now = std::chrono::steady_clock::now();
+            recent_.push_back(now);
+            while (!recent_.empty() && now - recent_.front() > std::chrono::minutes(10)) recent_.erase(recent_.begin());
+            dsr::platform::ShowNotice(
+                recent_.size() >= 3
+                    ? "The GPU driver keeps failing: the renderer was restarted again. Lowering the render scale, "
+                      "the FPS cap or turning off experimental GPU settings may help."
+                    : "GPU driver error: the renderer was restarted.");
+        }
         const DrawState st = old->TakeState();
         old->Abandon();
         retired_.push_back(old);
@@ -9606,6 +9661,7 @@ private:
     std::vector<VulkanBackend*> retired_;
     int generation_ = 1, failed_tries_ = 0;
     std::chrono::steady_clock::time_point made_{};
+    std::vector<std::chrono::steady_clock::time_point> recent_;  // recoveries in the last 10 minutes
 };
 
 }  // namespace

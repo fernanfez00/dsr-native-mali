@@ -327,6 +327,14 @@ double WaitWhilePaused(int grace_ms) {
     g_pause_cv.wait(lk, [] { return !g_paused.load(); });
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
+namespace {
+std::atomic<ShowNoticeFn> g_show_notice{nullptr};
+}
+void SetShowNotice(ShowNoticeFn fn) { g_show_notice.store(fn); }
+void ShowNotice(const char* text) {
+    LOGI("platform", "notice: %s", text);
+    if (ShowNoticeFn fn = g_show_notice.load()) fn(text);
+}
 void SetCreateUserFile(CreateUserFileFn fn) { g_create.store(fn); }
 int CreateUserFile(const char* name, const char* mime_type) {
     CreateUserFileFn fn = g_create.load();

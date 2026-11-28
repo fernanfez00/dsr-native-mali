@@ -156,6 +156,11 @@ public class GameActivity extends NativeActivity {
         return sLastExits;
     }
 
+    /** Called by native code (any thread): a short message on screen, e.g. after a GPU driver error. */
+    public void showNotice(final String text) {
+        runOnUiThread(() -> android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show());
+    }
+
     /** Called by native code when the game files are not found, or found incomplete. */
     public void askGameFolder(final String title, final String message) {
         sFolderState = 1;

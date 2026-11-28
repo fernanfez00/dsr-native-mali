@@ -22,6 +22,11 @@ void DeliverText(bool ok, const std::u16string& text);
 // True once a result is available (then fills ok/text and clears it).
 bool TakeText(bool* ok, std::u16string* text);
 
+// Shows a short message on screen (Android: a toast). Any thread; no-op where nothing is registered.
+using ShowNoticeFn = void (*)(const char* text);
+void SetShowNotice(ShowNoticeFn fn);
+void ShowNotice(const char* text);
+
 // Keeps the calling thread on the performance cores (off the slowest cluster, where the scheduler puts
 // threads that sleep between bursts of work every frame). Once per thread; logs `who`. No-op elsewhere.
 // On chips with fewer than 4 fast cores only `essential` threads (the game's main thread) are pinned; the others
