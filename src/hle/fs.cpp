@@ -207,6 +207,7 @@ struct FsTimer {
     // Save trace (see TraceSave): the call, its offset and result.
     const char* op = nullptr;
     const char* guest = nullptr;  // the game's path, when the call has one
+    const void* frame = nullptr;  // the HLE function's frame record: the game's call chain starts there
     int64_t off = -1;
     uint32_t rc = 0;
     FsTimer(FsKind k, uintptr_t ret, const char* d = nullptr, size_t b = 0) : kind(k), caller(ret), detail(d), bytes(b) {}
@@ -228,6 +229,21 @@ struct FsTimer {
             LOGI(kTag, "save trace: %s %s %s offset %lld, %zu bytes -> 0x%x (%.2f ms, from main+0x%lx)%s%s%s",
                  who ? who : "host", op, detail ? detail : "", (long long)off, bytes, rc, ns / 1e6,
                  (unsigned long)(caller - base), guest ? " ('" : "", guest ? guest : "", guest ? "')" : "");
+            // The game's call chain (frame records: [fp] = the caller's fp, [fp + 8] = the return address).
+            const loader::Module& m = dsr::GetRuntime().main;
+            std::string chain;
+            uintptr_t fp = frame ? *static_cast<const uintptr_t*>(frame) : 0;
+            for (int i = 0; i < 14 && fp && !(fp & 15); i++) {
+                const uintptr_t* rec = reinterpret_cast<const uintptr_t*>(fp);
+                const uintptr_t lr = rec[1], next = rec[0];
+                if (!m.Contains(lr)) break;
+                char b[24];
+                snprintf(b, sizeof(b), "%smain+0x%lx", chain.empty() ? "" : " < ", (unsigned long)(lr - base));
+                chain += b;
+                if (next <= fp || next - fp > (1u << 20)) break;
+                fp = next;
+            }
+            if (!chain.empty()) LOGI(kTag, "save trace:   called through %s", chain.c_str());
         }
         FsStat& st = g_fs_stats[kind];
         st.calls.fetch_add(1, std::memory_order_relaxed);
@@ -248,7 +264,9 @@ struct FsTimer {
         }
     }
 };
-#define FS_TIMED(...) FsTimer fs_timer_(__VA_ARGS__)
+#define FS_TIMED(...)              \
+    FsTimer fs_timer_(__VA_ARGS__); \
+    fs_timer_.frame = __builtin_frame_address(0)
 #define FS_CALLER reinterpret_cast<uintptr_t>(__builtin_return_address(0))
 
 void FsReport() {
