@@ -1024,21 +1024,44 @@ void SaveRequestFlagged(bool b) {
         m[0xb21] = b ? 1 : 0;
     }
 }
+// Finds a small function by its instructions: `adrp x8, page; ldr x8, [x8, #off]` (any page / offset) and then
+// `words` exactly. Returns its image offset (0: none or more than one) and the address the pair loads from.
+uint64_t FindSaveSetter(const Runtime& rt, const uint32_t* words, size_t n, uintptr_t* global) {
+    const uint32_t* text = reinterpret_cast<const uint32_t*>(rt.main.base());
+    const size_t count = rt.main.nso().text.size / 4;
+    uint64_t found = 0;
+    for (size_t i = 0; i + 2 + n < count; i++) {
+        if ((text[i] & 0x9f00001f) != 0x90000008 || (text[i + 1] & 0xffc003ff) != 0xf9400108) continue;
+        if (memcmp(text + i + 2, words, n * 4) != 0) continue;
+        if (found) return 0;  // not unique
+        found = i * 4;
+        const uint32_t w = text[i];
+        int64_t imm = int64_t(((w >> 5) & 0x7ffff) << 2 | ((w >> 29) & 3));
+        if (imm & (1 << 20)) imm -= 1 << 21;
+        const uintptr_t page = ((rt.main.base() + found) & ~uintptr_t(0xfff)) + uintptr_t(imm << 12);
+        *global = page + ((text[i + 1] >> 10) & 0xfff) * 8;
+    }
+    return found;
+}
 void InstallSaveRequestDiag(Runtime& rt, const GameBuild& b) {
     if (strncmp(b.build_id, "6569410c", 8) != 0 && strncmp(b.build_id, "df3766a2", 8) != 0) return;
-    static const uint32_t kPlain[7] = {0xf000fb88, 0xf9449908, 0x396d4109, 0x34000069, 0x320003e9, 0x392c7d09, 0xd65f03c0};
-    static const uint32_t kFlagged[7] = {0x9000fb88, 0xf9449908, 0x396d4109, 0x340000c9, 0x320003e9, 0x1200000a, 0x392c8109};
-    const uint32_t* plain = reinterpret_cast<const uint32_t*>(rt.main.base() + 0x350a0c);
-    const uint32_t* flagged = reinterpret_cast<const uint32_t*>(rt.main.base() + 0x3534d4);
-    if (memcmp(plain, kPlain, sizeof(kPlain)) != 0 || memcmp(flagged, kFlagged, sizeof(kFlagged)) != 0) {
-        LOGW("hooks", "save request diagnostics: the setters are not where expected in this build");
+    // After the adrp / ldr pair (1.0.3, build 6569410c: main+0x350a0c and main+0x3534d4).
+    static const uint32_t kPlain[5] = {0x396d4109, 0x34000069, 0x320003e9, 0x392c7d09, 0xd65f03c0};
+    static const uint32_t kFlagged[6] = {0x396d4109, 0x340000c9, 0x320003e9, 0x1200000a, 0x392c8109, 0x392c7d09};
+    uintptr_t g1 = 0, g2 = 0;
+    const uint64_t plain = FindSaveSetter(rt, kPlain, 5, &g1);
+    const uint64_t flagged = FindSaveSetter(rt, kFlagged, 6, &g2);
+    if (!plain || !flagged || g1 != g2) {
+        LOGW("hooks", "save request diagnostics: the setters were not found (0x%lx, 0x%lx)", (unsigned long)plain,
+             (unsigned long)flagged);
         return;
     }
-    g_save_man = reinterpret_cast<uint8_t**>(rt.main.base() + 0x22c3930);
+    g_save_man = reinterpret_cast<uint8_t**>(g1);
     std::string err;
-    if (rt.main.HookFunction(0x350a0c, reinterpret_cast<void*>(&SaveRequestPlain), &err) &&
-        rt.main.HookFunction(0x3534d4, reinterpret_cast<void*>(&SaveRequestFlagged), &err))
-        LOGI("hooks", "save request diagnostics on (callers of the save request setters, every 10 s)");
+    if (rt.main.HookFunction(plain, reinterpret_cast<void*>(&SaveRequestPlain), &err) &&
+        rt.main.HookFunction(flagged, reinterpret_cast<void*>(&SaveRequestFlagged), &err))
+        LOGI("hooks", "save request diagnostics on: setters at main+0x%lx, main+0x%lx (callers every 10 s)",
+             (unsigned long)plain, (unsigned long)flagged);
     else
         LOGW("hooks", "save request diagnostics: %s", err.c_str());
 }
