@@ -94,6 +94,33 @@ struct SteadyClockTimePoint {
     int64_t value;
     uint8_t source_id[16];
 };
+// The time zone, as one fixed offset from UTC: the one in effect when the game started. The game computes its
+// autosave time (5 minutes after the last save) as ToPosixTime(first day of the month, 0:00) plus the days,
+// hours and minutes since: with the device's real zone rules, a month that began in summer time and is now in
+// winter time (1 November - early March in New York) came out an hour early, so the autosave was always overdue
+// and the game saved every frame (with the save icon always on screen). With one offset both directions agree
+// on every date.
+long ZoneOffset() {
+    static const long offset = [] {
+        time_t now = ::time(nullptr);
+        tm lt;
+        localtime_r(&now, &lt);
+        return long(lt.tm_gmtoff);
+    }();
+    return offset;
+}
+const char* ZoneName() {
+    static char name[8] = "UTC";
+    static bool once = [] {
+        time_t now = ::time(nullptr);
+        tm lt;
+        localtime_r(&now, &lt);
+        if (lt.tm_zone) snprintf(name, sizeof(name), "%s", lt.tm_zone);
+        return true;
+    }();
+    (void)once;
+    return name;
+}
 CalendarTime FromTm(const tm& t) {
     return {int16_t(t.tm_year + 1900), int8_t(t.tm_mon + 1), int8_t(t.tm_mday), int8_t(t.tm_hour),
             int8_t(t.tm_min), int8_t(t.tm_sec), 0};
@@ -122,17 +149,17 @@ HLE_FUNC(_ZN2nn4time19StandardSteadyClock3nowEv, SteadyClockTimePoint, time_Stea
 }
 HLE_FUNC(_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE, uint32_t,
          time_ToCalendarTime, (CalendarTime * out, CalendarAdditionalInfo* info, const int64_t* posix)) {
-    time_t t = time_t(*posix);
+    time_t t = time_t(*posix + ZoneOffset());
     tm lt;
-    localtime_r(&t, &lt);
+    gmtime_r(&t, &lt);
     *out = FromTm(lt);
     if (info) {
         memset(info, 0, sizeof(*info));
         info->day_of_week = lt.tm_wday;
         info->day_of_year = lt.tm_yday;
-        strncpy(info->tz_name, lt.tm_zone ? lt.tm_zone : "UTC", sizeof(info->tz_name));
-        info->is_dst = lt.tm_isdst > 0;
-        info->utc_offset_seconds = int32_t(lt.tm_gmtoff);
+        strncpy(info->tz_name, ZoneName(), sizeof(info->tz_name));
+        info->is_dst = false;
+        info->utc_offset_seconds = int32_t(ZoneOffset());
     }
     return kOk;
 }
@@ -152,8 +179,7 @@ HLE_FUNC(_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE, uint
     t.tm_hour = c->hour;
     t.tm_min = c->minute;
     t.tm_sec = c->second;
-    t.tm_isdst = -1;
-    if (count > 0) out[0] = int64_t(mktime(&t));
+    if (count > 0) out[0] = int64_t(timegm(&t)) - ZoneOffset();
     if (out_count) *out_count = count > 0 ? 1 : 0;
     return kOk;
 }
