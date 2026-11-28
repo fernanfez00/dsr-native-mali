@@ -263,7 +263,7 @@ struct BlockedSpan {
     int64_t from, to;
     uintptr_t where;
     char who[24];
-    char what[72];
+    char what[200];
 };
 constexpr size_t kMaxSpans = 1024;
 std::mutex g_span_mutex;
@@ -296,7 +296,7 @@ std::string BlockedIn(int64_t from, int64_t to) {
     std::string out;
     for (size_t i = 0; i < hits.size() && i < 6; i++) {
         const BlockedSpan& b = hits[i].s;
-        char buf[256];
+        char buf[400];
         snprintf(buf, sizeof(buf), "%s%s %.0f ms in %s (from %s, %.0f ms before the frame's end)", out.empty() ? "" : " | ",
                  b.who, (b.to - b.from) / 1e6, b.what, b.where ? Locate(b.where).label.c_str() : "?",
                  (to - b.to) / 1e6);

@@ -407,9 +407,26 @@ void NoteBlocked(bool blocked) {
         // that covered a slow frame.
         const char* kind = t->wait_kind.load(std::memory_order_relaxed);
         if (since && now - since >= 4'000'000 && profiler::Enabled() && !(kind && strcmp(kind, "SleepThread") == 0)) {
-            char what[72];
-            snprintf(what, sizeof(what), "%s @%llx", kind ? kind : "a wait",
-                     (unsigned long long)t->wait_obj.load(std::memory_order_relaxed));
+            char what[200];
+            int len = snprintf(what, sizeof(what), "%s @%llx", kind ? kind : "a wait",
+                               (unsigned long long)t->wait_obj.load(std::memory_order_relaxed));
+            // Waits of 8 ms on: what the game was doing, its call chain from here (frame records; ours are kept
+            // too, so the walk passes through them into the game's).
+            if (now - since >= 8'000'000) {
+                const auto& m = GetRuntime().main;
+                uintptr_t fp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+                int found = 0;
+                for (int i = 0; i < 40 && fp && !(fp & 7) && found < 6 && len < int(sizeof(what)) - 24; i++) {
+                    const uintptr_t* rec = reinterpret_cast<const uintptr_t*>(fp);
+                    const uintptr_t lr = rec[1], next = rec[0];
+                    if (m.Contains(lr)) {
+                        len += snprintf(what + len, sizeof(what) - len, " < main+0x%lx", (unsigned long)(lr - m.base()));
+                        found++;
+                    }
+                    if (next <= fp || next - fp > (1u << 20)) break;
+                    fp = next;
+                }
+            }
             profiler::NoteBlockedSpan(t->name.c_str(), what, t->wait_ret.load(std::memory_order_relaxed), since, now);
         }
     }
