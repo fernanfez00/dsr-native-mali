@@ -324,13 +324,27 @@ void ReportSlowFrames() {
             const Sample& s = g_samples[i & (kMaxSamples - 1)];
             if (s.t_ns < f.from || s.t_ns > f.to || s.slot < 0 || s.slot >= n) continue;
             count[s.slot]++;
+            // The game's frame, and when the CPU was outside the game's code at that moment: where (the innermost
+            // place) and the outermost frame of ours on the way (which of our functions the game had called).
             std::string label;
+            int game_depth = -1;
             for (int d = 0; d < s.depth && label.empty(); d++) {
                 const uintptr_t a = d == 0 ? s.pc[0] : s.pc[d] - 4;
                 const Where x = Locate(a);
-                if (x.kind == 0) label = Locate(a & ~uintptr_t(63)).label;
+                if (x.kind == 0) {
+                    label = Locate(a & ~uintptr_t(63)).label;
+                    game_depth = d;
+                }
             }
             if (label.empty()) label = Locate(s.pc[0] & ~uintptr_t(63)).label;
+            if (game_depth > 0) {
+                std::string inner = Locate(s.pc[0] & ~uintptr_t(63)).label, outer;
+                for (int d = game_depth - 1; d >= 1 && outer.empty(); d--) {
+                    const Where x = Locate(s.pc[d] - 4);
+                    if (x.kind == 1) outer = Locate((s.pc[d] - 4) & ~uintptr_t(63)).label;
+                }
+                label += " (in " + inner + (outer.empty() || outer == inner ? "" : " via " + outer) + ")";
+            }
             where[s.slot][label]++;
         }
         std::string line;
@@ -339,10 +353,10 @@ void ReportSlowFrames() {
             std::vector<std::pair<int, std::string>> v;
             for (auto& [k, c] : where[slot]) v.push_back({c, k});
             std::sort(v.rbegin(), v.rend());
-            char b[512];
+            char b[1024];
             int len = snprintf(b, sizeof(b), "%s%s ~%d ms CPU [", line.empty() ? "" : " | ", g_slots[slot].name,
                                count[slot] * 2);
-            for (size_t i = 0; i < v.size() && i < 3 && len < int(sizeof(b)) - 80; i++)
+            for (size_t i = 0; i < v.size() && i < 3 && len < int(sizeof(b)) - 240; i++)
                 len += snprintf(b + len, sizeof(b) - len, "%s%s x%d", i ? ", " : "", v[i].second.c_str(), v[i].first);
             snprintf(b + len, sizeof(b) - len, "]");
             line += b;
