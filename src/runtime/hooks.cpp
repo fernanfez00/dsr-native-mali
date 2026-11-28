@@ -965,6 +965,84 @@ int FrameRateNow() {
 
 const char* GameVersion() { return g_build ? g_build->version : nullptr; }
 
+// ---- save request diagnostics (the game saving ~28 times a second) ----------------------------------------
+// The game's save manager (GameDataMan-like object at main+0x22c3930 in 1.0.3) saves when its request byte (+0xb1f)
+// is set and no save is running (+0xb2c). Two small functions set it (only while saving is allowed, +0xb50):
+// 0x350a0c (no arguments) and 0x3534d4 (bool, also sets +0xb20 / +0xb21); a timer in 0x350820 sets it every 5
+// minutes. Both setters are replaced by equivalents that also count their callers, reported every 10 s, to find
+// what requests a save every frame. Same code at the same place in both 1.0.3 builds.
+struct SaveCaller {
+    uintptr_t ret;
+    uint64_t calls;
+};
+std::mutex g_save_req_mutex;
+SaveCaller g_save_callers[16];
+uint64_t g_save_req_total = 0;
+uint8_t** g_save_man = nullptr;
+std::chrono::steady_clock::time_point g_save_report;
+void NoteSaveRequest(uintptr_t ret) {
+    const uintptr_t base = GetRuntime().main.base();
+    std::lock_guard<std::mutex> lk(g_save_req_mutex);
+    g_save_req_total++;
+    int free_slot = -1;
+    for (int i = 0; i < 16; i++) {
+        if (g_save_callers[i].calls && g_save_callers[i].ret == ret) {
+            g_save_callers[i].calls++;
+            free_slot = -2;
+            break;
+        }
+        if (!g_save_callers[i].calls && free_slot == -1) free_slot = i;
+    }
+    if (free_slot >= 0) g_save_callers[free_slot] = {ret, 1};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_save_report >= std::chrono::seconds(10)) {
+        g_save_report = now;
+        std::string line;
+        for (SaveCaller& c : g_save_callers) {
+            if (!c.calls) continue;
+            char b[64];
+            snprintf(b, sizeof(b), "%smain+0x%lx x%llu", line.empty() ? "" : ", ", (unsigned long)(c.ret - base),
+                     (unsigned long long)c.calls);
+            line += b;
+            c = {};
+        }
+        LOGI("hooks", "save requests (last 10 s): %llu, from %s", (unsigned long long)g_save_req_total, line.c_str());
+        g_save_req_total = 0;
+    }
+}
+void SaveRequestPlain() {
+    NoteSaveRequest(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+    uint8_t* m = *g_save_man;
+    if (m[0xb50]) m[0xb1f] = 1;
+}
+void SaveRequestFlagged(bool b) {
+    NoteSaveRequest(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+    uint8_t* m = *g_save_man;
+    if (m[0xb50]) {
+        m[0xb20] = 1;
+        m[0xb1f] = 1;
+        m[0xb21] = b ? 1 : 0;
+    }
+}
+void InstallSaveRequestDiag(Runtime& rt, const GameBuild& b) {
+    if (strncmp(b.build_id, "6569410c", 8) != 0 && strncmp(b.build_id, "df3766a2", 8) != 0) return;
+    static const uint32_t kPlain[7] = {0xf000fb88, 0xf9449908, 0x396d4109, 0x34000069, 0x320003e9, 0x392c7d09, 0xd65f03c0};
+    static const uint32_t kFlagged[7] = {0x9000fb88, 0xf9449908, 0x396d4109, 0x340000c9, 0x320003e9, 0x1200000a, 0x392c8109};
+    const uint32_t* plain = reinterpret_cast<const uint32_t*>(rt.main.base() + 0x350a0c);
+    const uint32_t* flagged = reinterpret_cast<const uint32_t*>(rt.main.base() + 0x3534d4);
+    if (memcmp(plain, kPlain, sizeof(kPlain)) != 0 || memcmp(flagged, kFlagged, sizeof(kFlagged)) != 0) {
+        LOGW("hooks", "save request diagnostics: the setters are not where expected in this build");
+        return;
+    }
+    g_save_man = reinterpret_cast<uint8_t**>(rt.main.base() + 0x22c3930);
+    std::string err;
+    if (rt.main.HookFunction(0x350a0c, reinterpret_cast<void*>(&SaveRequestPlain), &err) &&
+        rt.main.HookFunction(0x3534d4, reinterpret_cast<void*>(&SaveRequestFlagged), &err))
+        LOGI("hooks", "save request diagnostics on (callers of the save request setters, every 10 s)");
+    else
+        LOGW("hooks", "save request diagnostics: %s", err.c_str());
+}
+
 void InstallGameHooks() {
     Runtime& rt = GetRuntime();
     for (const GameBuild& b : kBuilds)
@@ -1119,6 +1197,7 @@ void InstallGameHooks() {
             LOGW("hooks", "dynamic buffer size not changed (%s)", err.c_str());
     }
     InstallSwipeCamera(rt, b);
+    InstallSaveRequestDiag(rt, b);
     const Hook hooks[] = {
         {b.log, reinterpret_cast<void*>(&EngineLog), "engine log"},
         {b.vlog, reinterpret_cast<void*>(&EngineLogV), "engine vlog"},
