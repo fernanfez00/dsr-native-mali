@@ -91,6 +91,71 @@ public class GameActivity extends NativeActivity {
         return f;
     }
 
+    // How the app's last runs ended (Android 11+: ApplicationExitInfo), for the run log: a process killed by the
+    // system (low memory, an unresponsive app, ...) leaves no crash report of its own, and its own logs just stop.
+    private static volatile String sLastExits = "";
+
+    private void readLastExits() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        try {
+            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> list =
+                    am.getHistoricalProcessExitReasons(getPackageName(), 0, 3);
+            StringBuilder b = new StringBuilder();
+            java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US);
+            for (android.app.ApplicationExitInfo e : list) {
+                b.append(fmt.format(new java.util.Date(e.getTimestamp()))).append(": ").append(exitReason(e.getReason()))
+                        .append(", status ").append(e.getStatus()).append(", importance ").append(e.getImportance())
+                        .append(", ").append(e.getRss() / 1024).append(" MB resident");
+                if (e.getDescription() != null) b.append(" (").append(e.getDescription()).append(")");
+                b.append('\n');
+                if (e.getReason() == android.app.ApplicationExitInfo.REASON_ANR) {
+                    try (java.io.InputStream in = e.getTraceInputStream()) {
+                        if (in != null) {
+                            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(in));
+                            String line;
+                            int n = 0;
+                            while ((line = r.readLine()) != null && n++ < 60) b.append("    ").append(line).append('\n');
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            sLastExits = b.toString();
+            for (String line : sLastExits.split("\n"))
+                if (!line.isEmpty()) android.util.Log.i("DSRNative", "previous run ended " + line);
+        } catch (Exception e) {
+            android.util.Log.w("DSRNative", "could not read how the last runs ended", e);
+        }
+    }
+
+    private static String exitReason(int r) {
+        switch (r) {
+            case 1: return "on its own (exit)";
+            case 2: return "by a signal";
+            case 3: return "low memory (killed by the system)";
+            case 4: return "Java crash";
+            case 5: return "native crash";
+            case 6: return "not responding (ANR)";
+            case 7: return "initialization failure";
+            case 8: return "permission change";
+            case 9: return "excessive resource use";
+            case 10: return "requested by the user";
+            case 11: return "user stopped";
+            case 12: return "dependency died";
+            case 13: return "other";
+            case 14: return "frozen";
+            case 15: return "package state change";
+            case 16: return "package updated";
+            default: return "unknown (" + r + ")";
+        }
+    }
+
+    /** Called by native code once the run log is open: how the previous runs ended. */
+    public static String lastExits() {
+        return sLastExits;
+    }
+
     /** Called by native code when the game files are not found, or found incomplete. */
     public void askGameFolder(final String title, final String message) {
         sFolderState = 1;
@@ -536,6 +601,7 @@ public class GameActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        readLastExits();
         readDisplayHz();
         requestStorageAccess();
         Window w = getWindow();

@@ -250,7 +250,34 @@ bool g_log_via_media_store = false;
 // after the run log: crashes our own log cannot see, the GPU driver's messages). Standard: Info-level logging, and old
 // files in the logs folder are removed, keeping the 10 newest starts' run logs, logcat files and shader dumps (frame
 // captures are left alone: the player made them).
+std::string JString(JNIEnv* env, jstring js);
 void ApplyLogMode(android_app* app, const dsr::RuntimeConfig& cfg, const std::string& base) {
+    {
+        // How the previous runs ended (GameActivity.lastExits): a run killed by the system has no crash report.
+        JavaVM* vm = app->activity->vm;
+        JNIEnv* env = nullptr;
+        bool attached_here = false;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) {
+            env = nullptr;
+            if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) attached_here = true;
+        }
+        if (env) {
+            jclass cls = env->GetObjectClass(app->activity->clazz);
+            jmethodID m = env->GetStaticMethodID(cls, "lastExits", "()Ljava/lang/String;");
+            std::string text;
+            if (m && !env->ExceptionCheck()) text = JString(env, static_cast<jstring>(env->CallStaticObjectMethod(cls, m)));
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(cls);
+            size_t pos = 0;
+            while (pos < text.size()) {
+                size_t e = text.find('\n', pos);
+                if (e == std::string::npos) e = text.size();
+                if (e > pos) LOGI(kTag, "previous run ended %s", text.substr(pos, e - pos).c_str());
+                pos = e + 1;
+            }
+            if (attached_here) vm->DetachCurrentThread();
+        }
+    }
     if (g_log_via_media_store) {
         char logcat_name[80];
         strftime(logcat_name, sizeof(logcat_name), "dsr_%Y%m%d_%H%M%S_logcat.txt", &g_log_time);
