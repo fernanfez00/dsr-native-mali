@@ -7662,7 +7662,7 @@ private:
     };
     static constexpr int kGeoMaxSegs = 16;
     int geo_segs_ = 8;
-    VkDeviceSize geo_seg_size_ = 24ull << 20;
+    VkDeviceSize geo_seg_size_ = 16ull << 20;
     int geo_cur_seg_ = 0;
     VkDeviceSize geo_seg_off_ = 0;
     uint32_t geo_seg_gen_[kGeoMaxSegs] = {};
@@ -7840,7 +7840,9 @@ private:
         vkBindBufferMemory(device_, geo_buf_, geo_mem_, 0);
         if (vkMapMemory(device_, geo_mem_, 0, geo_size_, 0, &p) != VK_SUCCESS) goto fail;
         geo_ptr_ = static_cast<uint8_t*>(p);
-        geo_segs_ = int(std::clamp<VkDeviceSize>(geo_size_ / (24ull << 20), 4, kGeoMaxSegs));
+        // 16 MB segments (the largest range the cache takes; 6 to 16 of them): two are always being emptied or about
+        // to be, and with 4 of 24 MB on a 96 MB cache (OnePlus 6T) that was half the cache: twice the copying.
+        geo_segs_ = int(std::clamp<VkDeviceSize>(geo_size_ / (16ull << 20), 6, kGeoMaxSegs));
         geo_seg_size_ = (geo_size_ / VkDeviceSize(geo_segs_)) & ~VkDeviceSize(63);
         LOGI(kTag, "geometry cache: %llu MB (%d segments of %llu MB, emptied one at a time)",
              (unsigned long long)(geo_size_ >> 20), geo_segs_, (unsigned long long)(geo_seg_size_ >> 20));

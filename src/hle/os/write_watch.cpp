@@ -59,7 +59,10 @@ void Release(size_t i, bool count_fault) {
 
 void SegvHandler(int sig, siginfo_t* info, void* ctx) {
     const int saved_errno = errno;
-    if (info && info->si_code == SEGV_ACCERR) {
+    // A write to a protected page is SEGV_ACCERR; some kernels (a OnePlus 6T's, Android 11) report it as
+    // SEGV_MAPERR, for a page not touched before it was protected. The heap is mapped in full, so either code at a
+    // heap address is ours to look at (otherwise the game crashed in its first copy into a watched buffer).
+    if (info && (info->si_code == SEGV_ACCERR || info->si_code == SEGV_MAPERR)) {
         const uintptr_t a = reinterpret_cast<uintptr_t>(info->si_addr);
         if (a >= g_base && a < g_end) {
             const size_t i = (a - g_base) >> g_shift;
